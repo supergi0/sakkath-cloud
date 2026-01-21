@@ -98,7 +98,7 @@ export function Navbar() {
         duration={3000}
       />
       {/* Desktop Navbar */}
-      <nav className="hidden md:block bg-cyan-950 sticky top-0 z-50">
+      <nav className="hidden md:block bg-blue-950 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto flex items-center justify-between px-4 py-4">
           <div className="flex items-center gap-1">
             {navItems.map((item) => (
@@ -108,8 +108,8 @@ export function Navbar() {
                   href={item.href}
                   className={`px-4 py-2 text-sm font-bold transition-all rounded ${
                     isActive(item.href)
-                      ? 'bg-cyan-950 text-white'
-                      : 'text-gray-300 hover:bg-cyan-950/50 hover:text-white'
+                      ? 'bg-blue-950 text-white'
+                      : 'text-gray-300 hover:bg-blue-900/50 hover:text-white'
                   }`}
                 >
                   {item.name}
@@ -118,7 +118,7 @@ export function Navbar() {
                 <button
                   key={item.name}
                   onClick={() => handleItemClick(item)}
-                  className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                  className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-blue-900/50 hover:text-white"
                 >
                   {item.name}
                 </button>
@@ -133,20 +133,27 @@ export function Navbar() {
                     href="/poc"
                     className={`px-4 py-2 text-sm font-bold transition-all rounded ${
                       pathname === '/poc'
-                        ? 'bg-cyan-950 text-yellow-400'
-                        : 'text-yellow-400 hover:bg-cyan-950/50'
+                        ? 'bg-blue-950 text-yellow-400'
+                        : 'text-yellow-400 hover:bg-blue-950/50'
                     }`}
                   >
                     {roleName}
                   </Link>
                 ) : (
-                  <span className="px-4 py-2 text-sm font-bold text-yellow-400">
+                  <Link
+                    href="/admin"
+                    className={`px-4 py-2 text-sm font-bold transition-all rounded ${
+                      pathname === '/admin'
+                        ? 'bg-blue-950 text-yellow-400'
+                        : 'text-yellow-400 hover:bg-blue-950/50'
+                    }`}
+                  >
                     {roleName}
-                  </span>
+                  </Link>
                 )}
                 <button
                   onClick={handleLogout}
-                  className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                  className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-blue-900/50 hover:text-white"
                 >
                   LOGOUT
                 </button>
@@ -154,14 +161,14 @@ export function Navbar() {
             ) : (
               <Link
                 href="/login"
-                className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                className="px-4 py-2 text-sm font-bold transition-all rounded text-gray-300 hover:bg-blue-950/50 hover:text-white"
               >
                 LOGIN
               </Link>
             )}
             <button
               onClick={toggleTheme}
-              className="p-2 rounded hover:bg-cyan-950/50 transition-colors"
+              className="p-2 rounded hover:bg-blue-950/50 transition-colors"
               aria-label="Toggle theme"
             >
               {isDark ? (
@@ -175,10 +182,10 @@ export function Navbar() {
       </nav>
 
       {/* Mobile Navbar */}
-      <nav className="flex md:hidden items-center justify-between px-2 py-3 bg-cyan-900 sticky top-0 z-50">
+      <nav className="flex md:hidden items-center justify-between px-2 py-3 bg-blue-950 sticky top-0 z-50">
         <button
           onClick={() => setSidebarOpen(true)}
-          className="p-2 rounded hover:bg-cyan-950/50 transition-colors"
+          className="p-2 rounded hover:bg-blue-950/50 transition-colors"
           aria-label="Open menu"
         >
           <Menu className="w-5 h-5 text-white" />
@@ -192,8 +199,8 @@ export function Navbar() {
                 href={item.href}
                 className={`px-2 py-1.5 text-xs font-bold transition-all rounded ${
                   isActive(item.href)
-                    ? 'bg-cyan-950 text-white'
-                    : 'text-gray-300 hover:bg-cyan-950/50 hover:text-white'
+                    ? 'bg-blue-950 text-white'
+                    : 'text-gray-300 hover:bg-blue-950/50 hover:text-white'
                 }`}
               >
                 {item.name}
@@ -202,7 +209,7 @@ export function Navbar() {
               <button
                 key={item.name}
                 onClick={handleLogout}
-                className="px-2 py-1.5 text-xs font-bold transition-all rounded text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                className="px-2 py-1.5 text-xs font-bold transition-all rounded text-gray-300 hover:bg-blue-950/50 hover:text-white"
               >
                 {item.name}
               </button>
@@ -213,8 +220,8 @@ export function Navbar() {
                   href="/poc"
                   className={`px-2 py-1.5 text-xs font-bold transition-all rounded ${
                     pathname === '/poc'
-                      ? 'bg-cyan-950 text-yellow-400'
-                      : 'text-yellow-400 hover:bg-cyan-950/50'
+                      ? 'bg-blue-950 text-yellow-400'
+                      : 'text-yellow-400 hover:bg-blue-950/50'
                   }`}
                 >
                   {item.name}
@@ -231,7 +238,7 @@ export function Navbar() {
               <button
                 key={item.name}
                 onClick={() => handleItemClick(item)}
-                className="px-2 py-1.5 text-xs font-bold transition-all rounded text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                className="px-2 py-1.5 text-xs font-bold transition-all rounded text-gray-300 hover:bg-blue-950/50 hover:text-white"
               >
                 {item.name}
               </button>
@@ -241,7 +248,7 @@ export function Navbar() {
 
         <button
           onClick={toggleTheme}
-          className="p-2 rounded hover:bg-cyan-950/50 transition-colors"
+          className="p-2 rounded hover:bg-blue-950/50 transition-colors"
           aria-label="Toggle theme"
         >
           {isDark ? (
@@ -262,14 +269,14 @@ export function Navbar() {
 
       {/* Mobile Sidebar - All nav items except ADMIN role */}
       <div
-        className={`fixed top-0 left-0 h-full w-48 bg-cyan-900 z-50 transform transition-transform duration-300 ease-in-out md:hidden ${
+        className={`fixed top-0 left-0 h-full w-48 bg-blue-900 z-50 transform transition-transform duration-300 ease-in-out md:hidden ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="flex items-center justify-end p-3 border-b border-cyan-950">
+        <div className="flex items-center justify-end p-3 border-b border-blue-950">
           <button
             onClick={() => setSidebarOpen(false)}
-            className="p-1.5 rounded hover:bg-cyan-950/50 transition-colors"
+            className="p-1.5 rounded hover:bg-blue-950/50 transition-colors"
             aria-label="Close menu"
           >
             <X className="w-5 h-5 text-white" />
@@ -284,8 +291,8 @@ export function Navbar() {
                 onClick={() => setSidebarOpen(false)}
                 className={`block px-4 py-2.5 text-sm font-bold transition-all ${
                   isActive(item.href)
-                    ? 'bg-cyan-950 text-white border-l-3 border-yellow-500'
-                    : 'text-gray-300 hover:bg-cyan-950/50 hover:text-white'
+                    ? 'bg-blue-950 text-white border-l-3 border-yellow-500'
+                    : 'text-gray-300 hover:bg-blue-950/50 hover:text-white'
                 }`}
               >
                 {item.name}
@@ -297,7 +304,7 @@ export function Navbar() {
                   setSidebarOpen(false);
                   handleItemClick(item);
                 }}
-                className="block w-full text-left px-4 py-2.5 text-sm font-bold transition-all text-gray-300 hover:bg-cyan-950/50 hover:text-white"
+                className="block w-full text-left px-4 py-2.5 text-sm font-bold transition-all text-gray-300 hover:bg-blue-950/50 hover:text-white"
               >
                 {item.name}
               </button>
@@ -307,13 +314,39 @@ export function Navbar() {
             <Link
               href="/poc"
               onClick={() => setSidebarOpen(false)}
-              className={`block px-4 py-2.5 text-sm font-bold transition-all border-t border-cyan-950 ${
+              className={`block px-4 py-2.5 text-sm font-bold transition-all border-t border-blue-950 ${
                 pathname === '/poc'
-                  ? 'bg-cyan-950 text-yellow-400 border-l-3 border-yellow-500'
-                  : 'text-yellow-400 hover:bg-cyan-950/50'
+                  ? 'bg-blue-950 text-yellow-400 border-l-3 border-yellow-500'
+                  : 'text-yellow-400 hover:bg-blue-950/50'
               }`}
             >
               POC DASHBOARD
+            </Link>
+          )}
+          {isLoggedIn && (roleName === 'ADMIN' || roleName === 'SUPER') && (
+            <Link
+              href="/admin"
+              onClick={() => setSidebarOpen(false)}
+              className={`block px-4 py-2.5 text-sm font-bold transition-all border-t border-blue-950 ${
+                pathname === '/admin'
+                  ? 'bg-blue-950 text-yellow-400 border-l-3 border-yellow-500'
+                  : 'text-yellow-400 hover:bg-blue-950/50'
+              }`}
+            >
+              ADMIN
+            </Link>
+          )}
+          {!isLoggedIn && (
+            <Link
+              href="/login"
+              onClick={() => setSidebarOpen(false)}
+              className={`block px-4 py-2.5 text-sm font-bold transition-all border-t border-blue-950 ${
+                pathname === '/login'
+                  ? 'bg-blue-950 text-white border-l-3 border-yellow-500'
+                  : 'text-gray-300 hover:bg-blue-950/50 hover:text-white'
+              }`}
+            >
+              LOGIN
             </Link>
           )}
           {isLoggedIn && (
@@ -322,7 +355,7 @@ export function Navbar() {
                 setSidebarOpen(false);
                 handleLogout();
               }}
-              className="block w-full text-left px-4 py-2.5 text-sm font-bold transition-all text-gray-300 hover:bg-cyan-950/50 hover:text-white border-t border-cyan-950 mt-2"
+              className="block w-full text-left px-4 py-2.5 text-sm font-bold transition-all text-gray-300 hover:bg-blue-950/50 hover:text-white border-t border-blue-950 mt-2"
             >
               LOGOUT
             </button>

@@ -45,7 +45,7 @@ export default function Login() {
   };
 
   return (
-    <div className="py-8 px-4 md:px-0 min-h-screen flex items-center justify-center">
+    <div className="py-8 px-4 md:px-0 min-h-screen flex items-center justify-center overflow-x-hidden">
       <Toast 
         message={toastMessage} 
         isOpen={showToast} 
@@ -83,7 +83,7 @@ export default function Login() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-2 rounded border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-cyan-900"
+                className="w-full px-4 py-2 rounded border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-900"
                 placeholder="Enter your email"
                 required
               />
@@ -100,7 +100,7 @@ export default function Login() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-2 rounded border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-cyan-900"
+                className="w-full px-4 py-2 rounded border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-900"
                 placeholder="Enter your password"
                 required
               />
@@ -109,7 +109,7 @@ export default function Login() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full px-4 py-2.5 rounded bg-cyan-900 hover:bg-cyan-950 text-white font-medium transition-colors disabled:opacity-50"
+              className="w-full px-4 py-2.5 rounded bg-blue-900 hover:bg-blue-950 text-white font-medium transition-colors disabled:opacity-50"
             >
               {loading ? 'Logging in...' : 'Login'}
             </button>

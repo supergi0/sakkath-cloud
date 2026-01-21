@@ -80,7 +80,7 @@ export default function Home() {
   if (!mounted) return null;
 
   return (
-    <div className="py-4 px-4 md:px-0 min-h-screen">
+    <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
       <div className="max-w-7xl mx-auto">
         {/* Overview Panel */}
         <div className="rounded-sm p-6 mb-5 bg-white dark:bg-slate-900">
@@ -234,7 +234,7 @@ export default function Home() {
                     onClick={() => setSortBy(s)}
                     className={`px-3 py-2 text-sm rounded transition-colors ${
                       sortBy === s
-                        ? 'bg-cyan-900 text-white'
+                        ? 'bg-blue-900 text-white'
                         : 'bg-gray-200 dark:bg-slate-700 text-gray-600 dark:text-gray-300'
                     }`}
                   >
@@ -248,7 +248,7 @@ export default function Home() {
                 onClick={() => setDivision('open')}
                 className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
                   division === 'open'
-                    ? 'bg-cyan-900 text-white'
+                    ? 'bg-blue-900 text-white'
                     : 'bg-gray-200 dark:bg-slate-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-slate-700'
                 }`}
               >
@@ -258,7 +258,7 @@ export default function Home() {
                 onClick={() => setDivision('women')}
                 className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
                   division === 'women'
-                    ? 'bg-cyan-900 text-white'
+                    ? 'bg-blue-900 text-white'
                     : 'bg-gray-200 dark:bg-slate-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-slate-700'
                 }`}
               >
@@ -279,7 +279,7 @@ export default function Home() {
                   onClick={() => setSortBy(s)}
                   className={`flex-1 px-3 py-2 text-sm rounded transition-colors ${
                     sortBy === s
-                      ? 'bg-cyan-900 text-white'
+                      ? 'bg-blue-900 text-white'
                       : 'bg-gray-200 dark:bg-slate-700 text-gray-600 dark:text-gray-300'
                   }`}
                 >
@@ -292,7 +292,7 @@ export default function Home() {
                 onClick={() => setDivision('open')}
                 className={`flex-1 px-3 py-2.5 rounded text-sm font-medium transition-colors ${
                   division === 'open'
-                    ? 'bg-cyan-900 text-white'
+                    ? 'bg-blue-900 text-white'
                     : 'bg-gray-200 dark:bg-slate-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-slate-700'
                 }`}
               >
@@ -302,7 +302,7 @@ export default function Home() {
                 onClick={() => setDivision('women')}
                 className={`flex-1 px-3 py-2.5 rounded text-sm font-medium transition-colors ${
                   division === 'women'
-                    ? 'bg-cyan-900 text-white'
+                    ? 'bg-blue-900 text-white'
                     : 'bg-gray-200 dark:bg-slate-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-slate-700'
                 }`}
               >
@@ -340,7 +340,7 @@ export default function Home() {
                       </td>
                       <td className="py-3 px-2">
                         <Link href={`/teams?team_id=${team.id}`} className="flex items-center gap-2 hover:underline">
-                          <div className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-cyan-900 text-white flex items-center justify-center text-xs font-bold flex-shrink-0 overflow-hidden">
+                          <div className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-blue-900 text-white flex items-center justify-center text-xs font-bold flex-shrink-0 overflow-hidden">
                             {team.small_logo ? (
                               <img src={team.small_logo} alt={team.name} className="w-full h-full object-cover" />
                             ) : (

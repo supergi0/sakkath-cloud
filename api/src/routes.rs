@@ -39,6 +39,19 @@ fn poc_routes() -> Router<AppState> {
         .route("/poc/players", post(team::add_poc_player))
         .route("/poc/players/:id", put(team::update_poc_player))
         .route("/poc/players/:id", delete(team::delete_poc_player))
+        .route("/poc/matches", get(matches::get_poc_matches))
+        .route("/poc/matches/:id/spirit", put(matches::submit_spirit_score))
+}
+
+// Volunteer/Admin routes (protected)
+fn volunteer_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/matches", get(matches::get_upcoming_matches))
+        .route("/admin/matches/:id/join", post(matches::join_match))
+        .route("/admin/matches/:id/start", post(matches::start_match))
+        .route("/admin/matches/:id/end", post(matches::end_match))
+        .route("/admin/matches/:id/event", post(matches::record_event))
+        .route("/admin/matches/:id/undo", post(matches::undo_event))
 }
 
 // Team routes (public)
@@ -47,6 +60,7 @@ fn team_routes() -> Router<AppState> {
         .route("/teams", get(team::get_teams))
         .route("/teams/:id", get(team::get_team_detail))
         .route("/teams/:id/players", get(team::get_team_players))
+        .route("/teams/:id/matches", get(matches::get_team_matches))
         .route("/standings", get(team::get_standings))
         .route("/player-stats", get(team::get_player_stats))
 }
@@ -57,10 +71,20 @@ fn announcement_routes() -> Router<AppState> {
         .route("/announcements", get(announcements::get_announcements))
 }
 
+// Super admin routes (protected, SUPER only)
+fn super_routes() -> Router<AppState> {
+    Router::new()
+        .route("/super/announcements", post(announcements::create_announcement))
+        .route("/super/announcements/:id", put(announcements::update_announcement))
+        .route("/super/announcements/:id", delete(announcements::delete_announcement))
+}
+
 // Match routes (public)
 fn match_routes() -> Router<AppState> {
     Router::new()
         .route("/fields", get(matches::get_fields))
+        .route("/matches/:id", get(matches::get_match_detail))
+        .route("/matches/:id/events", get(matches::get_match_events))
 }
 
 // Combine all routes
@@ -74,6 +98,8 @@ pub fn api_routes() -> Router<AppState> {
     router = router.merge(
         routes_with_auth()
             .merge(poc_routes())
+            .merge(volunteer_routes())
+            .merge(super_routes())
             .layer(middleware::from_fn(auth_middleware))
     );
 

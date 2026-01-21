@@ -23,6 +23,19 @@ interface Player {
   is_spirit_captain: boolean;
 }
 
+interface PocMatch {
+  id: number;
+  t1_id: number;
+  t2_id: number;
+  t1_name: string;
+  t2_name: string;
+  t1_score: number;
+  t2_score: number;
+  t1_spirit: number | null;
+  t2_spirit: number | null;
+  time: string;
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 export default function PocPage() {
@@ -30,6 +43,7 @@ export default function PocPage() {
   const router = useRouter();
   const [team, setTeam] = useState<Team | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [matches, setMatches] = useState<PocMatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Partial<Player>>({});
@@ -39,6 +53,7 @@ export default function PocPage() {
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [rotation, setRotation] = useState(0);
   const [scale, setScale] = useState(1);
+  const [spiritScores, setSpiritScores] = useState<Record<number, number>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -58,12 +73,14 @@ export default function PocPage() {
   const fetchData = async () => {
     if (!token) return;
     try {
-      const [teamRes, playersRes] = await Promise.all([
+      const [teamRes, playersRes, matchesRes] = await Promise.all([
         fetch(`${API_URL}/v1/poc/team`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_URL}/v1/poc/players`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`${API_URL}/v1/poc/matches`, { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (teamRes.ok) setTeam(await teamRes.json());
       if (playersRes.ok) setPlayers(await playersRes.json());
+      if (matchesRes.ok) setMatches(await matchesRes.json());
     } catch (err) {
       console.error(err);
     } finally {
@@ -121,6 +138,32 @@ export default function PocPage() {
         setPlayers([...players, { id: data.id, ...newPlayer } as Player]);
         setNewPlayer({ name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
         setIsAdding(false);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSubmitSpirit = async (matchId: number) => {
+    if (!token || !team) return;
+    const score = spiritScores[matchId];
+    if (score === undefined || score < 0 || score > 20) return;
+    
+    try {
+      const res = await fetch(`${API_URL}/v1/poc/matches/${matchId}/spirit`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ spirit_score: score }),
+      });
+      if (res.ok) {
+        // Update local state
+        setMatches(matches.map(m => {
+          if (m.id !== matchId) return m;
+          const isT1 = m.t1_id === team.id;
+          return isT1 
+            ? { ...m, t1_spirit: score } 
+            : { ...m, t2_spirit: score };
+        }));
       }
     } catch (err) {
       console.error(err);
@@ -242,7 +285,7 @@ export default function PocPage() {
   }
 
   return (
-    <div className="py-4 px-4 md:px-0 min-h-screen">
+    <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Team Info */}
         <div className="rounded-sm p-6 bg-white dark:bg-slate-900">
@@ -344,6 +387,64 @@ export default function PocPage() {
                   <X className="w-4 h-4" /> Cancel
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Spirit Scores Section */}
+        {matches.length > 0 && (
+          <div className="rounded-sm p-6 bg-white dark:bg-slate-900">
+            <Text as="h2" variant="primary" className="text-lg font-semibold mb-4">Spirit Scores</Text>
+            <Text variant="secondary" className="text-sm mb-4">Submit spirit scores for completed matches (0-20)</Text>
+            <div className="space-y-4">
+              {matches.map(match => {
+                const isT1 = match.t1_id === team?.id;
+                const opponent = isT1 ? match.t2_name : match.t1_name;
+                const ourSpirit = isT1 ? match.t1_spirit : match.t2_spirit;
+                const theirSpirit = isT1 ? match.t2_spirit : match.t1_spirit;
+                const ourScore = isT1 ? match.t1_score : match.t2_score;
+                const theirScore = isT1 ? match.t2_score : match.t1_score;
+                const alreadySubmitted = ourSpirit !== null;
+                const date = match.time ? new Date(match.time).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '';
+                
+                return (
+                  <div key={match.id} className="p-4 rounded bg-gray-50 dark:bg-slate-800 border border-gray-200 dark:border-slate-700">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <Text variant="primary" className="font-medium">vs {opponent}</Text>
+                        <Text variant="secondary" className="text-sm">{date} • {ourScore} - {theirScore}</Text>
+                      </div>
+                      {alreadySubmitted ? (
+                        <div className="text-right">
+                          <Text variant="secondary" className="text-xs">Submitted</Text>
+                          <Text variant="primary" className="font-medium">{ourSpirit}</Text>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min="0"
+                            max="20"
+                            placeholder="0-20"
+                            value={spiritScores[match.id] ?? ''}
+                            onChange={e => setSpiritScores({ ...spiritScores, [match.id]: parseInt(e.target.value) || 0 })}
+                            className="w-20 px-2 py-1 text-sm rounded border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                          />
+                          <button
+                            onClick={() => handleSubmitSpirit(match.id)}
+                            className="px-3 py-1 text-sm rounded bg-blue-900 text-white hover:bg-blue-800"
+                          >
+                            Submit
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {theirSpirit !== null && (
+                      <Text variant="secondary" className="text-xs">Opponent's spirit: {theirSpirit}</Text>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

@@ -29,7 +29,7 @@ export default function Fields() {
 
   if (loading) {
     return (
-      <div className="py-4 px-4 md:px-0 min-h-screen">
+      <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
         <div className="max-w-7xl mx-auto">
           <Text variant="primary">Loading...</Text>
         </div>
@@ -38,7 +38,7 @@ export default function Fields() {
   }
 
   return (
-    <div className="py-4 px-4 md:px-0 min-h-screen">
+    <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
       <div className="max-w-7xl mx-auto">
         <div className="rounded-sm p-6 bg-white dark:bg-slate-900">
           <Text as="h1" variant="primary" className="text-xl mb-6">
@@ -54,14 +54,14 @@ export default function Fields() {
                   key={field.id}
                   className={`p-4 rounded border transition-colors ${
                     index === 0 
-                      ? 'border-cyan-900 dark:border-cyan-700 bg-cyan-50 dark:bg-cyan-950/30' 
-                      : 'border-gray-200 dark:border-slate-700 hover:border-cyan-900 dark:hover:border-cyan-900'
+                      ? 'border-blue-900 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/30' 
+                      : 'border-gray-200 dark:border-slate-700 hover:border-blue-900 dark:hover:border-blue-900'
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2">
                       <div className={`w-8 h-8 rounded-full text-white flex items-center justify-center text-sm font-bold ${
-                        index === 0 ? 'bg-cyan-700' : 'bg-cyan-900'
+                        index === 0 ? 'bg-blue-700' : 'bg-blue-900'
                       }`}>
                         {field.id}
                       </div>
@@ -77,7 +77,7 @@ export default function Fields() {
                         className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
                         aria-label="Open map"
                       >
-                        <ExternalLink className="w-4 h-4 text-cyan-900" />
+                        <ExternalLink className="w-4 h-4 text-blue-900" />
                       </a>
                     )}
                   </div>

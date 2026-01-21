@@ -4,7 +4,7 @@ import { Text } from "./components/Text";
 
 export function Footer() {
   return (
-    <footer className="bg-cyan-950 mt-auto">
+    <footer className="bg-blue-950 mt-auto">
       <div className="max-w-7xl mx-auto flex items-center justify-between px-4 py-4">
         <Text variant="primary" className="text-white text-lg font-semibold">
           Sakkath Ultimate

@@ -1,6 +1,6 @@
 # Sakkath Cloud
 
-Sakkath Cloud runs as a single binary release with no additional library installations required. It serves both APIs and static UI pages via a Rust Server and uses a self-contained SQLite database.
+This is a standalone binary for Sakkath 2026. It serves both APIs and static UI pages via a Rust server and uses an embedded SQLite database.
 
 ## Requirements (Dev)
 

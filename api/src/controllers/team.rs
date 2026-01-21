@@ -78,6 +78,43 @@ pub struct TeamPlayerStat {
     pub is_spirit_captain: bool,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct PocTeam {
+    pub id: i64,
+    pub name: String,
+    pub location: Option<String>,
+    pub full_logo: Option<String>,
+    pub small_logo: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct PocPlayer {
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+    pub phone: Option<String>,
+    pub is_captain: bool,
+    pub is_spirit_captain: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePlayerRequest {
+    pub name: String,
+    pub email: String,
+    pub phone: Option<String>,
+    pub is_captain: bool,
+    pub is_spirit_captain: bool,
+}
+
+#[derive(Deserialize)]
+pub struct AddPlayerRequest {
+    pub name: String,
+    pub email: String,
+    pub phone: Option<String>,
+    pub is_captain: bool,
+    pub is_spirit_captain: bool,
+}
+
 // All teams
 pub async fn get_teams(State(state): State<crate::AppState>) -> Json<Vec<Team>> {
     let teams = sqlx::query_as::<_, Team>(
@@ -195,45 +232,6 @@ pub async fn get_player_stats(State(state): State<crate::AppState>) -> Json<Vec<
         "#
     ).fetch_all(&state.db).await.unwrap_or_default();
     Json(players)
-}
-
-// POC endpoints
-
-#[derive(Serialize, sqlx::FromRow)]
-pub struct PocTeam {
-    pub id: i64,
-    pub name: String,
-    pub location: Option<String>,
-    pub full_logo: Option<String>,
-    pub small_logo: Option<String>,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
-pub struct PocPlayer {
-    pub id: i64,
-    pub name: String,
-    pub email: String,
-    pub phone: Option<String>,
-    pub is_captain: bool,
-    pub is_spirit_captain: bool,
-}
-
-#[derive(Deserialize)]
-pub struct UpdatePlayerRequest {
-    pub name: String,
-    pub email: String,
-    pub phone: Option<String>,
-    pub is_captain: bool,
-    pub is_spirit_captain: bool,
-}
-
-#[derive(Deserialize)]
-pub struct AddPlayerRequest {
-    pub name: String,
-    pub email: String,
-    pub phone: Option<String>,
-    pub is_captain: bool,
-    pub is_spirit_captain: bool,
 }
 
 // Get POC's team

@@ -121,7 +121,7 @@ export default function Stats() {
 
   if (loading) {
     return (
-      <div className="py-4 px-4 md:px-0 min-h-screen">
+      <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
         <div className="max-w-7xl mx-auto">
           <Text variant="primary">Loading...</Text>
         </div>
@@ -130,7 +130,7 @@ export default function Stats() {
   }
 
   return (
-    <div className="py-4 px-4 md:px-0 h-[calc(100vh-64px)] md:h-[calc(100vh-72px)]">
+    <div className="py-4 px-4 md:px-0 h-[calc(100vh-64px)] md:h-[calc(100vh-72px)] overflow-x-hidden">
       <div className="max-w-7xl mx-auto h-full flex flex-col">
         <div className="rounded-sm bg-white dark:bg-slate-900 flex-1 flex flex-col min-h-0">
           {/* Fixed header section */}
@@ -165,8 +165,21 @@ export default function Stats() {
 
           {/* Table section with fixed header and scrollable body */}
           <div className="flex-1 flex flex-col min-h-0 p-6 pt-0">
-            <div className="overflow-x-auto flex-1 flex flex-col min-h-0">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto flex-1 flex flex-col min-h-0 -mx-6 px-6">
+              <table className="w-full text-xs sm:text-sm min-w-[800px]">
+                <colgroup>
+                  <col style={{ width: '20%' }} />
+                  <col style={{ width: '15%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '8%' }} />
+                  <col style={{ width: '8%' }} />
+                  <col style={{ width: '7%' }} />
+                  <col style={{ width: '7%' }} />
+                </colgroup>
                 <thead className="bg-white dark:bg-slate-900 flex-shrink-0">
                   <tr className="border-b border-gray-200 dark:border-slate-700">
                     <SortHeader field="name" label="Player" className="text-left" />
@@ -184,7 +197,20 @@ export default function Stats() {
                 </thead>
               </table>
               <div className="overflow-y-auto flex-1">
-                <table className="w-full text-sm">
+                <table className="w-full text-xs sm:text-sm min-w-[800px]">
+                  <colgroup>
+                    <col style={{ width: '20%' }} />
+                    <col style={{ width: '15%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '7%' }} />
+                    <col style={{ width: '7%' }} />
+                  </colgroup>
               <tbody>
                 {paginatedPlayers.map((player) => {
                   const m = player.matches || 1;
