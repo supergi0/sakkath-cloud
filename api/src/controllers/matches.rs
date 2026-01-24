@@ -147,7 +147,7 @@ pub async fn get_team_matches(State(state): State<crate::AppState>, Path(team_id
         JOIN teams t2 ON t2.id = m.t2_id
         LEFT JOIN fields f ON f.id = m.field_id
         WHERE m.deleted_at IS NULL AND (m.t1_id = ? OR m.t2_id = ?)
-        ORDER BY m.time ASC
+        ORDER BY m.time DESC
         "#
     ).bind(team_id).bind(team_id).fetch_all(&state.db).await.unwrap_or_default();
     Json(matches)
@@ -329,6 +329,11 @@ pub async fn record_event(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     verify_volunteer(&state, &headers, match_id).await?;
     
+    // Validate event_type (0=goal, 1=assist, 2=block, 3=turnover)
+    if payload.event_type < 0 || payload.event_type > 3 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
     let match_info: Option<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ?"
     ).bind(match_id).fetch_optional(&state.db).await
@@ -464,6 +469,11 @@ pub async fn submit_spirit_score(
     Json(payload): Json<SpiritScoreRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    
+    // Validate spirit score range (0-20)
+    if payload.spirit_score < 0 || payload.spirit_score > 20 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
     
     let poc_team: Option<(i64,)> = sqlx::query_as(
         "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL"

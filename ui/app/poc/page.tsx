@@ -156,13 +156,14 @@ export default function PocPage() {
         body: JSON.stringify({ spirit_score: score }),
       });
       if (res.ok) {
-        // Update local state
+        // POC rates the OTHER team's spirit
         setMatches(matches.map(m => {
           if (m.id !== matchId) return m;
           const isT1 = m.t1_id === team.id;
+          // If we are t1, we rate t2's spirit (t2_spirit), and vice versa
           return isT1 
-            ? { ...m, t1_spirit: score } 
-            : { ...m, t2_spirit: score };
+            ? { ...m, t2_spirit: score } 
+            : { ...m, t1_spirit: score };
         }));
       }
     } catch (err) {

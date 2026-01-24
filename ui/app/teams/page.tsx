@@ -50,15 +50,6 @@ interface TeamMatch {
   stream_url: string | null;
 }
 
-interface MatchEvent {
-  id: number;
-  player_id: number;
-  player_name: string;
-  team_id: number;
-  event_type: number;
-  created_at: string;
-}
-
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type TabType = 'matches' | 'players' | 'timeline';
@@ -69,7 +60,6 @@ function TeamContent() {
   const [team, setTeam] = useState<Team | null>(null);
   const [playerStats, setPlayerStats] = useState<PlayerStat[]>([]);
   const [matches, setMatches] = useState<TeamMatch[]>([]);
-  const [events, setEvents] = useState<MatchEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>('matches');
   const teamId = searchParams.get('team_id') || '1';
@@ -83,11 +73,6 @@ function TeamContent() {
       setTeam(teamData);
       setPlayerStats(playersData);
       setMatches(matchesData);
-      const finishedMatchIds = matchesData.filter((m: TeamMatch) => m.possession !== null && m.possession >= 3).map((m: TeamMatch) => m.id);
-      if (finishedMatchIds.length > 0) {
-        Promise.all(finishedMatchIds.map((id: number) => fetch(`${API_URL}/v1/matches/${id}/events`).then(r => r.json())))
-          .then(eventsArrays => setEvents(eventsArrays.flat()));
-      }
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [teamId]);
@@ -112,11 +97,6 @@ function TeamContent() {
     if (!time) return '';
     const d = new Date(time);
     return d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' }) + ' - ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  };
-
-  const getEventText = (event: MatchEvent) => {
-    const types = ['Goal', 'Assist', 'Block', 'Turnover'];
-    return `${event.player_name} - ${types[event.event_type] || 'Event'}`;
   };
 
   return (
@@ -317,7 +297,7 @@ function TeamContent() {
                       <div className="flex gap-4">
                         <div className="text-center">
                           <Text variant="secondary" className="text-xs">Spirit</Text>
-                          <Text variant="primary" className="text-sm">{ourSpirit ?? 'TBD'}</Text>
+                          <Text variant="primary" className="text-sm font-extrabold">{ourSpirit ?? 'TBD'}</Text>
                         </div>
                         <div className="text-center">
                           <Text variant="secondary" className="text-xs">Spirit</Text>

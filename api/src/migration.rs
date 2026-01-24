@@ -97,7 +97,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
     
-    // Matches table: possession (NULL=not started, 1=t1, 2=t2, >=3=done)
+    // Matches table: possession (NULL=not started, 1=t1, 2=t2, >=3=done), type (1-N=swiss round, 1001=playoffs, 1002=finals)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS matches (
@@ -113,6 +113,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             stream_url VARCHAR(500),
             possession INTEGER,
             volunteer_id INTEGER,
+            type INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             deleted_at TIMESTAMP,
@@ -171,6 +172,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t1_id ON matches(t1_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t2_id ON matches(t2_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_deleted_at ON matches(deleted_at)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_player_id ON match_events(player_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_match_id ON match_events(match_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
@@ -216,6 +218,16 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("CREATE INDEX idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
     }
     
+    // Migrate matches table: add type column if not exists
+    let has_type: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('matches') WHERE name='type'"
+    ).fetch_one(pool).await.unwrap_or((0,));
+    
+    if has_type.0 == 0 {
+        sqlx::query("ALTER TABLE matches ADD COLUMN type INTEGER DEFAULT 1").execute(pool).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)").execute(pool).await?;
+    }
+    
     // Populate mock data
     let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
@@ -229,80 +241,93 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    // MD5 hash of "helloworld" = fc5e038d38a57032085441e7fe7010b0
-    let pw_hash = "fc5e038d38a57032085441e7fe7010b0";
+    let pw_hash = "fc5e038d38a57032085441e7fe7010b0"; // MD5 of "helloworld"
     
-    // Insert Open Division teams (6 teams, IDs 1-6)
+    // Insert Open Division teams (20 teams, IDs 1-20)
     sqlx::query(
         r#"INSERT INTO teams (name, admin_id, division, location, init_rank) VALUES
-        ('Bangalore Bolts', NULL, 0, 'Bangalore', 3),
-        ('Chennai Challengers', NULL, 0, 'Chennai', 5),
-        ('Mumbai Mavericks', NULL, 0, 'Mumbai', 2),
+        ('Bangalore Bolts', NULL, 0, 'Bangalore', 1),
+        ('Chennai Challengers', NULL, 0, 'Chennai', 2),
+        ('Mumbai Mavericks', NULL, 0, 'Mumbai', 3),
         ('Delhi Dragons', NULL, 0, 'Delhi', 4),
-        ('Hyderabad Hawks', NULL, 0, 'Hyderabad', 6),
-        ('Kolkata Knights', NULL, 0, 'Kolkata', 1)"#
+        ('Hyderabad Hawks', NULL, 0, 'Hyderabad', 5),
+        ('Kolkata Knights', NULL, 0, 'Kolkata', 6),
+        ('Pune Panthers', NULL, 0, 'Pune', 7),
+        ('Ahmedabad Aces', NULL, 0, 'Ahmedabad', 8),
+        ('Jaipur Jaguars', NULL, 0, 'Jaipur', 9),
+        ('Lucknow Lions', NULL, 0, 'Lucknow', 10),
+        ('Kochi Kings', NULL, 0, 'Kochi', 11),
+        ('Goa Gladiators', NULL, 0, 'Goa', 12),
+        ('Chandigarh Chargers', NULL, 0, 'Chandigarh', 13),
+        ('Indore Infernos', NULL, 0, 'Indore', 14),
+        ('Nagpur Ninjas', NULL, 0, 'Nagpur', 15),
+        ('Vizag Vikings', NULL, 0, 'Vizag', 16),
+        ('Coimbatore Cosmos', NULL, 0, 'Coimbatore', 17),
+        ('Mysore Mambas', NULL, 0, 'Mysore', 18),
+        ('Surat Strikers', NULL, 0, 'Surat', 19),
+        ('Bhopal Blazers', NULL, 0, 'Bhopal', 20)"#
     ).execute(pool).await?;
     
-    // Insert Women Division teams (4 teams, IDs 7-10)
+    // Insert Women Division teams (12 teams, IDs 21-32)
     sqlx::query(
         r#"INSERT INTO teams (name, admin_id, division, location, init_rank) VALUES
-        ('Bangalore Blaze', NULL, 1, 'Bangalore', 2),
-        ('Chennai Chargers', NULL, 1, 'Chennai', 3),
-        ('Mumbai Meteors', NULL, 1, 'Mumbai', 4),
-        ('Delhi Divas', NULL, 1, 'Delhi', 1)"#
+        ('Bangalore Blaze', NULL, 1, 'Bangalore', 1),
+        ('Chennai Chargers', NULL, 1, 'Chennai', 2),
+        ('Mumbai Meteors', NULL, 1, 'Mumbai', 3),
+        ('Delhi Divas', NULL, 1, 'Delhi', 4),
+        ('Hyderabad Hurricanes', NULL, 1, 'Hyderabad', 5),
+        ('Kolkata Queens', NULL, 1, 'Kolkata', 6),
+        ('Pune Pythons', NULL, 1, 'Pune', 7),
+        ('Ahmedabad Angels', NULL, 1, 'Ahmedabad', 8),
+        ('Jaipur Jewels', NULL, 1, 'Jaipur', 9),
+        ('Lucknow Legends', NULL, 1, 'Lucknow', 10),
+        ('Kochi Kites', NULL, 1, 'Kochi', 11),
+        ('Goa Gazelles', NULL, 1, 'Goa', 12)"#
     ).execute(pool).await?;
     
-    // Insert players (IDs 1-20, 2 per team)
-    sqlx::query(
-        r#"INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES
-        ('Raj Kumar', 'raj@example.com', '+919876543210', '1995-03-15', 1, 2, ?),
-        ('Amit Patel', 'amit@example.com', '+919876543211', '1993-07-22', 1, 2, ?),
-        ('Vikram Singh', 'vikram@example.com', '+919876543212', '1990-11-08', 2, 2, ?),
-        ('Rohan Desai', 'rohan@example.com', '+919876543213', '1996-05-12', 2, 2, ?),
-        ('Arjun Menon', 'arjun@example.com', '+919876543214', '1992-09-30', 3, 2, ?),
-        ('Sanjay Gupta', 'sanjay@example.com', '+919876543215', '1994-06-18', 3, 2, ?),
-        ('Karthik Rao', 'karthik@example.com', '+919876543216', '1991-12-25', 4, 2, ?),
-        ('Nikhil Verma', 'nikhil@example.com', '+919876543217', '1995-08-14', 4, 2, ?),
-        ('Aditya Sharma', 'aditya@example.com', '+919876543218', '1993-04-20', 5, 2, ?),
-        ('Pranav Nair', 'pranav@example.com', '+919876543219', '1996-10-05', 5, 2, ?),
-        ('Rahul Joshi', 'rahul@example.com', '+919876543220', '1994-02-28', 6, 2, ?),
-        ('Vivek Kumar', 'vivek@example.com', '+919876543221', '1992-08-15', 6, 2, ?),
-        ('Priya Sharma', 'priya@example.com', '+919876543230', '1995-03-15', 7, 2, ?),
-        ('Sneha Reddy', 'sneha@example.com', '+919876543231', '1993-07-22', 7, 2, ?),
-        ('Ananya Iyer', 'ananya@example.com', '+919876543232', '1990-11-08', 8, 2, ?),
-        ('Kavya Nair', 'kavya@example.com', '+919876543233', '1996-05-12', 8, 2, ?),
-        ('Divya Krishna', 'divya@example.com', '+919876543234', '1992-09-30', 9, 2, ?),
-        ('Meera Patel', 'meera@example.com', '+919876543235', '1994-06-18', 9, 2, ?),
-        ('Riya Singh', 'riya@example.com', '+919876543236', '1991-12-25', 10, 2, ?),
-        ('Neha Gupta', 'neha@example.com', '+919876543237', '1995-08-14', 10, 2, ?)"#
-    )
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .execute(pool).await?;
+    // Insert 2 players per team (IDs 1-64)
+    let mut player_sql = String::from("INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES ");
+    let mut values = Vec::new();
+    let open_names = ["Raj", "Amit", "Vikram", "Rohan", "Arjun", "Sanjay", "Karthik", "Nikhil", "Aditya", "Pranav", "Rahul", "Vivek", "Suresh", "Ganesh", "Mohan", "Ravi", "Ajay", "Vijay", "Krishna", "Venkat"];
+    let women_names = ["Priya", "Sneha", "Ananya", "Kavya", "Divya", "Meera", "Riya", "Neha", "Pooja", "Shruti", "Swati", "Nisha"];
     
-    // Insert admin/POC users (IDs 21-33)
+    let mut player_id = 1;
+    for team_id in 1..=20 {
+        let name1 = format!("{} Kumar", open_names[(team_id - 1) as usize]);
+        let name2 = format!("{} Patel", open_names[(team_id - 1) as usize]);
+        values.push(format!("('{}', 'player{}@example.com', '+91987654{:04}', '1995-03-15', {}, 2, '{}')", name1, player_id, player_id, team_id, pw_hash));
+        player_id += 1;
+        values.push(format!("('{}', 'player{}@example.com', '+91987654{:04}', '1993-07-22', {}, 2, '{}')", name2, player_id, player_id, team_id, pw_hash));
+        player_id += 1;
+    }
+    for team_id in 21..=32 {
+        let idx = (team_id - 21) as usize;
+        let name1 = format!("{} Sharma", women_names[idx]);
+        let name2 = format!("{} Reddy", women_names[idx]);
+        values.push(format!("('{}', 'player{}@example.com', '+91987654{:04}', '1995-03-15', {}, 2, '{}')", name1, player_id, player_id, team_id, pw_hash));
+        player_id += 1;
+        values.push(format!("('{}', 'player{}@example.com', '+91987654{:04}', '1993-07-22', {}, 2, '{}')", name2, player_id, player_id, team_id, pw_hash));
+        player_id += 1;
+    }
+    player_sql.push_str(&values.join(","));
+    sqlx::query(&player_sql).execute(pool).await?;
+    
+    // Insert admin/POC users
     sqlx::query(
         r#"INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES
         ('Super Admin', 'super@sakkath.com', '+919000000000', '1985-01-01', NULL, 0, ?),
         ('Admin One', 'admin1@sakkath.com', '+919000000001', '1988-05-15', NULL, 1, ?),
-        ('Admin Two', 'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?),
-        ('POC Bolts', 'poc1@sakkath.com', '+919000000101', '1992-03-10', 1, 3, ?),
-        ('POC Challengers', 'poc2@sakkath.com', '+919000000102', '1993-04-11', 2, 3, ?),
-        ('POC Mavericks', 'poc3@sakkath.com', '+919000000103', '1991-05-12', 3, 3, ?),
-        ('POC Dragons', 'poc4@sakkath.com', '+919000000104', '1990-06-13', 4, 3, ?),
-        ('POC Hawks', 'poc5@sakkath.com', '+919000000105', '1994-07-14', 5, 3, ?),
-        ('POC Knights', 'poc6@sakkath.com', '+919000000106', '1989-08-15', 6, 3, ?),
-        ('POC Blaze', 'poc7@sakkath.com', '+919000000107', '1995-09-16', 7, 3, ?),
-        ('POC Chargers', 'poc8@sakkath.com', '+919000000108', '1988-10-17', 8, 3, ?),
-        ('POC Meteors', 'poc9@sakkath.com', '+919000000109', '1992-11-18', 9, 3, ?),
-        ('POC Divas', 'poc10@sakkath.com', '+919000000110', '1991-12-19', 10, 3, ?)"#
-    )
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .bind(pw_hash).bind(pw_hash).bind(pw_hash)
-    .execute(pool).await?;
+        ('Admin Two', 'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#
+    ).bind(pw_hash).bind(pw_hash).bind(pw_hash).execute(pool).await?;
+    
+    // Insert POCs for all teams
+    let mut poc_sql = String::from("INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES ");
+    let mut poc_values = Vec::new();
+    for team_id in 1..=32 {
+        poc_values.push(format!("('POC Team {}', 'poc{}@sakkath.com', '+91900000{:04}', '1992-03-10', {}, 3, '{}')", team_id, team_id, team_id, team_id, pw_hash));
+    }
+    poc_sql.push_str(&poc_values.join(","));
+    sqlx::query(&poc_sql).execute(pool).await?;
     
     // Insert fields
     sqlx::query(
@@ -310,59 +335,53 @@ async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ('Field 1', 'Main astroturf ground. Cleats preferred.', 'https://maps.google.com/?q=field1'),
         ('Field 2', 'Secondary astroturf. Cleats recommended.', 'https://maps.google.com/?q=field2'),
         ('Field 3', 'Natural grass. Bring water.', 'https://maps.google.com/?q=field3'),
-        ('Field 4', 'Open grass field. Windy afternoons.', 'https://maps.google.com/?q=field4')"#
+        ('Field 4', 'Open grass field. Windy afternoons.', 'https://maps.google.com/?q=field4'),
+        ('Field 5', 'Practice field. Flat surface.', 'https://maps.google.com/?q=field5')"#
     ).execute(pool).await?;
     
-    // Matches: possession NULL=upcoming, 1/2=live (t1/t2 has disc), >=3=ended
-    // ENDED matches (with spirit scores): IDs 1-4
-    // LIVE matches (no spirit scores, possession 1 or 2): IDs 5-6
-    // UPCOMING matches (no spirit scores, possession NULL, scores 0-0): IDs 7-10
+    // Open Division: R1 complete, R2 has 9 done + 1 live (for testing updates)
+    // Swiss Round 1 (type=1): Initial seeding 1v11, 2v12, etc. (top half vs bottom half)
     sqlx::query(
-        r#"INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, stream_url) VALUES
-        (1, 2, 1, '2026-01-18 09:00:00', 15, 12, 14, 13, 3, 'https://youtube.com/watch?v=match1'),
-        (3, 4, 2, '2026-01-18 09:00:00', 13, 15, 12, 15, 3, 'https://youtube.com/watch?v=match2'),
-        (5, 6, 3, '2026-01-18 11:00:00', 11, 9, 13, 14, 3, NULL),
-        (1, 3, 1, '2026-01-18 14:00:00', 14, 11, 13, 14, 3, NULL),
-        (1, 4, 1, '2026-01-20 10:00:00', 7, 5, NULL, NULL, 1, 'https://youtube.com/live/live1'),
-        (2, 3, 2, '2026-01-20 10:00:00', 4, 6, NULL, NULL, 2, 'https://youtube.com/live/live2'),
-        (5, 1, 3, '2026-01-21 09:00:00', 0, 0, NULL, NULL, NULL, NULL),
-        (6, 2, 4, '2026-01-21 09:00:00', 0, 0, NULL, NULL, NULL, NULL),
-        (4, 5, 1, '2026-01-21 14:00:00', 0, 0, NULL, NULL, NULL, NULL),
-        (3, 6, 2, '2026-01-22 09:00:00', 0, 0, NULL, NULL, NULL, NULL)"#
+        r#"INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES
+        (1, 11, 1, '2026-01-18 09:00:00', 15, 9, 14, 13, 3, 1),
+        (2, 12, 2, '2026-01-18 09:00:00', 15, 10, 13, 14, 3, 1),
+        (3, 13, 3, '2026-01-18 09:00:00', 14, 11, 14, 12, 3, 1),
+        (4, 14, 4, '2026-01-18 09:00:00', 15, 8, 13, 13, 3, 1),
+        (5, 15, 5, '2026-01-18 09:00:00', 13, 11, 15, 14, 3, 1),
+        (6, 16, 1, '2026-01-18 11:00:00', 14, 10, 14, 13, 3, 1),
+        (7, 17, 2, '2026-01-18 11:00:00', 15, 12, 13, 14, 3, 1),
+        (8, 18, 3, '2026-01-18 11:00:00', 13, 9, 14, 15, 3, 1),
+        (9, 19, 4, '2026-01-18 11:00:00', 15, 11, 12, 13, 3, 1),
+        (10, 20, 5, '2026-01-18 11:00:00', 14, 10, 13, 14, 3, 1)"#
     ).execute(pool).await?;
     
-    // Match events for ended matches (1-4) - timeline data for team 1 (Bangalore Bolts)
-    // Match 1: Bolts vs Challengers (15-12) - Bolts win
-    // Match 4: Bolts vs Mavericks (14-11) - Bolts win
+    // Swiss Round 2 (type=2): 9 completed, 1 live (15v20 at field 5)
+    sqlx::query(
+        r#"INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES
+        (1, 6, 1, '2026-01-18 14:00:00', 15, 13, 14, 14, 3, 2),
+        (2, 7, 2, '2026-01-18 14:00:00', 12, 15, 13, 13, 3, 2),
+        (3, 8, 3, '2026-01-18 14:00:00', 15, 11, 14, 14, 3, 2),
+        (4, 9, 4, '2026-01-18 14:00:00', 13, 15, 14, 13, 3, 2),
+        (5, 10, 5, '2026-01-18 14:00:00', 15, 14, 15, 14, 3, 2),
+        (11, 16, 1, '2026-01-18 16:00:00', 12, 15, 13, 14, 3, 2),
+        (12, 17, 2, '2026-01-18 16:00:00', 15, 13, 14, 13, 3, 2),
+        (13, 18, 3, '2026-01-18 16:00:00', 14, 15, 13, 14, 3, 2),
+        (14, 19, 4, '2026-01-18 16:00:00', 15, 12, 14, 13, 3, 2),
+        (15, 20, 5, '2026-01-18 16:00:00', 7, 6, NULL, NULL, 1, 2)"#
+    ).execute(pool).await?;
+    
+    // Women Division: No matches yet - will be auto-generated on startup
+    
+    // Match events for some Open matches
     sqlx::query(
         r#"INSERT INTO match_events (match_id, player_id, event_type, created_at) VALUES
         (1, 1, 0, '2026-01-18 09:05:00'), (1, 2, 1, '2026-01-18 09:05:00'),
-        (1, 3, 0, '2026-01-18 09:10:00'), (1, 4, 1, '2026-01-18 09:10:00'),
         (1, 1, 0, '2026-01-18 09:15:00'), (1, 2, 1, '2026-01-18 09:15:00'),
         (1, 1, 2, '2026-01-18 09:18:00'),
-        (1, 3, 0, '2026-01-18 09:20:00'),
-        (1, 1, 0, '2026-01-18 09:25:00'), (1, 2, 1, '2026-01-18 09:25:00'),
-        (1, 1, 0, '2026-01-18 09:30:00'),
-        (1, 4, 3, '2026-01-18 09:32:00'),
-        (1, 1, 0, '2026-01-18 09:35:00'), (1, 2, 1, '2026-01-18 09:35:00'),
-        (2, 5, 0, '2026-01-18 09:05:00'), (2, 6, 1, '2026-01-18 09:05:00'),
-        (2, 7, 0, '2026-01-18 09:10:00'), (2, 8, 1, '2026-01-18 09:10:00'),
-        (2, 5, 0, '2026-01-18 09:15:00'), (2, 6, 2, '2026-01-18 09:18:00'),
-        (2, 7, 0, '2026-01-18 09:20:00'), (2, 7, 0, '2026-01-18 09:25:00'),
-        (3, 9, 0, '2026-01-18 11:05:00'), (3, 10, 1, '2026-01-18 11:05:00'),
-        (3, 11, 0, '2026-01-18 11:10:00'), (3, 12, 1, '2026-01-18 11:10:00'),
-        (3, 9, 0, '2026-01-18 11:15:00'), (3, 9, 2, '2026-01-18 11:18:00'),
-        (4, 1, 0, '2026-01-18 14:05:00'), (4, 2, 1, '2026-01-18 14:05:00'),
-        (4, 1, 0, '2026-01-18 14:10:00'), (4, 2, 1, '2026-01-18 14:10:00'),
-        (4, 5, 0, '2026-01-18 14:15:00'), (4, 6, 1, '2026-01-18 14:15:00'),
-        (4, 1, 0, '2026-01-18 14:20:00'), (4, 1, 2, '2026-01-18 14:22:00'),
-        (4, 1, 0, '2026-01-18 14:25:00'), (4, 2, 1, '2026-01-18 14:25:00'),
-        (4, 5, 0, '2026-01-18 14:30:00'),
-        (5, 1, 0, '2026-01-20 10:05:00'), (5, 2, 1, '2026-01-20 10:05:00'),
-        (5, 7, 0, '2026-01-20 10:08:00'),
-        (5, 1, 0, '2026-01-20 10:12:00'),
-        (6, 3, 0, '2026-01-20 10:05:00'), (6, 4, 1, '2026-01-20 10:05:00'),
-        (6, 5, 0, '2026-01-20 10:10:00'), (6, 6, 1, '2026-01-20 10:10:00')"#
+        (2, 3, 0, '2026-01-18 09:05:00'), (2, 4, 1, '2026-01-18 09:05:00'),
+        (2, 3, 0, '2026-01-18 09:10:00'), (2, 4, 1, '2026-01-18 09:10:00'),
+        (11, 1, 0, '2026-01-18 14:05:00'), (11, 2, 1, '2026-01-18 14:05:00'),
+        (11, 1, 0, '2026-01-18 14:15:00')"#
     ).execute(pool).await?;
     
     // Insert announcements

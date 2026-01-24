@@ -10,6 +10,7 @@ use crate::controllers::{
     announcements,
     matches,
     health,
+    scheduling,
 };
 use crate::middleware::auth::auth_middleware;
 use crate::middleware::logger::logger_middleware;
@@ -87,19 +88,36 @@ fn match_routes() -> Router<AppState> {
         .route("/matches/:id/events", get(matches::get_match_events))
 }
 
+// Schedule routes (public)
+fn schedule_routes() -> Router<AppState> {
+    Router::new()
+        .route("/schedule/state", get(scheduling::read_tournament_state))
+        .route("/schedule/matches", get(scheduling::get_schedule_matches))
+        .route("/schedule/early-fixtures", get(scheduling::get_early_fixtures))
+}
+
+// Schedule admin routes (protected)
+fn schedule_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/schedule/:division/generate", post(scheduling::generate_next_round))
+        .route("/admin/schedule/:division/check-gates", post(scheduling::check_and_populate_gates))
+}
+
 // Combine all routes
 pub fn api_routes() -> Router<AppState> {
     let mut router = Router::new()
         .merge(routes_without_auth())
         .merge(team_routes())
         .merge(announcement_routes())
-        .merge(match_routes());
+        .merge(match_routes())
+        .merge(schedule_routes());
 
     router = router.merge(
         routes_with_auth()
             .merge(poc_routes())
             .merge(volunteer_routes())
             .merge(super_routes())
+            .merge(schedule_admin_routes())
             .layer(middleware::from_fn(auth_middleware))
     );
 

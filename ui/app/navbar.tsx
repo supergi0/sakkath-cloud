@@ -15,6 +15,7 @@ const navItems = [
   { name: 'PLAYER STATS', href: '/stats', clickable: true },
   { name: 'FIELDS', href: '/fields', clickable: true },
   { name: 'ANNOUNCEMENTS', href: '/announcements', clickable: true },
+  { name: 'RULES', href: '/rules', clickable: true },
   { name: 'PHOTOS', href: '#', clickable: false },
 ];
 
@@ -259,17 +260,17 @@ export function Navbar() {
         </button>
       </nav>
 
-      {/* Mobile Sidebar Overlay */}
+      {/* Mobile Sidebar Overlay - covers everything including navbar */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-black/50 z-40 md:hidden"
+          className="fixed inset-0 bg-black/50 z-[55] md:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       {/* Mobile Sidebar - All nav items except ADMIN role */}
       <div
-        className={`fixed top-0 left-0 h-full w-48 bg-blue-900 z-50 transform transition-transform duration-300 ease-in-out md:hidden ${
+        className={`fixed top-0 left-0 h-full w-48 bg-blue-900 z-[60] transform transition-transform duration-300 ease-in-out md:hidden ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >

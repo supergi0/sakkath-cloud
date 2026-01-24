@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { ArrowLeft, Circle, Play } from "lucide-react";
 import { Text } from "../components/Text";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot } from 'recharts';
+import useSWR from 'swr';
 
 interface MatchDetail {
   id: number;
@@ -50,35 +51,31 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type MatchTabType = 'log' | 'chart' | 'stats';
 
+const fetcher = (url: string) => fetch(url).then(r => r.ok ? r.json() : null);
+
 function MatchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [match, setMatch] = useState<MatchDetail | null>(null);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<MatchTabType>('log');
   const matchId = searchParams.get('match_id');
 
-  useEffect(() => {
-    if (!matchId) {
-      setLoading(false);
-      return;
+  // Determine if match is live to set refresh interval
+  const { data: match, error, isLoading } = useSWR<MatchDetail>(
+    matchId ? `${API_URL}/v1/matches/${matchId}` : null,
+    fetcher,
+    {
+      refreshInterval: (data) => {
+        // Refresh every 15s if live, otherwise no auto-refresh
+        if (!data) return 0;
+        const isLive = data.possession !== null && data.possession < 3;
+        return isLive ? 15000 : 0;
+      },
+      revalidateOnFocus: true,
+      dedupingInterval: 5000,
     }
-    fetchMatch();
-    const interval = setInterval(fetchMatch, 5000);
-    return () => clearInterval(interval);
-  }, [matchId]);
+  );
 
-  const fetchMatch = async () => {
-    if (!matchId) return;
-    try {
-      const res = await fetch(`${API_URL}/v1/matches/${matchId}`);
-      if (res.ok) setMatch(await res.json());
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const loading = isLoading;
 
   const getStatus = () => {
     if (!match) return '';
@@ -90,7 +87,7 @@ function MatchContent() {
   const getDivision = () => {
     if (!match) return '';
     if (match.t1_division === match.t2_division) {
-      return match.t1_division === 1 ? 'Open' : 'Women';
+      return match.t1_division === 0 ? 'Open' : 'Women';
     }
     return 'Mixed';
   };

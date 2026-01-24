@@ -99,7 +99,7 @@ export default function Stats() {
 
   const SortHeader = ({ field, label, className = '' }: { field: SortField; label: string; className?: string }) => (
     <th 
-      className={`py-3 px-1 md:px-2 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 ${className} ${
+      className={`py-3 px-1 md:px-2 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 whitespace-nowrap ${className} ${
         sortField === field ? 'text-gray-900 dark:text-white font-bold' : 'text-gray-500 dark:text-gray-400'
       }`}
       onClick={() => handleSort(field)}
@@ -121,96 +121,79 @@ export default function Stats() {
 
   if (loading) {
     return (
-      <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
-        <div className="max-w-7xl mx-auto">
-          <Text variant="primary">Loading...</Text>
+      <div className="min-h-screen">
+        <div className="sticky top-16 md:top-[72px] z-20 bg-white dark:bg-slate-900 shadow-sm">
+          <div className="max-w-7xl mx-auto px-4 py-6">
+            <Text variant="primary" className="text-xl">Player Statistics</Text>
+          </div>
+        </div>
+        <div className="max-w-7xl mx-auto px-4 py-8">
+          <Text variant="secondary">Loading...</Text>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="py-4 px-4 md:px-0 h-[calc(100vh-64px)] md:h-[calc(100vh-72px)] overflow-x-hidden">
-      <div className="max-w-7xl mx-auto h-full flex flex-col">
-        <div className="rounded-sm bg-white dark:bg-slate-900 flex-1 flex flex-col min-h-0">
-          {/* Fixed header section */}
-          <div className="p-6 pb-4 border-b border-gray-200 dark:border-slate-700 flex-shrink-0">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <Text as="h1" variant="primary" className="text-xl">
-                Player Statistics
-              </Text>
-              <div className="flex gap-2 w-full sm:w-auto">
+    <div className="min-h-screen bg-gray-100 dark:bg-slate-950">
+      {/* Sticky header - no gap with navbar */}
+      <div className="sticky top-16 md:top-[72px] z-20 bg-white dark:bg-slate-900 shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <Text as="h1" variant="primary" className="text-xl">
+              Player Statistics
+            </Text>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <div className="relative">
                 <select
                   value={division}
                   onChange={(e) => { setDivision(e.target.value as typeof division); setTeamFilter(null); setPage(1); }}
-                  className="px-3 py-2 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 w-2/5 sm:w-auto"
+                  className="appearance-none px-3 py-2 pr-8 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 cursor-pointer"
                 >
                   <option value="all">All Divisions</option>
                   <option value="open">Open</option>
                   <option value="women">Women</option>
                 </select>
+                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+              </div>
+              <div className="relative flex-1 sm:flex-none">
                 <select
                   value={teamFilter ?? ''}
                   onChange={(e) => { setTeamFilter(e.target.value ? Number(e.target.value) : null); setPage(1); }}
-                  className="px-3 py-2 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 flex-1 sm:flex-none sm:min-w-[180px]"
+                  className="appearance-none w-full px-3 py-2 pr-8 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 cursor-pointer sm:min-w-[180px]"
                 >
                   <option value="">All Teams</option>
                   {filteredTeams.map(t => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
                 </select>
+                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
               </div>
             </div>
           </div>
+        </div>
+      </div>
 
-          {/* Table section with fixed header and scrollable body */}
-          <div className="flex-1 flex flex-col min-h-0 p-6 pt-0">
-            <div className="overflow-x-auto flex-1 flex flex-col min-h-0 -mx-6 px-6">
-              <table className="w-full text-xs sm:text-sm min-w-[800px]">
-                <colgroup>
-                  <col style={{ width: '20%' }} />
-                  <col style={{ width: '15%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '8%' }} />
-                  <col style={{ width: '8%' }} />
-                  <col style={{ width: '7%' }} />
-                  <col style={{ width: '7%' }} />
-                </colgroup>
-                <thead className="bg-white dark:bg-slate-900 flex-shrink-0">
-                  <tr className="border-b border-gray-200 dark:border-slate-700">
-                    <SortHeader field="name" label="Player" className="text-left" />
-                    <SortHeader field="team" label="Team" className="text-left" />
-                    <SortHeader field="goals" label="Gls" />
-                    <SortHeader field="assists" label="Ast" />
-                    <SortHeader field="blocks" label="Blk" />
-                    <SortHeader field="turnovers" label="TO" />
-                    <SortHeader field="matches" label="M" />
-                    <SortHeader field="gpm" label="G/M" />
-                    <SortHeader field="apm" label="A/M" />
-                    <SortHeader field="bpm" label="B/M" />
-                    <SortHeader field="tpm" label="T/M" />
-                  </tr>
-                </thead>
-              </table>
-              <div className="overflow-y-auto flex-1">
-                <table className="w-full text-xs sm:text-sm min-w-[800px]">
-                  <colgroup>
-                    <col style={{ width: '20%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '7%' }} />
-                  </colgroup>
+      {/* Table section */}
+      <div className="max-w-7xl mx-auto px-4 py-4">
+        <div className="rounded-sm bg-white dark:bg-slate-900 overflow-hidden">
+          <div className="overflow-x-auto max-h-[calc(100vh-240px)] overflow-y-auto">
+            <table className="w-full text-xs sm:text-sm min-w-[800px]">
+              <thead className="sticky top-0 bg-white dark:bg-slate-900 z-10">
+                <tr className="border-b border-gray-200 dark:border-slate-700">
+                  <SortHeader field="name" label="Player" className="text-left" />
+                  <SortHeader field="team" label="Team" className="text-left" />
+                  <SortHeader field="goals" label="Gls" />
+                  <SortHeader field="assists" label="Ast" />
+                  <SortHeader field="blocks" label="Blk" />
+                  <SortHeader field="turnovers" label="TO" />
+                  <SortHeader field="matches" label="M" />
+                  <SortHeader field="gpm" label="G/M" />
+                  <SortHeader field="apm" label="A/M" />
+                  <SortHeader field="bpm" label="B/M" />
+                  <SortHeader field="tpm" label="T/M" />
+                </tr>
+              </thead>
               <tbody>
                 {paginatedPlayers.map((player) => {
                   const m = player.matches || 1;
@@ -220,10 +203,10 @@ export default function Stats() {
                       className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700"
                     >
                       <td className="py-3 px-2">
-                        <Text variant="primary" className="font-medium">{player.name}</Text>
+                        <Text variant="primary" className="font-medium truncate max-w-[150px] block">{player.name}</Text>
                       </td>
                       <td className="py-3 px-2">
-                        <Text variant="secondary">{player.team_name}</Text>
+                        <Text variant="secondary" className="truncate max-w-[120px] block">{player.team_name}</Text>
                       </td>
                       <td className="py-3 px-2 text-center">
                         <Text variant="primary">{player.goals}</Text>
@@ -256,32 +239,30 @@ export default function Stats() {
                   );
                 })}
               </tbody>
-                </table>
-              </div>
-            </div>
-
-            {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 pt-4 border-t border-gray-200 dark:border-slate-700 flex-shrink-0">
-                <button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className="px-3 py-1 text-sm rounded bg-gray-200 dark:bg-slate-700 disabled:opacity-50"
-                >
-                  Prev
-                </button>
-                <Text variant="secondary" className="text-sm">
-                  {page} / {totalPages}
-                </Text>
-                <button
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                  className="px-3 py-1 text-sm rounded bg-gray-200 dark:bg-slate-700 disabled:opacity-50"
-                >
-                  Next
-                </button>
-              </div>
-            )}
+            </table>
           </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 p-4 border-t border-gray-200 dark:border-slate-700">
+              <button
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="px-3 py-1 text-sm rounded bg-gray-200 dark:bg-slate-700 disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <Text variant="secondary" className="text-sm">
+                {page} / {totalPages}
+              </Text>
+              <button
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="px-3 py-1 text-sm rounded bg-gray-200 dark:bg-slate-700 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

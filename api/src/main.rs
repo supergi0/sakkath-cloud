@@ -12,6 +12,10 @@ mod controllers;
 mod middleware;
 mod routes;
 
+// Tournament configuration: number of swiss rounds per division
+pub const OPEN_ROUNDS: i64 = 4;
+pub const WOMEN_ROUNDS: i64 = 3;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -67,6 +71,9 @@ async fn main() {
     migration::verify_migrations(&db_pool)
         .await
         .expect("Failed to verify migrations");
+
+    // Auto-generate R1 for divisions with no matches
+    controllers::scheduling::auto_generate_initial_rounds(&db_pool).await;
 
     let app_state = AppState {
         db: db_pool,

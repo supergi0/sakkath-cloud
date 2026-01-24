@@ -130,16 +130,16 @@ pub async fn get_team_detail(State(state): State<crate::AppState>, Path(id): Pat
         SELECT 
             t.id, t.name, t.location, t.division, t.init_rank,
             (SELECT COUNT(*) FROM users WHERE team_id = t.id AND deleted_at IS NULL) as players,
-            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND ((t1_id = t.id AND t1_score > t2_score) OR (t2_id = t.id AND t2_score > t1_score))) as wins,
-            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND ((t1_id = t.id AND t1_score < t2_score) OR (t2_id = t.id AND t2_score < t1_score))) as losses,
-            COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0) as spirit_avg,
+            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score > t2_score) OR (t2_id = t.id AND t2_score > t1_score))) as wins,
+            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score < t2_score) OR (t2_id = t.id AND t2_score < t1_score))) as losses,
+            COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0) as spirit_avg,
             (SELECT COUNT(*) + 1 FROM (
                 SELECT tm.id, COALESCE(AVG(CASE WHEN m.t1_id = tm.id THEN m.t1_spirit WHEN m.t2_id = tm.id THEN m.t2_spirit END), 0.0) as avg_spirit
                 FROM teams tm
-                LEFT JOIN matches m ON (m.t1_id = tm.id OR m.t2_id = tm.id) AND m.deleted_at IS NULL
+                LEFT JOIN matches m ON (m.t1_id = tm.id OR m.t2_id = tm.id) AND m.deleted_at IS NULL AND m.possession >= 3
                 WHERE tm.deleted_at IS NULL AND tm.division = t.division
                 GROUP BY tm.id
-            ) sub WHERE sub.avg_spirit > COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0)) as spirit_rank,
+            ) sub WHERE sub.avg_spirit > COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0)) as spirit_rank,
             t.full_logo, t.small_logo
         FROM teams t WHERE t.id = ? AND t.deleted_at IS NULL
         "#
@@ -202,7 +202,7 @@ pub async fn get_standings(State(state): State<crate::AppState>, Query(params): 
             COALESCE(AVG(CASE WHEN m.t1_id = t.id THEN m.t1_spirit WHEN m.t2_id = t.id THEN m.t2_spirit END), 0.0) as spirit_avg,
             t.small_logo
         FROM teams t
-        LEFT JOIN matches m ON (m.t1_id = t.id OR m.t2_id = t.id) AND m.deleted_at IS NULL
+        LEFT JOIN matches m ON (m.t1_id = t.id OR m.t2_id = t.id) AND m.deleted_at IS NULL AND m.possession >= 3
         WHERE t.division = ? AND t.deleted_at IS NULL
         GROUP BY t.id, t.name, t.location, t.init_rank, t.small_logo
         "#
@@ -285,6 +285,11 @@ pub async fn update_poc_player(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
     
+    // Validate required fields
+    if payload.name.trim().is_empty() || payload.email.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
     // Verify POC owns this team and player belongs to it
     let valid: Option<(i64,)> = sqlx::query_as(
         "SELECT p.id FROM users p 
@@ -295,6 +300,16 @@ pub async fn update_poc_player(
     
     if valid.is_none() {
         return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+    
+    // Check if email already used by another user
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE email = ? AND id != ? AND deleted_at IS NULL"
+    ).bind(&payload.email).bind(player_id).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    if existing.is_some() {
+        return Err(axum::http::StatusCode::CONFLICT);
     }
     
     sqlx::query(
@@ -315,12 +330,27 @@ pub async fn add_poc_player(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
     
+    // Validate required fields
+    if payload.name.trim().is_empty() || payload.email.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
     let team_id: Option<(i64,)> = sqlx::query_as(
         "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL"
     ).bind(&email).fetch_optional(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     
     let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
+    
+    // Check if email already exists
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL"
+    ).bind(&payload.email).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    if existing.is_some() {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
     
     let result = sqlx::query(
         "INSERT INTO users (name, email, phone, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, 2, ?, ?)"

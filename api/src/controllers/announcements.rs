@@ -49,6 +49,16 @@ pub async fn create_announcement(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     verify_super(&state, &headers).await?;
     
+    // Validate required fields
+    if payload.title.trim().is_empty() || payload.message.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
+    // Validate priority (0=high, 1=normal, 2=low)
+    if payload.priority < 0 || payload.priority > 2 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
     let result = sqlx::query(
         "INSERT INTO announcements (title, message, priority, expires_at) VALUES (?, ?, ?, ?)"
     )
@@ -71,6 +81,16 @@ pub async fn update_announcement(
     Json(payload): Json<UpdateAnnouncementRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     verify_super(&state, &headers).await?;
+    
+    // Validate required fields
+    if payload.title.trim().is_empty() || payload.message.trim().is_empty() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    
+    // Validate priority (0=high, 1=normal, 2=low)
+    if payload.priority < 0 || payload.priority > 2 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
     
     sqlx::query(
         "UPDATE announcements SET title = ?, message = ?, priority = ?, expires_at = ? WHERE id = ?"
