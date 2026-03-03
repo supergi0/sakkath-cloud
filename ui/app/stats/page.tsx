@@ -204,9 +204,9 @@ export default function Stats() {
         <div className="rounded-sm bg-white dark:bg-slate-900 overflow-hidden">
           <div className="overflow-x-auto max-h-[calc(100vh-240px)] overflow-y-auto">
             <table className="w-full text-xs sm:text-sm min-w-[800px]">
-              <thead className="sticky top-0 bg-white dark:bg-slate-900 z-10">
+              <thead className="sticky top-0 bg-white dark:bg-slate-900 z-20">
                 <tr className="border-b border-gray-200 dark:border-slate-700">
-                  <SortHeader field="name" label="Player" className="text-left" />
+                  <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30" />
                   <SortHeader field="team" label="Team" className="text-left" />
                   <SortHeader field="goals" label="Gls" />
                   <SortHeader field="assists" label="Ast" />
@@ -227,7 +227,7 @@ export default function Stats() {
                       key={player.id} 
                       className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700"
                     >
-                      <td className="py-3 px-2">
+                      <td className="py-3 px-2 sticky left-0 bg-white dark:bg-slate-900 z-10 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] dark:shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]">
                         <Text variant="primary" className="font-medium truncate max-w-[150px] block">{player.name}</Text>
                       </td>
                       <td className="py-3 px-2">
