@@ -37,15 +37,17 @@ pub struct TeamMatch {
     pub time: String,
     pub possession: Option<i64>,
     pub stream_url: Option<String>,
+    pub match_type: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct MatchEvent {
     pub id: i64,
-    pub player_id: i64,
+    pub player_id: Option<i64>,
     pub player_name: String,
     pub team_id: i64,
     pub event_type: i64,
+    pub actor_user_id: Option<i64>,
     pub created_at: String,
 }
 
@@ -89,7 +91,6 @@ pub struct UpcomingMatch {
     pub field_name: String,
     pub time: String,
     pub possession: Option<i64>,
-    pub volunteer_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -141,7 +142,7 @@ pub async fn get_team_matches(State(state): State<crate::AppState>, Path(team_id
         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit, 
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
-               m.possession, m.stream_url
+             m.possession, m.stream_url, m.type as match_type
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
@@ -161,6 +162,7 @@ pub async fn get_match_events(State(state): State<crate::AppState>, Path(match_i
                COALESCE(u.name, '') as player_name, 
                COALESCE(me.team_id, u.team_id) as team_id, 
                me.event_type, 
+             me.actor_user_id,
                COALESCE(me.created_at, '') as created_at
         FROM match_events me
         LEFT JOIN users u ON u.id = me.player_id
@@ -219,6 +221,7 @@ pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_i
                COALESCE(u.name, '') as player_name, 
                COALESCE(me.team_id, u.team_id) as team_id, 
                me.event_type,
+             me.actor_user_id,
                COALESCE(me.created_at, '') as created_at
         FROM match_events me 
         LEFT JOIN users u ON u.id = me.player_id
@@ -234,12 +237,17 @@ pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_i
 }
 
 // Get upcoming matches for volunteers (next 12 matches)
-pub async fn get_upcoming_matches(State(state): State<crate::AppState>) -> Json<Vec<UpcomingMatch>> {
+pub async fn get_upcoming_matches(
+    State(state): State<crate::AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<UpcomingMatch>>, axum::http::StatusCode> {
+    verify_admin_user(&state, &headers).await?;
+
     let matches = sqlx::query_as::<_, UpcomingMatch>(
         r#"
         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
-               m.possession, m.volunteer_id
+               m.possession
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
@@ -248,39 +256,7 @@ pub async fn get_upcoming_matches(State(state): State<crate::AppState>) -> Json<
         ORDER BY m.time ASC LIMIT 12
         "#
     ).fetch_all(&state.db).await.unwrap_or_default();
-    Json(matches)
-}
-
-// Volunteer joins a match
-pub async fn join_match(
-    State(state): State<crate::AppState>,
-    headers: axum::http::HeaderMap,
-    Path(match_id): Path<i64>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let email = extract_email(&headers)?;
-    
-    let user: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE email = ? AND role IN (0, 1) AND deleted_at IS NULL"
-    ).bind(&email).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    let user_id = user.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
-    
-    // Check if match already has volunteer
-    let existing: Option<(Option<i64>,)> = sqlx::query_as(
-        "SELECT volunteer_id FROM matches WHERE id = ? AND deleted_at IS NULL"
-    ).bind(match_id).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    if let Some((Some(_),)) = existing {
-        return Err(axum::http::StatusCode::CONFLICT);
-    }
-    
-    sqlx::query("UPDATE matches SET volunteer_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(user_id).bind(match_id).execute(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    Ok(Json(serde_json::json!({"success": true})))
+    Ok(Json(matches))
 }
 
 // Start match (set possession based on request)
@@ -290,9 +266,23 @@ pub async fn start_match(
     Path(match_id): Path<i64>,
     Json(payload): Json<StartMatchRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    verify_volunteer(&state, &headers, match_id).await?;
+    verify_admin_user(&state, &headers).await?;
     
     let possession = payload.possession.unwrap_or(1);
+    if possession != 1 && possession != 2 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let current: Option<(Option<i64>,)> = sqlx::query_as(
+        "SELECT possession FROM matches WHERE id = ? AND deleted_at IS NULL"
+    ).bind(match_id).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let current_possession = current.ok_or(axum::http::StatusCode::NOT_FOUND)?.0;
+    if current_possession.is_some() {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
     sqlx::query("UPDATE matches SET possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(possession).bind(match_id).execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -311,13 +301,28 @@ pub async fn end_match(
     headers: axum::http::HeaderMap,
     Path(match_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    verify_volunteer(&state, &headers, match_id).await?;
+    verify_admin_user(&state, &headers).await?;
+
+    let info: Option<(Option<i64>, i64)> = sqlx::query_as(
+        r#"SELECT m.possession, t.division
+           FROM matches m
+           JOIN teams t ON t.id = m.t1_id
+           WHERE m.id = ? AND m.deleted_at IS NULL"#
+    ).bind(match_id).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (possession, division) = info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    if possession.is_none() || possession.unwrap_or(0) >= 3 {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
     
     sqlx::query("UPDATE matches SET possession = 3, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(match_id).execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let auto_action = crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
     
-    Ok(Json(serde_json::json!({"success": true})))
+    Ok(Json(serde_json::json!({"success": true, "auto_action": auto_action})))
 }
 
 // Record match event (score/turnover/block)
@@ -327,7 +332,7 @@ pub async fn record_event(
     Path(match_id): Path<i64>,
     Json(payload): Json<MatchEventRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    verify_volunteer(&state, &headers, match_id).await?;
+    let actor_user_id = verify_admin_user(&state, &headers).await?;
     
     // Validate event_type (0=goal, 1=assist, 2=block, 3=turnover)
     if payload.event_type < 0 || payload.event_type > 3 {
@@ -342,7 +347,11 @@ pub async fn record_event(
     let (t1_id, t2_id, mut t1_score, mut t2_score, possession) = match_info
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
     
-    let current_pos = possession.unwrap_or(1);
+    let current_pos = possession.ok_or(axum::http::StatusCode::CONFLICT)?;
+    if current_pos >= 3 {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
     let mut new_pos = current_pos;
     let team_id = if current_pos == 1 { t1_id } else { t2_id };
     
@@ -350,20 +359,23 @@ pub async fn record_event(
     if let Some(player_id) = payload.player_id {
         // Player specified - get their team_id
         let player_team: Option<(i64,)> = sqlx::query_as(
-            "SELECT team_id FROM users WHERE id = ?"
+            "SELECT team_id FROM users WHERE id = ? AND deleted_at IS NULL"
         ).bind(player_id).fetch_optional(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         
-        let player_team_id = player_team.map(|t| t.0);
+        let player_team_id = player_team.map(|t| t.0).ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+        if player_team_id != t1_id && player_team_id != t2_id {
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
         
-        sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type) VALUES (?, ?, ?, ?)")
-            .bind(match_id).bind(player_id).bind(player_team_id).bind(payload.event_type)
+        sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type, actor_user_id) VALUES (?, ?, ?, ?, ?)")
+            .bind(match_id).bind(player_id).bind(player_team_id).bind(payload.event_type).bind(actor_user_id)
             .execute(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    } else if payload.event_type == 0 {
-        // Score without player - store team_id
-        sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type) VALUES (?, NULL, ?, ?)")
-            .bind(match_id).bind(team_id).bind(payload.event_type)
+    } else {
+        // Team-level event (without player)
+        sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type, actor_user_id) VALUES (?, NULL, ?, ?, ?)")
+            .bind(match_id).bind(team_id).bind(payload.event_type).bind(actor_user_id)
             .execute(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -396,7 +408,7 @@ pub async fn undo_event(
     headers: axum::http::HeaderMap,
     Path(match_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    verify_volunteer(&state, &headers, match_id).await?;
+    verify_admin_user(&state, &headers).await?;
     
     let match_info: Option<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ?"
@@ -545,31 +557,21 @@ pub async fn get_poc_matches(
     Ok(Json(matches))
 }
 
-async fn verify_volunteer(state: &crate::AppState, headers: &axum::http::HeaderMap, match_id: i64) -> Result<i64, axum::http::StatusCode> {
-    let email = extract_email(headers)?;
-    
+async fn verify_admin_user(state: &crate::AppState, headers: &axum::http::HeaderMap) -> Result<i64, axum::http::StatusCode> {
+    let claims = extract_claims(headers)?;
     let user: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE email = ? AND role IN (0, 1) AND deleted_at IS NULL"
-    ).bind(&email).fetch_optional(&state.db).await
+        "SELECT id FROM users WHERE id = ? AND email = ? AND role IN (0, 1) AND deleted_at IS NULL"
+    ).bind(claims.user_id).bind(&claims.email).fetch_optional(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    let user_id = user.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
-    
-    let match_vol: Option<(Option<i64>,)> = sqlx::query_as(
-        "SELECT volunteer_id FROM matches WHERE id = ? AND deleted_at IS NULL"
-    ).bind(match_id).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    let vol_id = match_vol.ok_or(axum::http::StatusCode::NOT_FOUND)?.0;
-    
-    if vol_id != Some(user_id) {
-        return Err(axum::http::StatusCode::FORBIDDEN);
-    }
-    
-    Ok(user_id)
+
+    user.map(|u| u.0).ok_or(axum::http::StatusCode::FORBIDDEN)
 }
 
 fn extract_email(headers: &axum::http::HeaderMap) -> Result<String, axum::http::StatusCode> {
+    Ok(extract_claims(headers)?.email)
+}
+
+fn extract_claims(headers: &axum::http::HeaderMap) -> Result<crate::controllers::user::Claims, axum::http::StatusCode> {
     let auth_header = headers.get("Authorization").and_then(|h| h.to_str().ok());
     let token = match auth_header {
         Some(h) if h.starts_with("Bearer ") => h.trim_start_matches("Bearer "),
@@ -581,5 +583,5 @@ fn extract_email(headers: &axum::http::HeaderMap) -> Result<String, axum::http::
         &jsonwebtoken::DecodingKey::from_secret(secret.as_ref()),
         &jsonwebtoken::Validation::default(),
     ).map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
-    Ok(token_data.claims.email)
+    Ok(token_data.claims)
 }

@@ -27,6 +27,12 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type SortField = 'name' | 'team' | 'goals' | 'assists' | 'blocks' | 'turnovers' | 'matches' | 'gpm' | 'apm' | 'bpm' | 'tpm';
 type SortDir = 'asc' | 'desc';
+interface StatsPreferences {
+  division: 'all' | 'open' | 'women';
+  teamFilter: number | null;
+}
+
+const STATS_PREFS_KEY = 'sakkath:stats:preferences';
 
 const PAGE_SIZE = 20;
 
@@ -41,6 +47,20 @@ export default function Stats() {
   const [page, setPage] = useState(1);
 
   useEffect(() => {
+    const savedPreferences = localStorage.getItem(STATS_PREFS_KEY);
+    if (savedPreferences) {
+      try {
+        const parsed: StatsPreferences = JSON.parse(savedPreferences);
+        if (parsed.division === 'all' || parsed.division === 'open' || parsed.division === 'women') {
+          setDivision(parsed.division);
+        }
+        if (typeof parsed.teamFilter === 'number' || parsed.teamFilter === null) {
+          setTeamFilter(parsed.teamFilter);
+        }
+      } catch {
+      }
+    }
+
     Promise.all([
       fetch(`${API_URL}/v1/player-stats`).then(r => r.json()),
       fetch(`${API_URL}/v1/teams`).then(r => r.json()),
@@ -50,6 +70,11 @@ export default function Stats() {
       setLoading(false);
     }).catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    const preferences: StatsPreferences = { division, teamFilter };
+    localStorage.setItem(STATS_PREFS_KEY, JSON.stringify(preferences));
+  }, [division, teamFilter]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {

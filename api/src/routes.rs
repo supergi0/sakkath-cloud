@@ -48,7 +48,6 @@ fn poc_routes() -> Router<AppState> {
 fn volunteer_routes() -> Router<AppState> {
     Router::new()
         .route("/admin/matches", get(matches::get_upcoming_matches))
-        .route("/admin/matches/:id/join", post(matches::join_match))
         .route("/admin/matches/:id/start", post(matches::start_match))
         .route("/admin/matches/:id/end", post(matches::end_match))
         .route("/admin/matches/:id/event", post(matches::record_event))

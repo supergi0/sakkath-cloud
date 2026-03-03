@@ -137,10 +137,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             player_id INTEGER,
             team_id INTEGER,
             event_type INTEGER NOT NULL,
+            actor_user_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches(id),
             FOREIGN KEY (player_id) REFERENCES users(id),
-            FOREIGN KEY (team_id) REFERENCES teams(id)
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            FOREIGN KEY (actor_user_id) REFERENCES users(id)
         )
         "#
     )
@@ -176,6 +178,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_player_id ON match_events(player_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_match_id ON match_events(match_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
     
     // Migrate existing match_events table if needed (add team_id column)
@@ -194,17 +197,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 player_id INTEGER,
                 team_id INTEGER,
                 event_type INTEGER NOT NULL,
+                actor_user_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (match_id) REFERENCES matches(id),
                 FOREIGN KEY (player_id) REFERENCES users(id),
-                FOREIGN KEY (team_id) REFERENCES teams(id)
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                FOREIGN KEY (actor_user_id) REFERENCES users(id)
             )"#
         ).execute(pool).await?;
         
         // Copy old data (derive team_id from player_id)
         sqlx::query(
-            r#"INSERT INTO match_events (id, match_id, player_id, team_id, event_type, created_at)
-               SELECT me.id, me.match_id, me.player_id, u.team_id, me.event_type, me.created_at
+                r#"INSERT INTO match_events (id, match_id, player_id, team_id, event_type, actor_user_id, created_at)
+                    SELECT me.id, me.match_id, me.player_id, u.team_id, me.event_type, NULL, me.created_at
                FROM match_events_old me
                LEFT JOIN users u ON u.id = me.player_id"#
         ).execute(pool).await?;
@@ -215,7 +220,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("CREATE INDEX idx_match_events_player_id ON match_events(player_id)").execute(pool).await?;
         sqlx::query("CREATE INDEX idx_match_events_match_id ON match_events(match_id)").execute(pool).await?;
         sqlx::query("CREATE INDEX idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
+        sqlx::query("CREATE INDEX idx_match_events_actor_user_id ON match_events(actor_user_id)").execute(pool).await?;
         sqlx::query("CREATE INDEX idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
+    }
+
+    let has_actor_user_id: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('match_events') WHERE name='actor_user_id'"
+    ).fetch_one(pool).await.unwrap_or((0,));
+
+    if has_actor_user_id.0 == 0 {
+        sqlx::query("ALTER TABLE match_events ADD COLUMN actor_user_id INTEGER")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)")
+            .execute(pool)
+            .await?;
     }
     
     // Migrate matches table: add type column if not exists

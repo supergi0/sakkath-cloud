@@ -50,6 +50,11 @@ interface ChartDataPoint {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type MatchTabType = 'log' | 'chart' | 'stats';
+interface MatchesPreferences {
+  activeTab: MatchTabType;
+}
+
+const MATCHES_PREFS_KEY = 'sakkath:matches:preferences';
 
 const fetcher = (url: string) => fetch(url).then(r => r.ok ? r.json() : null);
 
@@ -58,6 +63,24 @@ function MatchContent() {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<MatchTabType>('log');
   const matchId = searchParams.get('match_id');
+
+  useEffect(() => {
+    const savedPreferences = localStorage.getItem(MATCHES_PREFS_KEY);
+    if (savedPreferences) {
+      try {
+        const parsed: MatchesPreferences = JSON.parse(savedPreferences);
+        if (parsed.activeTab === 'log' || parsed.activeTab === 'chart' || parsed.activeTab === 'stats') {
+          setActiveTab(parsed.activeTab);
+        }
+      } catch {
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const preferences: MatchesPreferences = { activeTab };
+    localStorage.setItem(MATCHES_PREFS_KEY, JSON.stringify(preferences));
+  }, [activeTab]);
 
   // Determine if match is live to set refresh interval
   const { data: match, error, isLoading } = useSWR<MatchDetail>(

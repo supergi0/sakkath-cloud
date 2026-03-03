@@ -10,6 +10,7 @@ use std::env;
 
 #[derive(Serialize, Deserialize)]
 pub struct Claims {
+    pub user_id: i64,
     pub email: String,
     pub exp: usize,
 }
@@ -49,8 +50,8 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     let password_hash = format!("{:x}", md5::compute(&payload.password));
     
-    let user: Option<(String, i64)> = sqlx::query_as(
-        "SELECT email, role FROM users WHERE email = ? AND password_hash = ? AND deleted_at IS NULL"
+    let user: Option<(i64, String, i64)> = sqlx::query_as(
+        "SELECT id, email, role FROM users WHERE email = ? AND password_hash = ? AND deleted_at IS NULL"
     )
     .bind(&payload.email)
     .bind(&password_hash)
@@ -58,7 +59,7 @@ pub async fn login(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     
-    if let Some((email, role)) = user {
+    if let Some((user_id, email, role)) = user {
         let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default-secret-change-in-production".to_string());
         let expiration = Utc::now()
             .checked_add_signed(Duration::hours(24))
@@ -66,6 +67,7 @@ pub async fn login(
             .timestamp() as usize;
         
         let claims = Claims {
+            user_id,
             email: email.clone(),
             exp: expiration,
         };

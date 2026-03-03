@@ -48,11 +48,17 @@ interface TeamMatch {
   time: string;
   possession: number | null;
   stream_url: string | null;
+  match_type: number;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type TabType = 'matches' | 'players' | 'timeline';
+interface TeamsPreferences {
+  activeTab: TabType;
+}
+
+const TEAMS_PREFS_KEY = 'sakkath:teams:preferences';
 
 function TeamContent() {
   const searchParams = useSearchParams();
@@ -63,6 +69,24 @@ function TeamContent() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>('matches');
   const teamId = searchParams.get('team_id') || '1';
+
+  useEffect(() => {
+    const savedPreferences = localStorage.getItem(TEAMS_PREFS_KEY);
+    if (savedPreferences) {
+      try {
+        const parsed: TeamsPreferences = JSON.parse(savedPreferences);
+        if (parsed.activeTab === 'matches' || parsed.activeTab === 'players' || parsed.activeTab === 'timeline') {
+          setActiveTab(parsed.activeTab);
+        }
+      } catch {
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const preferences: TeamsPreferences = { activeTab };
+    localStorage.setItem(TEAMS_PREFS_KEY, JSON.stringify(preferences));
+  }, [activeTab]);
 
   useEffect(() => {
     Promise.all([
@@ -97,6 +121,12 @@ function TeamContent() {
     if (!time) return '';
     const d = new Date(time);
     return d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' }) + ' - ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  };
+
+  const getRoundLabel = (type: number) => {
+    if (type === 1001) return 'Playoffs';
+    if (type === 1002) return 'Finals';
+    return `Round ${type}`;
   };
 
   return (
@@ -254,7 +284,7 @@ function TeamContent() {
                     onClick={() => router.push(`/matches?match_id=${match.id}`)}
                   >
                     <div className="flex items-center justify-between mb-3">
-                      <Text variant="secondary" className="text-xs">{formatTime(match.time)}</Text>
+                      <Text as="div" variant="secondary" className="text-xs">{`${getRoundLabel(match.match_type)} ${formatTime(match.time)}`}</Text>
                       <div className="flex items-center gap-2">
                         {status === 'live' && (
                           <>

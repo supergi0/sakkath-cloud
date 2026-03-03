@@ -31,6 +31,12 @@ interface Stats {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type SortBy = 'game' | 'initial' | 'spirit';
+interface DashboardPreferences {
+  division: 'open' | 'women';
+  sortBy: SortBy;
+}
+
+const DASHBOARD_PREFS_KEY = 'sakkath:dashboard:preferences';
 
 export default function Home() {
   const { theme } = useTheme();
@@ -44,6 +50,21 @@ export default function Home() {
 
   useEffect(() => {
     setMounted(true);
+
+    const savedPreferences = localStorage.getItem(DASHBOARD_PREFS_KEY);
+    if (savedPreferences) {
+      try {
+        const parsed: DashboardPreferences = JSON.parse(savedPreferences);
+        if (parsed.division === 'open' || parsed.division === 'women') {
+          setDivision(parsed.division);
+        }
+        if (parsed.sortBy === 'game' || parsed.sortBy === 'initial' || parsed.sortBy === 'spirit') {
+          setSortBy(parsed.sortBy);
+        }
+      } catch {
+      }
+    }
+
     Promise.all([
       fetch(`${API_URL}/v1/standings?division=0`).then(r => r.json()),
       fetch(`${API_URL}/v1/standings?division=1`).then(r => r.json()),
@@ -55,6 +76,12 @@ export default function Home() {
       setLoading(false);
     }).catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    const preferences: DashboardPreferences = { division, sortBy };
+    localStorage.setItem(DASHBOARD_PREFS_KEY, JSON.stringify(preferences));
+  }, [mounted, division, sortBy]);
 
   const isDark = mounted && theme === 'dark';
   

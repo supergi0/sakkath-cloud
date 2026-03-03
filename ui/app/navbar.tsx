@@ -22,9 +22,10 @@ const navItems = [
 // Mobile header items when logged in: HOME, ADMIN/SUPER, LOGOUT
 const getMobileNavItems = (isLoggedIn: boolean, roleName: string | null) => {
   if (isLoggedIn) {
+    const roleHref = roleName === 'POC' ? '/poc' : '/admin';
     return [
       { name: 'HOME', href: '/', clickable: true },
-      { name: roleName || 'ADMIN', href: '#', clickable: false, isRole: true },
+      { name: roleName || 'ADMIN', href: roleHref, clickable: true, isRole: true },
       { name: 'LOGOUT', href: '#', clickable: true, isLogout: true },
     ];
   }
@@ -228,12 +229,17 @@ export function Navbar() {
                   {item.name}
                 </Link>
               ) : (
-                <span
+                <Link
                   key={item.name}
-                  className="px-2 py-1.5 text-xs font-bold text-yellow-400"
+                  href="/admin"
+                  className={`px-2 py-1.5 text-xs font-bold transition-all rounded ${
+                    pathname === '/admin'
+                      ? 'bg-blue-950 text-yellow-400'
+                      : 'text-yellow-400 hover:bg-blue-950/50'
+                  }`}
                 >
                   {item.name}
-                </span>
+                </Link>
               )
             ) : (
               <button

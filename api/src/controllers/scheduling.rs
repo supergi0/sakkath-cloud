@@ -3,6 +3,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 // Tournament state structures
 #[derive(Serialize)]
@@ -69,6 +70,136 @@ pub struct DivisionQuery {
     pub division: i64,
 }
 
+fn build_swiss_pairings(
+    ordered_teams: &[i64],
+    history: &HashMap<i64, HashSet<i64>>,
+) -> Vec<(i64, i64)> {
+    let mut remaining: Vec<i64> = ordered_teams.to_vec();
+    let mut pairings = Vec::new();
+
+    while remaining.len() >= 2 {
+        let team = remaining.remove(0);
+
+        let candidate_idx = remaining
+            .iter()
+            .position(|opp| !history.get(&team).map(|h| h.contains(opp)).unwrap_or(false))
+            .unwrap_or(0);
+
+        let opponent = remaining.remove(candidate_idx);
+        pairings.push((team, opponent));
+    }
+
+    pairings
+}
+
+async fn create_playoffs_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result<bool, sqlx::Error> {
+    let existing_playoffs: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"
+    ).bind(division).fetch_one(db).await?;
+
+    if existing_playoffs.0 > 0 {
+        return Ok(false);
+    }
+
+    let standings = compute_standings(db, division).await;
+    if standings.len() < 4 {
+        return Ok(false);
+    }
+
+    let top4: Vec<i64> = standings.iter().take(4).map(|team| team.team_id).collect();
+    let base_time = "2026-02-01 09:00:00";
+
+    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1001)")
+        .bind(top4[0]).bind(top4[3]).bind(1_i64).bind(base_time).execute(db).await?;
+
+    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1001)")
+        .bind(top4[1]).bind(top4[2]).bind(2_i64).bind(base_time).execute(db).await?;
+
+    Ok(true)
+}
+
+async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result<bool, sqlx::Error> {
+    let finals_existing: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1002 AND m.deleted_at IS NULL"
+    ).bind(division).fetch_one(db).await?;
+
+    if finals_existing.0 > 0 {
+        return Ok(false);
+    }
+
+    let playoffs: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#
+    ).bind(division).fetch_all(db).await?;
+
+    if playoffs.len() < 2 {
+        return Ok(false);
+    }
+
+    let completed = playoffs.iter().filter(|(_, _, s1, s2)| s1 != s2).count();
+    if completed < 2 {
+        return Ok(false);
+    }
+
+    let winners: Vec<i64> = playoffs.iter().map(|(t1, t2, s1, s2)| if s1 > s2 { *t1 } else { *t2 }).collect();
+    if winners.len() < 2 {
+        return Ok(false);
+    }
+
+    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1002)")
+        .bind(winners[0]).bind(winners[1]).bind(1_i64).bind("2026-02-02 10:00:00")
+        .execute(db).await?;
+
+    Ok(true)
+}
+
+pub async fn auto_advance_division_if_ready(db: &sqlx::SqlitePool, division: i64) -> Option<String> {
+    let total_rounds = if division == 0 { crate::OPEN_ROUNDS } else { crate::WOMEN_ROUNDS };
+
+    for round in 1..=total_rounds {
+        let stats: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
+               FROM matches m JOIN teams t ON m.t1_id = t.id
+               WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#
+        ).bind(round).bind(division).fetch_one(db).await.unwrap_or((0, 0));
+
+        let (total, completed) = stats;
+
+        if total == 0 {
+            if round == 1 || {
+                let prev: (i64, i64) = sqlx::query_as(
+                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
+                       FROM matches m JOIN teams t ON m.t1_id = t.id
+                       WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#
+                ).bind(round - 1).bind(division).fetch_one(db).await.unwrap_or((0, 0));
+                prev.0 > 0 && prev.0 == prev.1
+            } {
+                if generate_next_round_internal(db, division, round, total_rounds).await.is_ok() {
+                    return Some(format!("generated_round_{}", round));
+                }
+                return None;
+            }
+            return None;
+        }
+
+        if completed < total {
+            return None;
+        }
+    }
+
+    if create_playoffs_if_needed(db, division).await.unwrap_or(false) {
+        return Some("generated_playoffs".to_string());
+    }
+
+    if create_finals_if_needed(db, division).await.unwrap_or(false) {
+        return Some("generated_finals".to_string());
+    }
+
+    None
+}
+
 // Auto-generate R1 for divisions with no matches (called on startup)
 pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
     for division in 0..=1 {
@@ -127,9 +258,9 @@ pub async fn read_tournament_state(
         let stats: (i64, i64, i64, i64) = sqlx::query_as(
             r#"SELECT 
                 COUNT(*) as total,
-                SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END) as completed,
-                SUM(CASE WHEN possession IS NOT NULL AND possession < 3 THEN 1 ELSE 0 END) as in_progress,
-                SUM(CASE WHEN possession IS NULL THEN 1 ELSE 0 END) as scheduled
+                COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0) as completed,
+                COALESCE(SUM(CASE WHEN possession IS NOT NULL AND possession < 3 THEN 1 ELSE 0 END), 0) as in_progress,
+                COALESCE(SUM(CASE WHEN possession IS NULL THEN 1 ELSE 0 END), 0) as scheduled
             FROM matches m
             JOIN teams t1 ON m.t1_id = t1.id
             WHERE m.type = ? AND t1.division = ? AND m.deleted_at IS NULL"#
@@ -317,7 +448,7 @@ pub async fn generate_next_round(
         let prev_incomplete: (i64,) = sqlx::query_as(
             r#"SELECT COUNT(*) FROM matches m 
                JOIN teams t ON m.t1_id = t.id 
-               WHERE m.type = ? AND t.division = ? AND m.possession < 3 AND m.deleted_at IS NULL"#
+               WHERE m.type = ? AND t.division = ? AND (m.possession IS NULL OR m.possession < 3) AND m.deleted_at IS NULL"#
         ).bind(next_round - 1).bind(division).fetch_one(&state.db).await.unwrap_or((1,));
         
         if prev_incomplete.0 > 0 {
@@ -340,7 +471,7 @@ pub async fn generate_next_round(
     }
     
     // Get previous opponents for each team
-    let mut history: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    let mut history: HashMap<i64, HashSet<i64>> = HashMap::new();
     let prev_matches: Vec<(i64, i64)> = sqlx::query_as(
         r#"SELECT m.t1_id, m.t2_id FROM matches m 
            JOIN teams t ON m.t1_id = t.id 
@@ -348,8 +479,8 @@ pub async fn generate_next_round(
     ).bind(division).bind(next_round).fetch_all(&state.db).await.unwrap_or_default();
     
     for (t1, t2) in prev_matches {
-        history.entry(t1).or_default().push(t2);
-        history.entry(t2).or_default().push(t1);
+        history.entry(t1).or_default().insert(t2);
+        history.entry(t2).or_default().insert(t1);
     }
     
     // Swiss pairing: group by points (wins), then pair within groups
@@ -371,28 +502,7 @@ pub async fn generate_next_round(
     }
     
     // Swiss fold pairing: 1v(n/2+1), 2v(n/2+2), etc.
-    let mut pairings: Vec<(i64, i64)> = Vec::new();
-    let n = all_teams.len();
-    let half = n / 2;
-    
-    for i in 0..half {
-        let t1 = all_teams[i];
-        let t2 = all_teams[i + half];
-        
-        // Check if they've played before
-        let played = history.get(&t1).map(|h| h.contains(&t2)).unwrap_or(false);
-        if played && i + 1 < half {
-            // Try swapping with next pair
-            let alt_t2 = all_teams[i + 1 + half];
-            let alt_played = history.get(&t1).map(|h| h.contains(&alt_t2)).unwrap_or(false);
-            if !alt_played {
-                pairings.push((t1, alt_t2));
-                pairings.push((all_teams[i + 1], t2));
-                continue;
-            }
-        }
-        pairings.push((t1, t2));
-    }
+    let pairings = build_swiss_pairings(&all_teams, &history);
     
     // Insert matches
     let base_time = format!("2026-01-{:02} 09:00:00", 18 + next_round);
@@ -422,7 +532,7 @@ pub async fn check_and_populate_gates(
     // Find current state
     for round in 1..=total_rounds {
         let stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END)
+            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
                FROM matches m JOIN teams t ON m.t1_id = t.id 
                WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#
         ).bind(round).bind(division).fetch_one(&state.db).await.unwrap_or((0, 0));
@@ -434,7 +544,7 @@ pub async fn check_and_populate_gates(
             if round == 1 || {
                 // Check prev round complete
                 let prev: (i64, i64) = sqlx::query_as(
-                    r#"SELECT COUNT(*), SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END)
+                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
                        FROM matches m JOIN teams t ON m.t1_id = t.id 
                        WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#
                 ).bind(round - 1).bind(division).fetch_one(&state.db).await.unwrap_or((0, 0));
@@ -469,7 +579,7 @@ async fn generate_next_round_internal(db: &sqlx::SqlitePool, division: i64, roun
     let standings = compute_standings(db, division).await;
     
     // Get previous opponents
-    let mut history: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    let mut history: HashMap<i64, HashSet<i64>> = HashMap::new();
     let prev_matches: Vec<(i64, i64)> = sqlx::query_as(
         r#"SELECT m.t1_id, m.t2_id FROM matches m 
            JOIN teams t ON m.t1_id = t.id 
@@ -477,8 +587,8 @@ async fn generate_next_round_internal(db: &sqlx::SqlitePool, division: i64, roun
     ).bind(division).bind(round).fetch_all(db).await.unwrap_or_default();
     
     for (t1, t2) in prev_matches {
-        history.entry(t1).or_default().push(t2);
-        history.entry(t2).or_default().push(t1);
+        history.entry(t1).or_default().insert(t2);
+        history.entry(t2).or_default().insert(t1);
     }
     
     // Swiss pairing
@@ -497,15 +607,7 @@ async fn generate_next_round_internal(db: &sqlx::SqlitePool, division: i64, roun
         }
     }
     
-    let mut pairings: Vec<(i64, i64)> = Vec::new();
-    let n = all_teams.len();
-    let half = n / 2;
-    
-    for i in 0..half {
-        let t1 = all_teams[i];
-        let t2 = all_teams[i + half];
-        pairings.push((t1, t2));
-    }
+    let pairings = build_swiss_pairings(&all_teams, &history);
     
     let base_time = format!("2026-01-{:02} 09:00:00", 18 + round);
     for (idx, (t1, t2)) in pairings.iter().enumerate() {

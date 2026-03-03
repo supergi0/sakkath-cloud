@@ -50,6 +50,13 @@ interface AllData {
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type StatusFilter = 'all' | 'live' | 'upcoming' | 'done';
+interface SchedulePreferences {
+  division: 0 | 1;
+  selectedRound: number | null;
+  statusFilter: StatusFilter;
+}
+
+const SCHEDULE_PREFS_KEY = 'sakkath:schedule:preferences';
 
 export default function Schedule() {
   const router = useRouter();
@@ -59,7 +66,27 @@ export default function Schedule() {
   const [allData, setAllData] = useState<AllData | null>(null);
   const [loading, setLoading] = useState(true);
   const [roundDropdownOpen, setRoundDropdownOpen] = useState(false);
+  const [prefsReady, setPrefsReady] = useState(false);
+  const [hasSavedPreferences, setHasSavedPreferences] = useState(false);
+  const [initialRoundSet, setInitialRoundSet] = useState(false);
   const roundDropdownRef = useRef<HTMLDivElement>(null);
+
+  const fetchAllData = async (isInitial = false) => {
+    if (isInitial) setLoading(true);
+
+    try {
+      const [openState, womenState, openMatches, womenMatches] = await Promise.all([
+        fetch(`${API_URL}/v1/schedule/state?division=0`).then(r => r.json()),
+        fetch(`${API_URL}/v1/schedule/state?division=1`).then(r => r.json()),
+        fetch(`${API_URL}/v1/schedule/matches?division=0`).then(r => r.json()),
+        fetch(`${API_URL}/v1/schedule/matches?division=1`).then(r => r.json()),
+      ]);
+
+      setAllData({ openState, womenState, openMatches, womenMatches });
+    } finally {
+      if (isInitial) setLoading(false);
+    }
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -74,16 +101,40 @@ export default function Schedule() {
 
   // Fetch all data once on mount
   useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      fetch(`${API_URL}/v1/schedule/state?division=0`).then(r => r.json()),
-      fetch(`${API_URL}/v1/schedule/state?division=1`).then(r => r.json()),
-      fetch(`${API_URL}/v1/schedule/matches?division=0`).then(r => r.json()),
-      fetch(`${API_URL}/v1/schedule/matches?division=1`).then(r => r.json()),
-    ]).then(([openState, womenState, openMatches, womenMatches]) => {
-      setAllData({ openState, womenState, openMatches, womenMatches });
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    const savedPreferences = localStorage.getItem(SCHEDULE_PREFS_KEY);
+    if (savedPreferences) {
+      try {
+        const parsed: SchedulePreferences = JSON.parse(savedPreferences);
+        if (parsed.division === 0 || parsed.division === 1) {
+          setDivision(parsed.division);
+        }
+        if (parsed.selectedRound === null || typeof parsed.selectedRound === 'number') {
+          setSelectedRound(parsed.selectedRound);
+        }
+        if (parsed.statusFilter === 'all' || parsed.statusFilter === 'live' || parsed.statusFilter === 'upcoming' || parsed.statusFilter === 'done') {
+          setStatusFilter(parsed.statusFilter);
+        }
+        setHasSavedPreferences(true);
+      } catch {
+      }
+    }
+    setPrefsReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!prefsReady) return;
+    const preferences: SchedulePreferences = { division, selectedRound, statusFilter };
+    localStorage.setItem(SCHEDULE_PREFS_KEY, JSON.stringify(preferences));
+  }, [prefsReady, division, selectedRound, statusFilter]);
+
+  useEffect(() => {
+    fetchAllData(true).catch(() => setLoading(false));
+
+    const interval = setInterval(() => {
+      fetchAllData(false).catch(() => undefined);
+    }, 4000);
+
+    return () => clearInterval(interval);
   }, []);
 
   // Get current division's data
@@ -98,7 +149,7 @@ export default function Schedule() {
 
   // Filter matches client-side (no API call)
   const filteredMatches = useMemo(() => {
-    let result = allMatches;
+    let result = [...allMatches];
     
     // Filter by round
     if (selectedRound !== null) {
@@ -125,6 +176,95 @@ export default function Schedule() {
     if (type === 1001) return 'Playoffs';
     if (type === 1002) return 'Finals';
     return `Round ${type}`;
+  };
+
+  const currentRoundValue = () => {
+    if (!tournamentState) return null;
+    if (tournamentState.phase === 'playoffs' || tournamentState.current_round > tournamentState.total_rounds) return 1001;
+    if (tournamentState.phase === 'finals') return 1002;
+    return tournamentState.current_round;
+  };
+
+  const getInitialRoundSelection = () => {
+    if (!tournamentState) return null;
+
+    if (tournamentState.phase === 'complete') {
+      return null;
+    }
+
+    const currentRound = currentRoundValue();
+    if (currentRound === null) {
+      return null;
+    }
+
+    if (currentRound < 1000) {
+      const currentStatus = tournamentState.round_status.find((r) => r.round === currentRound);
+      const started = (currentStatus?.completed || 0) > 0 || (currentStatus?.in_progress || 0) > 0;
+      return started ? currentRound : null;
+    }
+
+    const currentMatches = allMatches.filter((m) => m.match_type === currentRound);
+    const started = currentMatches.some((m) => m.possession !== null);
+    return started ? currentRound : null;
+  };
+
+  useEffect(() => {
+    if (!prefsReady || !allData || initialRoundSet) return;
+
+    if (hasSavedPreferences) {
+      setInitialRoundSet(true);
+      return;
+    }
+
+    setSelectedRound(getInitialRoundSelection());
+    setInitialRoundSet(true);
+  }, [prefsReady, allData, initialRoundSet, hasSavedPreferences, division]);
+
+  const getCurrentRoundProgress = () => {
+    if (!tournamentState) return null;
+
+    if (tournamentState.phase === 'complete') {
+      const finals = allMatches
+        .filter((m) => m.match_type === 1002 && m.possession !== null && m.possession >= 3)
+        .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+
+      if (finals.length > 0) {
+        const final = finals[0];
+        const winner = final.t1_score > final.t2_score ? final.t1_name : final.t2_score > final.t1_score ? final.t2_name : null;
+        if (winner) return `Tournament complete • Winner: ${winner}`;
+      }
+      return 'Tournament complete';
+    }
+
+    const currentRound = currentRoundValue();
+    if (currentRound === null) return null;
+
+    if (currentRound < 1000) {
+      const currentStatus = tournamentState.round_status.find((r) => r.round === currentRound);
+      if (!currentStatus) return null;
+
+      const started = currentStatus.completed > 0 || currentStatus.in_progress > 0;
+      if (!started) {
+        return `Tournament not started yet • ${getRoundLabel(currentRound)}`;
+      }
+
+      const left = Math.max(currentStatus.total - currentStatus.completed, 0);
+      return `Current: ${getRoundLabel(currentRound)} • matches: ${currentStatus.completed} done and ${left} left`;
+    }
+
+    const currentMatches = allMatches.filter((m) => m.match_type === currentRound);
+    if (currentMatches.length === 0) {
+      return currentRound === 1001 ? 'Playoffs pending' : 'Finals pending';
+    }
+
+    const completed = currentMatches.filter((m) => m.possession !== null && m.possession >= 3).length;
+    const started = currentMatches.some((m) => m.possession !== null);
+    if (!started) {
+      return `${getRoundLabel(currentRound)} not started yet`;
+    }
+
+    const left = Math.max(currentMatches.length - completed, 0);
+    return `Current: ${getRoundLabel(currentRound)} • matches: ${completed} done and ${left} left`;
   };
 
   // Handle division change - reset filters
@@ -250,6 +390,14 @@ export default function Schedule() {
               </button>
             ))}
           </div>
+
+          {getCurrentRoundProgress() && (
+            <div className="mt-3">
+              <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-100">
+                {getCurrentRoundProgress()}
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -267,15 +415,16 @@ export default function Schedule() {
               return (
                 <div 
                   key={match.id} 
-                  className="p-4 rounded bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 cursor-pointer hover:border-blue-500 transition-colors"
+                  className={`p-4 rounded bg-white dark:bg-slate-900 border cursor-pointer transition-colors hover:border-blue-500 ${
+                    match.match_type === currentRoundValue()
+                      ? 'border-blue-500 dark:border-blue-400 ring-1 ring-blue-200 dark:ring-blue-900'
+                      : 'border-gray-200 dark:border-slate-700'
+                  }`}
                   onClick={() => router.push(`/matches?match_id=${match.id}`)}
                 >
                   {/* Match header with round, time, status */}
                   <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <Text variant="secondary" className="text-xs font-medium mb-1">{getRoundLabel(match.match_type)}</Text>
-                      <Text variant="secondary" className="text-xs">{formatTime(match.time)}</Text>
-                    </div>
+                    <Text as="div" variant="secondary" className="text-xs font-medium">{`${getRoundLabel(match.match_type)} ${formatTime(match.time)}`}</Text>
                     <div className="flex items-center gap-2">
                       {status === 'live' && (
                         <>

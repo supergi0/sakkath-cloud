@@ -66,9 +66,6 @@ export default function Login() {
             <Text variant="secondary" className="text-sm mb-3">
                 If you want to edit info, scores, spirit scores, please contact your designated volunteer.
             </Text>
-            <Text variant="secondary" className="text-xs opacity-70">
-              Test accounts: super@sakkath.com, admin1@sakkath.com, poc1@sakkath.com (pw: super@sakkath.com)
-            </Text>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
