@@ -52,7 +52,7 @@ pub struct TeamStanding {
     pub small_logo: Option<String>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct PlayerStat {
     pub id: i64,
     pub name: String,
@@ -187,31 +187,34 @@ pub async fn get_team_players(State(state): State<crate::AppState>, Path(id): Pa
     Json(players)
 }
 
-// Standings by division in one query
+// Standings by division using helper sorting (c1-c7 tiebreakers, includes live scores)
 pub async fn get_standings(State(state): State<crate::AppState>, Query(params): Query<DivisionQuery>) -> Json<Vec<TeamStanding>> {
-    let division = params.division.unwrap_or(0);
+    let division = params.division.unwrap_or(0) as i64;
     
-    let standings = sqlx::query_as::<_, TeamStanding>(
-        r#"
-        SELECT 
-            t.id, t.name, COALESCE(t.location, '') as location, COALESCE(t.init_rank, 0) as init_rank,
-            COALESCE(SUM(CASE WHEN (m.t1_id = t.id AND m.t1_score > m.t2_score) OR (m.t2_id = t.id AND m.t2_score > m.t1_score) THEN 1 ELSE 0 END), 0) as wins,
-            COALESCE(SUM(CASE WHEN (m.t1_id = t.id AND m.t1_score < m.t2_score) OR (m.t2_id = t.id AND m.t2_score < m.t1_score) THEN 1 ELSE 0 END), 0) as losses,
-            COALESCE(SUM(CASE WHEN m.t1_id = t.id THEN m.t1_score WHEN m.t2_id = t.id THEN m.t2_score ELSE 0 END), 0) as points_for,
-            COALESCE(SUM(CASE WHEN m.t1_id = t.id THEN m.t2_score WHEN m.t2_id = t.id THEN m.t1_score ELSE 0 END), 0) as points_against,
-            COALESCE(AVG(CASE WHEN m.t1_id = t.id THEN m.t1_spirit WHEN m.t2_id = t.id THEN m.t2_spirit END), 0.0) as spirit_avg,
-            t.small_logo
-        FROM teams t
-        LEFT JOIN matches m ON (m.t1_id = t.id OR m.t2_id = t.id) AND m.deleted_at IS NULL AND m.possession >= 3
-        WHERE t.division = ? AND t.deleted_at IS NULL
-        GROUP BY t.id, t.name, t.location, t.init_rank, t.small_logo
-        "#
-    ).bind(division).fetch_all(&state.db).await.unwrap_or_default();
+    let sorted = crate::helpers::sorting::get_cached_intermediate_standings(&state.db, division).await;
+    
+    let standings: Vec<TeamStanding> = sorted.iter().map(|t| TeamStanding {
+        id: t.team_id,
+        name: t.name.clone(),
+        location: String::new(),
+        init_rank: t.init_rank,
+        wins: t.wins,
+        losses: t.losses,
+        points_for: t.points_for,
+        points_against: t.points_against,
+        spirit_avg: t.spirit_avg,
+        small_logo: t.small_logo.clone(),
+    }).collect();
+    
     Json(standings)
 }
 
 // All player stats in one query
 pub async fn get_player_stats(State(state): State<crate::AppState>) -> Json<Vec<PlayerStat>> {
+    if let Some(cached) = crate::helpers::cache::get_player_stats::<Vec<PlayerStat>>().await {
+        return Json(cached);
+    }
+
     let players = sqlx::query_as::<_, PlayerStat>(
         r#"
         SELECT 
@@ -231,6 +234,8 @@ pub async fn get_player_stats(State(state): State<crate::AppState>) -> Json<Vec<
         GROUP BY u.id, u.name, u.team_id, t.name, t.division
         "#
     ).fetch_all(&state.db).await.unwrap_or_default();
+
+    crate::helpers::cache::set_player_stats(&players).await;
     Json(players)
 }
 

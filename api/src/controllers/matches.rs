@@ -4,6 +4,8 @@ use axum::{
 };
 use serde::{Serialize, Deserialize};
 use sqlx::Row;
+use crate::helpers::sorting;
+use crate::helpers::cache;
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct Field {
@@ -321,6 +323,9 @@ pub async fn end_match(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let auto_action = crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
+    sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+    cache::invalidate_division(division).await;
+    cache::invalidate_player_stats().await;
     
     Ok(Json(serde_json::json!({"success": true, "auto_action": auto_action})))
 }
@@ -398,6 +403,14 @@ pub async fn record_event(
         .bind(t1_score).bind(t2_score).bind(new_pos).bind(match_id)
         .execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let division: Option<(i64,)> = sqlx::query_as(
+        "SELECT division FROM teams WHERE id = ? AND deleted_at IS NULL"
+    ).bind(t1_id).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some((division,)) = division {
+        sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+    }
     
     Ok(Json(serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos})))
 }
@@ -415,7 +428,7 @@ pub async fn undo_event(
     ).bind(match_id).fetch_optional(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     
-    let (_t1_id, _t2_id, mut t1_score, mut t2_score, possession) = match_info
+    let (t1_id, _t2_id, mut t1_score, mut t2_score, possession) = match_info
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
     
     let mut current_pos = possession.unwrap_or(1);
@@ -466,6 +479,14 @@ pub async fn undo_event(
             .bind(t1_score).bind(t2_score).bind(current_pos).bind(match_id)
             .execute(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let division: Option<(i64,)> = sqlx::query_as(
+            "SELECT division FROM teams WHERE id = ? AND deleted_at IS NULL"
+        ).bind(t1_id).fetch_optional(&state.db).await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some((division,)) = division {
+            sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        }
         
         Ok(Json(serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": current_pos})))
     } else {
@@ -521,6 +542,14 @@ pub async fn submit_spirit_score(
     } else {
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
+
+    let division: Option<(i64,)> = sqlx::query_as(
+        "SELECT division FROM teams WHERE id = ? AND deleted_at IS NULL"
+    ).bind(t1_id).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some((division,)) = division {
+        sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+    }
     
     Ok(Json(serde_json::json!({"success": true})))
 }
@@ -544,7 +573,7 @@ pub async fn get_poc_matches(
         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit,
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
-               m.possession, m.stream_url
+             m.possession, m.stream_url, m.type as match_type
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
