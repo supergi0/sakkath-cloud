@@ -12,6 +12,7 @@ mod seeder;
 mod controllers;
 mod middleware;
 mod routes;
+pub mod helpers;
 
 // Tournament configuration: number of swiss rounds per division
 pub const OPEN_ROUNDS: i64 = 4;
@@ -72,6 +73,9 @@ async fn main() {
     migration::verify_migrations(&db_pool)
         .await
         .expect("Failed to verify migrations");
+
+    // Init redis cache (non-blocking, works without redis)
+    helpers::cache::init_redis().await;
 
     // Auto-generate R1 for divisions with no matches
     controllers::scheduling::auto_generate_initial_rounds(&db_pool).await;
