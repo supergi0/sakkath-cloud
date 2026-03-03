@@ -8,6 +8,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder, key_extract
 use std::sync::Arc;
 
 mod migration;
+mod seeder;
 mod controllers;
 mod middleware;
 mod routes;
