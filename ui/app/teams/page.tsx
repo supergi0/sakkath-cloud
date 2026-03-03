@@ -4,7 +4,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { MapPin, Users, Trophy, Target, ArrowUp, ArrowDown, Star, TrendingUp, TrendingDown, Sparkle, AlignStartVertical, Play, Circle } from "lucide-react";
 import { Text } from "../components/Text";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 
 interface Team {
   id: number;
@@ -410,8 +410,7 @@ function TeamContent() {
                   <div className="mb-6">
                     <div className="w-full overflow-x-auto overflow-y-hidden">
                       <div style={{ width: `${Math.max(1200, seedData.length * 80)}px`, height: '500px' }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          <LineChart data={seedData} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
+                          <LineChart data={seedData} width={Math.max(1200, seedData.length * 80)} height={500} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.3} />
                             <XAxis 
                               dataKey="match" 
@@ -456,7 +455,6 @@ function TeamContent() {
                               animationEasing="ease-out"
                             />
                           </LineChart>
-                        </ResponsiveContainer>
                       </div>
                     </div>
                   </div>

@@ -4,7 +4,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { ArrowLeft, Circle, Play } from "lucide-react";
 import { Text } from "../components/Text";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceDot } from 'recharts';
 import useSWR from 'swr';
 
 interface MatchDetail {
@@ -329,8 +329,7 @@ function MatchContent() {
                 ) : (
                   <div className="w-full overflow-x-auto overflow-y-hidden">
                     <div style={{ width: `${Math.max(1200, chartData.length * 40)}px`, height: '500px' }}>
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
+                      <LineChart data={chartData} width={Math.max(1200, chartData.length * 40)} height={500} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.3} />
                           <XAxis 
                             dataKey="time" 
@@ -385,7 +384,6 @@ function MatchContent() {
                           animationBegin={200}
                         />
                       </LineChart>
-                    </ResponsiveContainer>
                   </div>
                   </div>
                 )}
