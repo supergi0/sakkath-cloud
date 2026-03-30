@@ -14,15 +14,16 @@ pub struct TeamSortData {
     pub init_rank: i64,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
+    pub points: i64, // win=2, draw=1, loss=0
     pub points_for: i64,
     pub points_against: i64,
     pub spirit_avg: f64,
-    // per-round win history: round -> won(true)/lost(false)
-    pub round_results: Vec<bool>,
-    // opponents faced (team_ids)
+    // per-round result: 1=win, 0=draw, -1=loss
+    pub round_results: Vec<i8>,
     pub opponents: Vec<i64>,
-    // head-to-head results: opponent_id -> won(true)/lost(false)
-    pub h2h: HashMap<i64, bool>,
+    // head-to-head: opponent_id -> 1=win, 0=draw, -1=loss
+    pub h2h: HashMap<i64, i8>,
 }
 
 // Fetch all sort data for a division in minimal queries
@@ -49,6 +50,8 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
             init_rank: *rank,
             wins: 0,
             losses: 0,
+            draws: 0,
+            points: 0,
             points_for: 0,
             points_against: 0,
             spirit_avg: 0.0,
@@ -60,24 +63,31 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
 
     // Process matches into team data
     for (t1, t2, s1, s2, _round) in &matches {
-        if s1 == s2 { continue; } // skip draws (shouldn't happen in ultimate)
-        let t1_won = s1 > s2;
+        let (t1_res, t2_res): (i8, i8) = if s1 > s2 { (1, -1) } else if s1 < s2 { (-1, 1) } else { (0, 0) };
 
         if let Some(d) = data_map.get_mut(t1) {
             d.points_for += s1;
             d.points_against += s2;
             d.opponents.push(*t2);
-            if t1_won { d.wins += 1; } else { d.losses += 1; }
-            d.round_results.push(t1_won);
-            d.h2h.insert(*t2, t1_won);
+            match t1_res {
+                1 => { d.wins += 1; d.points += 2; }
+                0 => { d.draws += 1; d.points += 1; }
+                _ => { d.losses += 1; }
+            }
+            d.round_results.push(t1_res);
+            d.h2h.insert(*t2, t1_res);
         }
         if let Some(d) = data_map.get_mut(t2) {
             d.points_for += s2;
             d.points_against += s1;
             d.opponents.push(*t1);
-            if t1_won { d.losses += 1; } else { d.wins += 1; }
-            d.round_results.push(!t1_won);
-            d.h2h.insert(*t1, !t1_won);
+            match t2_res {
+                1 => { d.wins += 1; d.points += 2; }
+                0 => { d.draws += 1; d.points += 1; }
+                _ => { d.losses += 1; }
+            }
+            d.round_results.push(t2_res);
+            d.h2h.insert(*t1, t2_res);
         }
     }
 
@@ -101,17 +111,17 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
     data_map.into_values().collect()
 }
 
-// C1: Compare by wins (descending)
-pub fn c1_wins(a: &TeamSortData, b: &TeamSortData) -> Ordering {
-    b.wins.cmp(&a.wins)
+// C1: Compare by points (win=2, draw=1, loss=0) descending
+pub fn c1_points(a: &TeamSortData, b: &TeamSortData) -> Ordering {
+    b.points.cmp(&a.points)
 }
 
-// C2: Head-to-head. If a beat b, a ranks higher. Only applicable when comparing 2 specific teams.
+// C2: Head-to-head. If a beat b, a ranks higher.
 pub fn c2_head_to_head(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     match a.h2h.get(&b.team_id) {
-        Some(true) => Ordering::Less,   // a beat b, a ranks higher
-        Some(false) => Ordering::Greater, // b beat a
-        None => Ordering::Equal,         // never played
+        Some(1) => Ordering::Less,    // a beat b
+        Some(-1) => Ordering::Greater, // b beat a
+        _ => Ordering::Equal,          // draw or never played
     }
 }
 
@@ -137,13 +147,17 @@ pub fn c5_points_scored(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b.points_for.cmp(&a.points_for)
 }
 
-// C6: Momentum score - cumulative wins after each round (higher = earlier wins = played in harder brackets)
+// C6: Momentum score - cumulative points after each round (higher = earlier wins)
 pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
-    let momentum = |results: &[bool]| -> i64 {
+    let momentum = |results: &[i8]| -> i64 {
         let mut cumulative = 0i64;
         let mut total = 0i64;
-        for won in results {
-            if *won { cumulative += 1; }
+        for r in results {
+            match r {
+                1 => cumulative += 2,
+                0 => cumulative += 1,
+                _ => {}
+            }
             total += cumulative;
         }
         total
@@ -163,7 +177,7 @@ pub fn sort_teams(teams: &mut Vec<TeamSortData>) {
     let snapshot: Vec<TeamSortData> = teams.clone();
 
     teams.sort_by(|a, b| {
-        let mut ord = c1_wins(a, b);
+        let mut ord = c1_points(a, b);
         if ord != Ordering::Equal { return ord; }
 
         ord = c2_head_to_head(a, b);
@@ -215,18 +229,25 @@ pub async fn get_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<T
 
     // Layer live scores on top of completed data
     for (t1, t2, s1, s2) in &live {
-        if s1 == s2 { continue; }
-        let t1_winning = s1 > s2;
+        let (t1_res, t2_res): (i8, i8) = if s1 > s2 { (1, -1) } else if s1 < s2 { (-1, 1) } else { (0, 0) };
 
         if let Some(&idx) = team_map.get(t1) {
             teams[idx].points_for += s1;
             teams[idx].points_against += s2;
-            if t1_winning { teams[idx].wins += 1; } else { teams[idx].losses += 1; }
+            match t1_res {
+                1 => { teams[idx].wins += 1; teams[idx].points += 2; }
+                0 => { teams[idx].draws += 1; teams[idx].points += 1; }
+                _ => { teams[idx].losses += 1; }
+            }
         }
         if let Some(&idx) = team_map.get(t2) {
             teams[idx].points_for += s2;
             teams[idx].points_against += s1;
-            if t1_winning { teams[idx].losses += 1; } else { teams[idx].wins += 1; }
+            match t2_res {
+                1 => { teams[idx].wins += 1; teams[idx].points += 2; }
+                0 => { teams[idx].draws += 1; teams[idx].points += 1; }
+                _ => { teams[idx].losses += 1; }
+            }
         }
     }
 

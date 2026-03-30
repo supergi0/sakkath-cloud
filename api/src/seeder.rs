@@ -4,7 +4,7 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let pw_hash = "fc5e038d38a57032085441e7fe7010b0"; // MD5 of "helloworld"
 
     // -----------------------------------------------------------------------
-    // TEAMS: 24 Open (IDs 1-24) + 10 Women (IDs 25-34) = 34 total
+    // TEAMS: 22 Open (IDs 1-22) + 10 Women (IDs 23-32) = 32 total
     // -----------------------------------------------------------------------
     let open_team_names = [
         "Bangalore Bolts", "Chennai Challengers", "Mumbai Mavericks", "Delhi Dragons",
@@ -12,13 +12,13 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "Jaipur Jaguars", "Lucknow Lions", "Kochi Kings", "Goa Gladiators",
         "Chandigarh Chargers", "Indore Infernos", "Nagpur Ninjas", "Vizag Vikings",
         "Coimbatore Cosmos", "Mysore Mambas", "Surat Strikers", "Bhopal Blazers",
-        "Patna Pioneers", "Vadodara Vipers", "Ludhiana Lynx", "Agra Archers",
+        "Patna Pioneers", "Vadodara Vipers",
     ];
     let open_locations = [
         "Bangalore", "Chennai", "Mumbai", "Delhi", "Hyderabad", "Kolkata",
         "Pune", "Ahmedabad", "Jaipur", "Lucknow", "Kochi", "Goa",
         "Chandigarh", "Indore", "Nagpur", "Vizag", "Coimbatore", "Mysore",
-        "Surat", "Bhopal", "Patna", "Vadodara", "Ludhiana", "Agra",
+        "Surat", "Bhopal", "Patna", "Vadodara",
     ];
     let women_team_names = [
         "Bangalore Blaze", "Chennai Chargers", "Mumbai Meteors", "Delhi Divas",
@@ -48,7 +48,7 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // -----------------------------------------------------------------------
     // PLAYERS: 16 per team, looping through name lists
-    // Open team IDs: 1-24, Women team IDs: 25-34
+    // Open team IDs: 1-22, Women team IDs: 23-32
     // -----------------------------------------------------------------------
     let open_first = ["Raj", "Amit", "Vikram", "Rohan", "Arjun", "Sanjay", "Karthik", "Nikhil",
                       "Aditya", "Pranav", "Rahul", "Vivek", "Suresh", "Ganesh", "Mohan", "Ravi"];
@@ -73,8 +73,8 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         };
     }
 
-    // Open division players (teams 1-24)
-    for team_id in 1usize..=24 {
+    // Open division players (teams 1-22)
+    for team_id in 1usize..=22 {
         for slot in 0usize..16 {
             let first = open_first[slot % 16];
             let last = last_names[(team_id + slot) % 16];
@@ -89,9 +89,9 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
-    // Women division players (teams 25-34)
+    // Women division players (teams 23-32)
     for team_offset in 0usize..10 {
-        let team_id = 25 + team_offset;
+        let team_id = 23 + team_offset;
         for slot in 0usize..16 {
             let first = women_first[slot % 16];
             let last = last_names[(team_id + slot) % 16];
@@ -119,9 +119,9 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ('Admin Two',   'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#
     ).bind(pw_hash).bind(pw_hash).bind(pw_hash).execute(pool).await?;
 
-    // POC per team
+    // POC per team (32 teams)
     let mut poc_batch: Vec<String> = Vec::new();
-    for team_id in 1usize..=34 {
+    for team_id in 1usize..=32 {
         poc_batch.push(format!(
             "('POC Team {tid}', 'poc{tid}@sakkath.com', '+91900{tid:07}', '1992-03-10', {tid}, 3, '{pw}')",
             tid = team_id, pw = pw_hash
@@ -131,60 +131,56 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(&poc_q).execute(pool).await?;
 
     // -----------------------------------------------------------------------
-    // FIELDS
+    // FIELDS (4 fields)
     // -----------------------------------------------------------------------
     sqlx::query(
         r#"INSERT INTO fields (name, hints, map_link) VALUES
-        ('Field 1', 'Main astroturf ground. Cleats preferred.',      'https://maps.google.com/?q=field1'),
-        ('Field 2', 'Secondary astroturf. Cleats recommended.',      'https://maps.google.com/?q=field2'),
-        ('Field 3', 'Natural grass. Bring water.',                   'https://maps.google.com/?q=field3'),
-        ('Field 4', 'Open grass field. Windy afternoons.',           'https://maps.google.com/?q=field4'),
-        ('Field 5', 'Practice field. Flat surface.',                 'https://maps.google.com/?q=field5'),
-        ('Field 6', 'Corner field. Good lighting.',                  'https://maps.google.com/?q=field6'),
-        ('Field 7', 'Backup field. Limited seating.',                'https://maps.google.com/?q=field7')"#
+        ('Field Alpha', 'Main Astroturf Ground, Sports Complex, North Block',   'https://maps.google.com/?q=field+alpha+sports+complex'),
+        ('Field Bravo', 'Secondary Astroturf, Sports Complex, East Block',      'https://maps.google.com/?q=field+bravo+sports+complex'),
+        ('Field Charlie', 'Natural Grass Field, Sports Complex, South Block',   'https://maps.google.com/?q=field+charlie+sports+complex'),
+        ('Field Delta', 'Open Grass Field, Sports Complex, West Block',         'https://maps.google.com/?q=field+delta+sports+complex')"#
     ).execute(pool).await?;
 
     // -----------------------------------------------------------------------
     // ROUND 1 MATCHES  (type = 1)
     //
-    // Open (teams 1-24): 12 matches (1v13, 2v14, ... 12v24)
+    // Open (teams 1-22): 11 matches (1v12, 2v13, ... 11v22)
     //   Completed (possession=3): matches 1-8
-    //   Live / in-progress (possession=1 or 2): match 9
-    //   Not started (possession=NULL, score=0-0): matches 10-12
+    //   Live (possession=1): match 9v20
+    //   Not started (possession=NULL): 10v21, 11v22
     //
-    // Women (teams 25-34): 5 matches (25v30, 26v31, 27v32, 28v33, 29v34)
-    //   Completed: matches 25v30, 26v31, 27v32
-    //   Live: 28v33
-    //   Not started: 29v34
+    // Women (teams 23-32): 5 matches (23v28, 24v29, 25v30, 26v31, 27v32)
+    //   Completed: 23v28, 24v29, 25v30
+    //   Live: 26v31
+    //   Not started: 27v32
     // -----------------------------------------------------------------------
 
-    // Open R1 - completed matches (1-8)
-    let open_completed: &[(i64, i64, i64, i64, i64, i64, i64)] = &[
-        (1, 13, 1, 15, 9,  14, 13),
-        (2, 14, 2, 15, 10, 13, 14),
-        (3, 15, 3, 14, 11, 14, 12),
-        (4, 16, 4, 15, 8,  13, 13),
-        (5, 17, 5, 13, 11, 15, 14),
-        (6, 18, 6, 14, 10, 14, 13),
-        (7, 19, 7, 15, 12, 13, 14),
-        (8, 20, 1, 13, 9,  14, 15),
+    // Open R1 - completed matches (1v12 through 8v19)
+    let open_completed: &[(i64, i64, i64, i64, i64)] = &[
+        (1, 12, 1, 15, 9),
+        (2, 13, 2, 15, 10),
+        (3, 14, 3, 14, 11),
+        (4, 15, 4, 15, 8),
+        (5, 16, 1, 13, 11),
+        (6, 17, 2, 14, 10),
+        (7, 18, 3, 15, 12),
+        (8, 19, 4, 13, 9),
     ];
-    for &(t1, t2, field, s1, s2, sp1, sp2) in open_completed {
+    for &(t1, t2, field, s1, s2) in open_completed {
         sqlx::query(
-            "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (?, ?, ?, '2026-03-15 09:00:00', ?, ?, ?, ?, 3, 1)"
-        ).bind(t1).bind(t2).bind(field).bind(s1).bind(s2).bind(sp1).bind(sp2).execute(pool).await?;
+            "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (?, ?, ?, '2026-03-15 09:00:00', ?, ?, 3, 1)"
+        ).bind(t1).bind(t2).bind(field).bind(s1).bind(s2).execute(pool).await?;
     }
 
-    // Open R1 - live match (9v21, score 7-5, possession = t1)
+    // Open R1 - live match (9v20, score 7-5, possession = t1)
     sqlx::query(
-        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (9, 21, 2, '2026-03-15 11:00:00', 7, 5, NULL, NULL, 1, 1)"
+        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (9, 20, 1, '2026-03-15 11:00:00', 7, 5, NULL, NULL, 1, 1)"
     ).execute(pool).await?;
 
-    // Open R1 - not started (10v22, 11v23, 12v24)
+    // Open R1 - not started (10v21, 11v22)
     let open_upcoming: &[(i64, i64, i64)] = &[
-        (10, 22, 3),
-        (11, 23, 4),
-        (12, 24, 5),
+        (10, 21, 2),
+        (11, 22, 3),
     ];
     for &(t1, t2, field) in open_upcoming {
         sqlx::query(
@@ -193,30 +189,30 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     // Women R1 - completed matches
-    let women_completed: &[(i64, i64, i64, i64, i64, i64, i64)] = &[
-        (25, 30, 6, 15, 8,  14, 13),
-        (26, 31, 7, 13, 11, 13, 15),
-        (27, 32, 1, 15, 10, 14, 14),
+    let women_completed: &[(i64, i64, i64, i64, i64)] = &[
+        (23, 28, 4, 15, 8),
+        (24, 29, 1, 13, 11),
+        (25, 30, 2, 15, 10),
     ];
-    for &(t1, t2, field, s1, s2, sp1, sp2) in women_completed {
+    for &(t1, t2, field, s1, s2) in women_completed {
         sqlx::query(
-            "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (?, ?, ?, '2026-03-15 09:00:00', ?, ?, ?, ?, 3, 1)"
-        ).bind(t1).bind(t2).bind(field).bind(s1).bind(s2).bind(sp1).bind(sp2).execute(pool).await?;
+            "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (?, ?, ?, '2026-03-15 09:00:00', ?, ?, 3, 1)"
+        ).bind(t1).bind(t2).bind(field).bind(s1).bind(s2).execute(pool).await?;
     }
 
-    // Women R1 - live (28v33, score 6-6)
+    // Women R1 - live (26v31, score 6-6)
     sqlx::query(
-        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (28, 33, 2, '2026-03-15 11:00:00', 6, 6, NULL, NULL, 2, 1)"
+        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, t1_spirit, t2_spirit, possession, type) VALUES (26, 31, 3, '2026-03-15 11:00:00', 6, 6, NULL, NULL, 2, 1)"
     ).execute(pool).await?;
 
-    // Women R1 - not started (29v34)
+    // Women R1 - not started (27v32)
     sqlx::query(
-        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (29, 34, 3, '2026-03-15 13:00:00', 0, 0, NULL, 1)"
+        "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (27, 32, 4, '2026-03-15 13:00:00', 0, 0, NULL, 1)"
     ).execute(pool).await?;
 
     // -----------------------------------------------------------------------
-    // MATCH EVENTS for completed Open matches (goals/assists/blocks for match 1)
-    // player_id offsets: team 1 = players 1-16, team 13 = players (12*16+1)=193 to 208
+    // MATCH EVENTS for completed Open matches (goals/assists/blocks for match 1-2)
+    // player_id offsets: team 1 = players 1-16, team 12 = players (11*16+1)=177 to 192
     // -----------------------------------------------------------------------
     sqlx::query(
         r#"INSERT INTO match_events (match_id, player_id, team_id, event_type, created_at) VALUES
@@ -238,10 +234,10 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         r#"INSERT INTO announcements (title, message, priority, expires_at) VALUES
         ('Welcome to Sakkath 2026!', 'Tournament runs March 15-17. Check the schedule for your match times.', 0, '2026-03-20 23:59:59'),
         ('Spirit Scoring Reminder', 'Submit spirit scores within 30 minutes after each match ends.', 1, '2026-03-20 23:59:59'),
-        ('Round 1 Underway', 'Round 1 is in progress. 11 of 17 matches completed. Live match on Field 2!', 1, '2026-03-20 23:59:59')"#
+        ('Round 1 Underway', 'Round 1 is in progress. 11 of 16 matches completed. Live matches on Field 1 and 3!', 1, '2026-03-20 23:59:59')"#
     ).execute(pool).await?;
 
-    tracing::info!("Seeded: 24 open teams, 10 women teams, 544 players, 17 R1 matches (11 done, 2 live, 4 upcoming)");
+    tracing::info!("Seeded: 22 open teams, 10 women teams, 512 players, 16 R1 matches (11 done, 2 live, 3 upcoming)");
 
     Ok(())
 }

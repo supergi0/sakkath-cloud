@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from "react";
-import { MapPin, ExternalLink } from "lucide-react";
+import { MapPin, Navigation } from "lucide-react";
 import { Text } from "../components/Text";
 
 interface Field {
@@ -12,6 +12,20 @@ interface Field {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
+
+const FIELD_COLORS = [
+  'from-emerald-600 to-green-800',
+  'from-green-600 to-teal-800',
+  'from-lime-600 to-emerald-800',
+  'from-teal-600 to-cyan-800',
+];
+
+const FIELD_PATTERNS = [
+  'radial-gradient(circle at 30% 50%, rgba(255,255,255,0.08) 0%, transparent 50%)',
+  'radial-gradient(circle at 70% 40%, rgba(255,255,255,0.08) 0%, transparent 50%)',
+  'radial-gradient(circle at 50% 60%, rgba(255,255,255,0.08) 0%, transparent 50%)',
+  'radial-gradient(circle at 40% 30%, rgba(255,255,255,0.08) 0%, transparent 50%)',
+];
 
 export default function Fields() {
   const [fields, setFields] = useState<Field[]>([]);
@@ -30,7 +44,7 @@ export default function Fields() {
   if (loading) {
     return (
       <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
-        <div className="max-w-7xl mx-auto">
+        <div className="max-w-4xl mx-auto">
           <Text variant="primary">Loading...</Text>
         </div>
       </div>
@@ -39,62 +53,53 @@ export default function Fields() {
 
   return (
     <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
-      <div className="max-w-7xl mx-auto">
-        <div className="rounded-sm p-6 bg-white dark:bg-slate-900">
-          <Text as="h1" variant="primary" className="text-xl mb-6">
-            Fields
-          </Text>
+      <div className="max-w-4xl mx-auto space-y-4">
+        {fields.length === 0 ? (
+          <Text variant="secondary">No fields available.</Text>
+        ) : (
+          fields.map((field, index) => (
+            <div key={field.id} className="rounded-2xl border border-gray-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-slate-900">
+              {/* Field image placeholder */}
+              <div
+                className={`relative h-40 md:h-48 bg-gradient-to-br ${FIELD_COLORS[index % FIELD_COLORS.length]}`}
+                style={{ backgroundImage: FIELD_PATTERNS[index % FIELD_PATTERNS.length] }}
+              >
+                {/* Field line markings */}
+                <div className="absolute inset-4 md:inset-6 border-2 border-white/20 rounded-sm" />
+                <div className="absolute top-4 md:top-6 bottom-4 md:bottom-6 left-1/2 -translate-x-px w-0.5 bg-white/20" />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 md:w-20 md:h-20 rounded-full border-2 border-white/20" />
+                <div className="absolute bottom-3 right-3 bg-black/40 backdrop-blur-sm rounded-lg px-3 py-1.5">
+                  <span className="text-white font-bold text-sm">{field.name}</span>
+                </div>
+              </div>
 
-          {fields.length === 0 ? (
-            <Text variant="secondary">No fields available.</Text>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {fields.map((field, index) => (
-                <div 
-                  key={field.id}
-                  className={`p-4 rounded border transition-colors ${
-                    index === 0 
-                      ? 'border-blue-900 dark:border-blue-700 bg-blue-50 dark:bg-blue-950/30' 
-                      : 'border-gray-200 dark:border-slate-700 hover:border-blue-900 dark:hover:border-blue-900'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2 mb-3">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-8 h-8 rounded-full text-white flex items-center justify-center text-sm font-bold ${
-                        index === 0 ? 'bg-blue-700' : 'bg-blue-900'
-                      }`}>
-                        {field.id}
-                      </div>
-                      <Text variant="primary" className={index === 0 ? "font-bold text-lg" : "font-semibold text-lg"}>
-                        {field.name}
-                      </Text>
-                    </div>
-                    {field.map_link && (
-                      <a 
-                        href={field.map_link}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
-                        aria-label="Open map"
-                      >
-                        <ExternalLink className="w-4 h-4 text-blue-900" />
-                      </a>
-                    )}
-                  </div>
-                  
-                  {field.hints && (
-                    <div className="flex items-start gap-2">
-                      <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-400 mt-0.5 flex-shrink-0" />
-                      <Text variant="secondary" className="text-sm">
+              {/* Field info */}
+              <div className="p-4">
+                {field.hints && (
+                  field.map_link ? (
+                    <a
+                      href={field.map_link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-start gap-2 group"
+                    >
+                      <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-400 mt-0.5 shrink-0" />
+                      <Text variant="secondary" className="text-sm group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
                         {field.hints}
                       </Text>
+                      <Navigation className="w-4 h-4 text-gray-400 dark:text-gray-500 mt-0.5 shrink-0 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors" />
+                    </a>
+                  ) : (
+                    <div className="flex items-start gap-2">
+                      <MapPin className="w-4 h-4 text-gray-500 dark:text-gray-400 mt-0.5 shrink-0" />
+                      <Text variant="secondary" className="text-sm">{field.hints}</Text>
                     </div>
-                  )}
-                </div>
-              ))}
+                  )
+                )}
+              </div>
             </div>
-          )}
-        </div>
+          ))
+        )}
       </div>
     </div>
   );

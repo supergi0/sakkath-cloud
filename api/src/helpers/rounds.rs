@@ -241,10 +241,9 @@ fn force_pair(team_ids: &[i64]) -> Vec<Pairing> {
     pairs
 }
 
-// Generate playoff bracket from final swiss standings.
-// For groups of 4: semi-finals (1v4, 2v3), then finals from winners.
-// For groups of 2: direct match (e.g. 9v10 for last placement).
-// For larger groups: top vs bottom fold (5v8, 6v7), then winner/loser brackets.
+// Generate seed-based placement rounds from final swiss standings.
+// For groups of 4: first round is 1v4 and 2v3, second round is 1v2 and 3v4.
+// For groups of 2: direct match only.
 pub fn generate_playoff_pairings(
     sorted_teams: &[TeamSortData],
     bracket_size: usize,
@@ -256,35 +255,30 @@ pub fn generate_playoff_pairings(
 
     match bracket_size {
         2 => {
-            // Direct match
             vec![PlayoffRound {
-                name: "placement".to_string(),
+                name: "playoffs".to_string(),
                 matches: vec![Pairing { t1: ids[0], t2: ids[1] }],
             }]
         }
         4 => {
-            // Semi-finals: 1v4, 2v3
-            vec![PlayoffRound {
-                name: "semi_finals".to_string(),
-                matches: vec![
-                    Pairing { t1: ids[0], t2: ids[3] },
-                    Pairing { t1: ids[1], t2: ids[2] },
-                ],
-            }]
-            // Finals generated after semis complete (dynamic)
+            vec![
+                PlayoffRound {
+                    name: "playoffs".to_string(),
+                    matches: vec![
+                        Pairing { t1: ids[0], t2: ids[3] },
+                        Pairing { t1: ids[1], t2: ids[2] },
+                    ],
+                },
+                PlayoffRound {
+                    name: "finals".to_string(),
+                    matches: vec![
+                        Pairing { t1: ids[0], t2: ids[1] },
+                        Pairing { t1: ids[2], t2: ids[3] },
+                    ],
+                },
+            ]
         }
-        _ => {
-            // Fold pairing: 1v(n), 2v(n-1), etc. then winner/loser brackets
-            let half = bracket_size / 2;
-            let mut matches = Vec::new();
-            for i in 0..half {
-                matches.push(Pairing { t1: ids[i], t2: ids[bracket_size - 1 - i] });
-            }
-            vec![PlayoffRound {
-                name: "round_of".to_string(),
-                matches,
-            }]
-        }
+        _ => Vec::new(),
     }
 }
 
@@ -294,30 +288,42 @@ pub struct PlayoffRound {
     pub matches: Vec<Pairing>,
 }
 
-// Build full playoff structure for a division.
-// Top 1-4: semis+finals. 5-8: placement bracket (5v8,6v7 -> winners play, losers play). 9-10: direct.
+// Build full post-swiss structure for a division.
+// Every 4-team bracket gets two seed-based rounds. A 2-team bracket gets one match.
 pub fn build_playoff_brackets(sorted_teams: &[TeamSortData]) -> Vec<PlayoffRound> {
     let n = sorted_teams.len();
-    let mut rounds = Vec::new();
+    let mut playoff_matches = Vec::new();
+    let mut final_matches = Vec::new();
+    let mut offset = 0;
 
-    // Top 4: semis
-    if n >= 4 {
-        rounds.extend(generate_playoff_pairings(sorted_teams, 4, 0));
-    }
+    while offset + 1 < n {
+        let remaining = n - offset;
+        let bracket_size = if remaining >= 4 { 4 } else { 2 };
+        let bracket_rounds = generate_playoff_pairings(sorted_teams, bracket_size, offset);
 
-    // 5-8: placement bracket
-    if n >= 8 {
-        rounds.extend(generate_playoff_pairings(sorted_teams, 4, 4));
-    }
-
-    // Remaining pairs: 9-10, 11-12, etc.
-    let mut i = 8;
-    while i + 1 < n {
-        let size = std::cmp::min(2, n - i);
-        if size == 2 {
-            rounds.extend(generate_playoff_pairings(sorted_teams, 2, i));
+        for round in bracket_rounds {
+            if round.name == "playoffs" {
+                playoff_matches.extend(round.matches);
+            } else if round.name == "finals" {
+                final_matches.extend(round.matches);
+            }
         }
-        i += 2;
+
+        offset += bracket_size;
+    }
+
+    let mut rounds = Vec::new();
+    if !playoff_matches.is_empty() {
+        rounds.push(PlayoffRound {
+            name: "playoffs".to_string(),
+            matches: playoff_matches,
+        });
+    }
+    if !final_matches.is_empty() {
+        rounds.push(PlayoffRound {
+            name: "finals".to_string(),
+            matches: final_matches,
+        });
     }
 
     rounds

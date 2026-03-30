@@ -256,12 +256,65 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         crate::seeder::populate_mock_data(pool).await?;
     }
     
+    // Spirit scores table: WFDF 5-category spirit per team per match
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS spirit_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            rules_knowledge INTEGER NOT NULL DEFAULT 2,
+            fouls_contact INTEGER NOT NULL DEFAULT 2,
+            fair_mindedness INTEGER NOT NULL DEFAULT 2,
+            positive_attitude INTEGER NOT NULL DEFAULT 2,
+            communication INTEGER NOT NULL DEFAULT 2,
+            total INTEGER NOT NULL DEFAULT 10,
+            mvp_player_id INTEGER,
+            msp_player_id INTEGER,
+            submitted_by_team_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            FOREIGN KEY (mvp_player_id) REFERENCES users(id),
+            FOREIGN KEY (msp_player_id) REFERENCES users(id),
+            FOREIGN KEY (submitted_by_team_id) REFERENCES teams(id),
+            UNIQUE(match_id, team_id, submitted_by_team_id)
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_match_id ON spirit_scores(match_id)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_team_id ON spirit_scores(team_id)").execute(pool).await?;
+
+    // Score confirmations table: teams confirm the final score
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS score_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            t1_score INTEGER NOT NULL,
+            t2_score INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            UNIQUE(match_id, team_id)
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_score_confirmations_match_id ON score_confirmations(match_id)").execute(pool).await?;
+
     Ok(())
 }
 
 /// Check if migrations were successful
 pub async fn verify_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let tables = ["users", "teams", "fields", "matches", "match_events", "announcements"];
+    let tables = ["users", "teams", "fields", "matches", "match_events", "announcements", "spirit_scores", "score_confirmations"];
     
     for table in tables {
         let count: (i64,) = sqlx::query_as(

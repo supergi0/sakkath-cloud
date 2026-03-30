@@ -15,8 +15,8 @@ mod routes;
 pub mod helpers;
 
 // Tournament configuration: number of swiss rounds per division
-pub const OPEN_ROUNDS: i64 = 4;
-pub const WOMEN_ROUNDS: i64 = 3;
+pub const OPEN_ROUNDS: i64 = 5;
+pub const WOMEN_ROUNDS: i64 = 5;
 
 #[derive(Clone)]
 pub struct AppState {

@@ -79,19 +79,28 @@ async fn create_playoffs_if_needed(db: &sqlx::SqlitePool, division: i64) -> Resu
         return Ok(false);
     }
 
-    let standings = compute_standings(db, division).await;
-    if standings.len() < 4 {
+    let sorted = sorting::get_sorted_standings(db, division).await;
+    if sorted.len() < 2 {
         return Ok(false);
     }
 
-    let top4: Vec<i64> = standings.iter().take(4).map(|team| team.team_id).collect();
+    let bracket_rounds = rounds::build_playoff_brackets(&sorted);
+    let Some(playoff_round) = bracket_rounds.iter().find(|round| round.name == "playoffs") else {
+        return Ok(false);
+    };
+
     let base_time = "2026-02-01 09:00:00";
 
-    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1001)")
-        .bind(top4[0]).bind(top4[3]).bind(1_i64).bind(base_time).execute(db).await?;
-
-    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1001)")
-        .bind(top4[1]).bind(top4[2]).bind(2_i64).bind(base_time).execute(db).await?;
+    for (idx, pairing) in playoff_round.matches.iter().enumerate() {
+        let field_id = (idx % 5) + 1;
+        sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1001)")
+            .bind(pairing.t1)
+            .bind(pairing.t2)
+            .bind(field_id as i64)
+            .bind(base_time)
+            .execute(db)
+            .await?;
+    }
 
     cache::invalidate_division(division).await;
 
@@ -107,30 +116,33 @@ async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result
         return Ok(false);
     }
 
-    let playoffs: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
-        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+    let playoff_stats: (i64, i64) = sqlx::query_as(
+        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
            WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#
-    ).bind(division).fetch_all(db).await?;
+    ).bind(division).fetch_one(db).await?;
 
-    if playoffs.len() < 2 {
+    if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
         return Ok(false);
     }
 
-    let completed = playoffs.iter().filter(|(_, _, s1, s2)| s1 != s2).count();
-    if completed < 2 {
+    let sorted = sorting::get_sorted_standings(db, division).await;
+    let bracket_rounds = rounds::build_playoff_brackets(&sorted);
+    let Some(final_round) = bracket_rounds.iter().find(|round| round.name == "finals") else {
         return Ok(false);
-    }
+    };
 
-    let winners: Vec<i64> = playoffs.iter().map(|(t1, t2, s1, s2)| if s1 > s2 { *t1 } else { *t2 }).collect();
-    if winners.len() < 2 {
-        return Ok(false);
+    for (idx, pairing) in final_round.matches.iter().enumerate() {
+        let field_id = (idx % 5) + 1;
+        sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1002)")
+            .bind(pairing.t1)
+            .bind(pairing.t2)
+            .bind(field_id as i64)
+            .bind("2026-02-02 10:00:00")
+            .execute(db)
+            .await?;
     }
-
-    sqlx::query("INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, 1002)")
-        .bind(winners[0]).bind(winners[1]).bind(1_i64).bind("2026-02-02 10:00:00")
-        .execute(db).await?;
 
     cache::invalidate_division(division).await;
 
@@ -266,12 +278,24 @@ pub async fn read_tournament_state(
     let phase = if current_round <= total_rounds {
         format!("swiss_R{}", current_round)
     } else {
-        // Check for playoffs
-        let playoff_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE m.type = 1001 AND t.division = ? AND m.deleted_at IS NULL"
-        ).bind(division).fetch_one(&state.db).await.unwrap_or((0,));
-        
-        if playoff_count.0 > 0 {
+        let playoff_stats: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
+               FROM matches m JOIN teams t ON m.t1_id = t.id
+               WHERE m.type = 1001 AND t.division = ? AND m.deleted_at IS NULL"#
+        ).bind(division).fetch_one(&state.db).await.unwrap_or((0, 0));
+        let finals_stats: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
+               FROM matches m JOIN teams t ON m.t1_id = t.id
+               WHERE m.type = 1002 AND t.division = ? AND m.deleted_at IS NULL"#
+        ).bind(division).fetch_one(&state.db).await.unwrap_or((0, 0));
+
+        if finals_stats.0 > 0 {
+            if finals_stats.1 < finals_stats.0 {
+                "finals".to_string()
+            } else {
+                "complete".to_string()
+            }
+        } else if playoff_stats.0 > 0 {
             "playoffs".to_string()
         } else {
             "complete".to_string()

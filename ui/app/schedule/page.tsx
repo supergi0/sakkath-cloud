@@ -173,15 +173,15 @@ export default function Schedule() {
   };
 
   const getRoundLabel = (type: number) => {
-    if (type === 1001) return 'Playoffs';
-    if (type === 1002) return 'Finals';
+    if (type === 1001) return 'Playoff 1';
+    if (type === 1002) return 'Playoff 2';
     return `Round ${type}`;
   };
 
   const currentRoundValue = () => {
     if (!tournamentState) return null;
-    if (tournamentState.phase === 'playoffs' || tournamentState.current_round > tournamentState.total_rounds) return 1001;
     if (tournamentState.phase === 'finals') return 1002;
+    if (tournamentState.phase === 'playoffs' || tournamentState.current_round > tournamentState.total_rounds) return 1001;
     return tournamentState.current_round;
   };
 
@@ -224,15 +224,6 @@ export default function Schedule() {
     if (!tournamentState) return null;
 
     if (tournamentState.phase === 'complete') {
-      const finals = allMatches
-        .filter((m) => m.match_type === 1002 && m.possession !== null && m.possession >= 3)
-        .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
-
-      if (finals.length > 0) {
-        const final = finals[0];
-        const winner = final.t1_score > final.t2_score ? final.t1_name : final.t2_score > final.t1_score ? final.t2_name : null;
-        if (winner) return `Tournament complete • Winner: ${winner}`;
-      }
       return 'Tournament complete';
     }
 
@@ -254,7 +245,7 @@ export default function Schedule() {
 
     const currentMatches = allMatches.filter((m) => m.match_type === currentRound);
     if (currentMatches.length === 0) {
-      return currentRound === 1001 ? 'Playoffs pending' : 'Finals pending';
+      return currentRound === 1001 ? 'Playoff 1 pending' : 'Playoff 2 pending';
     }
 
     const completed = currentMatches.filter((m) => m.possession !== null && m.possession >= 3).length;
@@ -283,7 +274,7 @@ export default function Schedule() {
     );
   }
 
-  // Build round options: All Rounds, Round 1-N, Playoffs
+  // Build round options: All Rounds, Round 1-N, Playoff rounds
   const roundOptions: { value: number; label: string; status: RoundStatus | null }[] = [];
   const roundStatus = tournamentState?.round_status || [];
   
@@ -292,20 +283,13 @@ export default function Schedule() {
     roundOptions.push({ value: r.round, label: `Round ${r.round}`, status: r });
   });
   
-  // Add playoffs if exists
-  if (allMatches.some(m => m.match_type === 1001)) {
-    roundOptions.push({ value: 1001, label: 'Playoffs', status: null });
-  }
-  
-  // Add finals if exists
-  if (allMatches.some(m => m.match_type === 1002)) {
-    roundOptions.push({ value: 1002, label: 'Finals', status: null });
-  }
+  roundOptions.push({ value: 1001, label: 'Playoff 1', status: null });
+  roundOptions.push({ value: 1002, label: 'Playoff 2', status: null });
 
   const getSelectedRoundLabel = () => {
     if (selectedRound === null) return 'All Rounds';
-    if (selectedRound === 1001) return 'Playoffs';
-    if (selectedRound === 1002) return 'Finals';
+    if (selectedRound === 1001) return 'Playoff 1';
+    if (selectedRound === 1002) return 'Playoff 2';
     return `Round ${selectedRound}`;
   };
 
@@ -487,19 +471,19 @@ export default function Schedule() {
                   
                   {/* Footer with spirit and field */}
                   <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between">
-                    {status === 'done' && (
+                    {status === 'done' && match.t1_spirit !== null && match.t2_spirit !== null && (
                       <div className="flex gap-4">
                         <div className="text-center">
                           <Text variant="secondary" className="text-xs">Spirit</Text>
-                          <Text variant="primary" className="text-xs font-bold">{match.t1_spirit ?? '-'}</Text>
+                          <Text variant="primary" className="text-xs font-bold">{match.t1_spirit}</Text>
                         </div>
                         <div className="text-center">
                           <Text variant="secondary" className="text-xs">Spirit</Text>
-                          <Text variant="secondary" className="text-xs">{match.t2_spirit ?? '-'}</Text>
+                          <Text variant="secondary" className="text-xs">{match.t2_spirit}</Text>
                         </div>
                       </div>
                     )}
-                    {status !== 'done' && <div />}
+                    {(status !== 'done' || match.t1_spirit === null || match.t2_spirit === null) && <div />}
                     <Text variant="secondary" className="text-xs">{match.field_name}</Text>
                   </div>
                 </div>

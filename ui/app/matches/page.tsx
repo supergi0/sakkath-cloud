@@ -4,7 +4,7 @@ import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { ArrowLeft, Circle, Play } from "lucide-react";
 import { Text } from "../components/Text";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceDot } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import useSWR from 'swr';
 
 interface MatchDetail {
@@ -47,9 +47,24 @@ interface ChartDataPoint {
   event?: string;
 }
 
+interface SpiritScoreRow {
+  id: number;
+  match_id: number;
+  team_id: number;
+  rules_knowledge: number;
+  fouls_contact: number;
+  fair_mindedness: number;
+  positive_attitude: number;
+  communication: number;
+  total: number;
+  mvp_player_id: number | null;
+  msp_player_id: number | null;
+  submitted_by_team_id: number;
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
-type MatchTabType = 'log' | 'chart' | 'stats';
+type MatchTabType = 'log' | 'chart' | 'stats' | 'spirit';
 interface MatchesPreferences {
   activeTab: MatchTabType;
 }
@@ -58,24 +73,42 @@ const MATCHES_PREFS_KEY = 'sakkath:matches:preferences';
 
 const fetcher = (url: string) => fetch(url).then(r => r.ok ? r.json() : null);
 
+const SPIRIT_CRITERIA = [
+  { key: 'rules_knowledge' as const, label: 'Rules Knowledge & Use' },
+  { key: 'fouls_contact' as const, label: 'Fouls & Body Contact' },
+  { key: 'fair_mindedness' as const, label: 'Fair-Mindedness' },
+  { key: 'positive_attitude' as const, label: 'Positive Attitude & Self-Control' },
+  { key: 'communication' as const, label: 'Communication' },
+];
+
 function MatchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<MatchTabType>('log');
   const matchId = searchParams.get('match_id');
 
+  const [spirits, setSpirits] = useState<SpiritScoreRow[]>([]);
+
   useEffect(() => {
     const savedPreferences = localStorage.getItem(MATCHES_PREFS_KEY);
     if (savedPreferences) {
       try {
         const parsed: MatchesPreferences = JSON.parse(savedPreferences);
-        if (parsed.activeTab === 'log' || parsed.activeTab === 'chart' || parsed.activeTab === 'stats') {
+        if (['log', 'chart', 'stats', 'spirit'].includes(parsed.activeTab)) {
           setActiveTab(parsed.activeTab);
         }
       } catch {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!matchId) return;
+    fetch(`${API_URL}/v1/matches/${matchId}/spirits`)
+      .then(r => r.ok ? r.json() : [])
+      .then(setSpirits)
+      .catch(() => {});
+  }, [matchId]);
 
   useEffect(() => {
     const preferences: MatchesPreferences = { activeTab };
@@ -159,11 +192,11 @@ function MatchContent() {
   };
 
   if (loading) {
-    return <div className="py-4 px-4 md:px-0 min-h-screen"><div className="max-w-7xl mx-auto"><Text variant="primary">Loading...</Text></div></div>;
+    return <div className="py-4 px-3 md:px-0 min-h-screen"><div className="max-w-2xl mx-auto"><Text variant="primary">Loading...</Text></div></div>;
   }
 
   if (!matchId || !match) {
-    return <div className="py-4 px-4 md:px-0 min-h-screen"><div className="max-w-7xl mx-auto"><Text variant="primary">Match not found</Text></div></div>;
+    return <div className="py-4 px-3 md:px-0 min-h-screen"><div className="max-w-2xl mx-auto"><Text variant="primary">Match not found</Text></div></div>;
   }
 
   const status = getStatus();
@@ -175,9 +208,21 @@ function MatchContent() {
   const chartData = buildChartData();
   const matchDate = match.time ? new Date(match.time) : null;
 
+  // Spirit tab data
+  const resolvePlayer = (id: number | null) => !id ? null : match.players.find(p => p.id === id);
+  const oppSpirits = spirits.filter(s => s.team_id !== s.submitted_by_team_id);
+  const selfSpirits = spirits.filter(s => s.team_id === s.submitted_by_team_id);
+  const t1OppSpirit = oppSpirits.find(s => s.team_id === match.t1_id);
+  const t2OppSpirit = oppSpirits.find(s => s.team_id === match.t2_id);
+  const t1SelfSpirit = selfSpirits.find(s => s.team_id === match.t1_id);
+  const t2SelfSpirit = selfSpirits.find(s => s.team_id === match.t2_id);
+  // MVP/MSP are nominated by the opposing team only
+  const mvps = oppSpirits.filter(s => s.mvp_player_id).map(s => ({ player: resolvePlayer(s.mvp_player_id), byTeam: s.submitted_by_team_id === match.t1_id ? match.t1_name : match.t2_name })).filter(m => m.player);
+  const msps = oppSpirits.filter(s => s.msp_player_id).map(s => ({ player: resolvePlayer(s.msp_player_id), byTeam: s.submitted_by_team_id === match.t1_id ? match.t1_name : match.t2_name })).filter(m => m.player);
+
   return (
-    <div className="py-4 px-4 md:px-0 min-h-screen overflow-x-hidden">
-      <div className="max-w-7xl mx-auto">
+    <div className="py-4 px-3 md:px-0 min-h-screen overflow-x-hidden">
+      <div className="max-w-2xl mx-auto">
         <button 
           onClick={() => router.back()} 
           className="flex items-center gap-2 mb-4 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
@@ -187,26 +232,26 @@ function MatchContent() {
         </button>
 
         {/* Match Header */}
-        <div className="rounded-sm p-4 md:p-6 bg-white dark:bg-slate-900 mb-4">
+        <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900 mb-4">
           {/* Top metadata row */}
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-6 pb-4 border-b border-gray-200 dark:border-slate-700">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4 pb-3 border-b border-gray-200 dark:border-slate-700">
             <div className="flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
               {matchDate && (
                 <>
                   <span>{matchDate.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span>
-                  <span>•</span>
+                  <span>&bull;</span>
                   <span>{matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
                 </>
               )}
-              <span>•</span>
+              <span>&bull;</span>
               <span>{match.field_name}</span>
-              <span>•</span>
+              <span>&bull;</span>
               <span>{division}</span>
               {match.stream_url && (
                 <>
-                  <span>•</span>
+                  <span>&bull;</span>
                   <a href={match.stream_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-blue-500 hover:text-blue-400">
-                    <Play className="w-3 h-3" /> Watch Game
+                    <Play className="w-3 h-3" /> Watch
                   </a>
                 </>
               )}
@@ -218,58 +263,61 @@ function MatchContent() {
             </div>
           </div>
 
-          {/* Score display */}
-          <div className="grid grid-cols-3 items-center gap-4">
-            <div className="text-center">
-              <div className="w-12 h-12 md:w-16 md:h-16 mx-auto mb-2 rounded-full bg-gray-100 dark:bg-slate-800 flex items-center justify-center overflow-hidden">
-                {match.t1_small_logo ? (
-                  <img src={match.t1_small_logo} alt={match.t1_name} className="w-full h-full object-cover" />
-                ) : (
-                  <span className="text-lg md:text-2xl font-bold text-gray-500">{match.t1_name.charAt(0)}</span>
-                )}
+          {/* Score display - matching admin layout */}
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <div
+              onClick={() => router.push(`/teams?team_id=${match.t1_id}`)}
+              className={`rounded-xl border p-3 md:p-4 text-left cursor-pointer transition hover:border-amber-400/50 overflow-hidden ${
+                isLive && match.possession === 1 ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                  {match.t1_small_logo ? (
+                    <img src={match.t1_small_logo} alt={match.t1_name} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-sm font-bold text-gray-500">{match.t1_name.charAt(0)}</span>
+                  )}
+                </div>
+                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight">{match.t1_name}</span>
               </div>
-              <div 
-                className={`text-sm md:text-base font-medium cursor-pointer hover:text-blue-500 ${isLive && match.possession === 1 ? 'text-blue-500' : 'text-gray-900 dark:text-gray-100'}`}
-                onClick={() => router.push(`/teams?team_id=${match.t1_id}`)}
-              >
-                {match.t1_name}
-              </div>
-              <div className="text-3xl md:text-4xl font-bold text-gray-900 dark:text-white">
-                {isUpcoming ? '-' : match.t1_score}
-              </div>
-              {isEnded && match.t1_spirit !== null && (
-                <div className="text-sm text-gray-500 dark:text-gray-400 mt-2">Spirit: {match.t1_spirit}</div>
-              )}
-            </div>
-
-            <div className="text-center">
-              <div className="text-2xl text-gray-400">vs</div>
-              {isLive && match.possession !== null && (
-                <div className="text-xs text-gray-500 mt-2">
-                  <span className="text-blue-500">{match.possession === 1 ? match.t1_name : match.t2_name}</span>
+              {isLive && (
+                <div className={`text-[10px] font-bold tracking-widest ${match.possession === 1 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {match.possession === 1 ? 'OFFENSE' : 'DEFENSE'}
                 </div>
               )}
+              <div className="text-4xl font-black text-gray-900 dark:text-white mt-1">{isUpcoming ? '-' : match.t1_score}</div>
+              {isEnded && match.t1_spirit !== null && match.t2_spirit !== null && (
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">Spirit: {match.t1_spirit}</div>
+              )}
             </div>
 
-            <div className="text-center">
-              <div className="w-12 h-12 md:w-16 md:h-16 mx-auto mb-2 rounded-full bg-gray-100 dark:bg-slate-800 flex items-center justify-center overflow-hidden">
-                {match.t2_small_logo ? (
-                  <img src={match.t2_small_logo} alt={match.t2_name} className="w-full h-full object-cover" />
-                ) : (
-                  <span className="text-lg md:text-2xl font-bold text-gray-500">{match.t2_name.charAt(0)}</span>
-                )}
+            <div className="text-lg text-gray-400 dark:text-slate-500 font-light">-</div>
+
+            <div
+              onClick={() => router.push(`/teams?team_id=${match.t2_id}`)}
+              className={`rounded-xl border p-3 md:p-4 text-right cursor-pointer transition hover:border-amber-400/50 overflow-hidden ${
+                isLive && match.possession === 2 ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+              }`}
+            >
+              <div className="flex items-center gap-2 justify-end mb-1">
+                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight">{match.t2_name}</span>
+                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                  {match.t2_small_logo ? (
+                    <img src={match.t2_small_logo} alt={match.t2_name} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-sm font-bold text-gray-500">{match.t2_name.charAt(0)}</span>
+                  )}
+                </div>
               </div>
-              <div 
-                className={`text-sm md:text-base font-medium cursor-pointer hover:text-blue-500 ${isLive && match.possession === 2 ? 'text-blue-500' : 'text-gray-900 dark:text-gray-100'}`}
-                onClick={() => router.push(`/teams?team_id=${match.t2_id}`)}
-              >
-                {match.t2_name}
-              </div>
-              <div className="text-3xl md:text-4xl font-bold text-gray-900 dark:text-white">
-                {isUpcoming ? '-' : match.t2_score}
-              </div>
-              {isEnded && match.t2_spirit !== null && (
-                <div className="text-sm text-gray-500 dark:text-gray-400 mt-2">Spirit: {match.t2_spirit}</div>
+              {isLive && (
+                <div className={`text-[10px] font-bold tracking-widest ${match.possession === 2 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {match.possession === 2 ? 'OFFENSE' : 'DEFENSE'}
+                </div>
+              )}
+              <div className="text-4xl font-black text-gray-900 dark:text-white mt-1">{isUpcoming ? '-' : match.t2_score}</div>
+              {isEnded && match.t1_spirit !== null && match.t2_spirit !== null && (
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">Spirit: {match.t2_spirit}</div>
               )}
             </div>
           </div>
@@ -278,41 +326,39 @@ function MatchContent() {
         {/* Tabs */}
         {!isUpcoming && (
           <>
-            <div className="flex gap-2 mb-4">
-                {(['log', 'chart', 'stats'] as MatchTabType[]).map((tab) => (
+            <div className="grid grid-cols-4 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-900 p-1 mb-4">
+              {(['log', 'chart', 'stats', 'spirit'] as MatchTabType[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
-                  className={`px-4 py-2 text-sm font-medium rounded transition-colors ${
+                  className={`truncate rounded-full px-2 py-2 text-sm font-semibold transition ${
                     activeTab === tab
-                      ? 'bg-blue-900 text-white'
-                      : 'bg-gray-200 dark:bg-slate-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-slate-600'
+                      ? 'bg-amber-400 text-gray-900 dark:text-slate-950'
+                      : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-800'
                   }`}
                 >
-                  {tab === 'log' ? 'Log' : tab === 'chart' ? 'Timeline' : 'Player Stats'}
+                  {tab === 'log' ? 'Log' : tab === 'chart' ? 'Graph' : tab === 'stats' ? 'Stats' : 'Spirit'}
                 </button>
               ))}
             </div>
 
             {/* Log Tab */}
             {activeTab === 'log' && (
-              <div className="rounded-sm p-4 md:p-6 bg-white dark:bg-slate-900">
-                <div className="space-y-2 max-h-[500px] overflow-y-auto">
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
+                <div className="space-y-1.5">
                   {match.events.length === 0 && <Text variant="secondary">No events recorded</Text>}
                   {match.events.slice().reverse().map((event) => {
                     const isT1 = event.team_id === match.t1_id;
                     const eventTypes = ['Score', 'Assist', 'Defense', 'Turnover'];
                     const eventColors = ['text-green-500', 'text-blue-500', 'text-purple-500', 'text-yellow-500'];
-                    const eventTime = new Date(event.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                    const eventTime = new Date(event.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
                     
                     return (
                       <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
-                        <div className={`max-w-[85%] p-2 px-3 rounded-lg ${isT1 ? 'bg-gray-100 dark:bg-slate-800' : 'bg-blue-900/10 dark:bg-blue-900/20'}`}>
-                          <div className="flex items-center gap-2 text-sm">
-                            <span className="text-gray-500 dark:text-gray-400 text-xs">{eventTime}</span>
-                            <span className={`font-medium ${eventColors[event.event_type]}`}>{eventTypes[event.event_type]}</span>
-                            <span className="text-gray-900 dark:text-white">{event.player_name || 'Unknown'}</span>
-                          </div>
+                        <div className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 ${isT1 ? 'bg-gray-100 dark:bg-slate-800' : 'bg-blue-900/10 dark:bg-blue-900/20'}`}>
+                          <span className={`font-medium text-xs ${eventColors[event.event_type]}`}>{eventTypes[event.event_type]}</span>
+                          <span className="text-sm text-gray-900 dark:text-white">{event.player_name || 'Unknown'}</span>
+                          <span className="text-[10px] text-gray-500 dark:text-gray-400">{eventTime}</span>
                         </div>
                       </div>
                     );
@@ -323,7 +369,7 @@ function MatchContent() {
 
             {/* Chart Tab */}
             {activeTab === 'chart' && (
-              <div className="rounded-sm p-4 md:p-6 bg-white dark:bg-slate-900">
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
                 {chartData.length <= 1 ? (
                   <Text variant="secondary">No score data available</Text>
                 ) : (
@@ -392,7 +438,7 @@ function MatchContent() {
 
             {/* Stats Tab */}
             {activeTab === 'stats' && (
-              <div className="rounded-sm p-4 md:p-6 bg-white dark:bg-slate-900">
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
@@ -412,8 +458,8 @@ function MatchContent() {
                       {playerStats.map((player) => (
                         <tr key={player.id} className="border-b border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800">
                           <td className="py-3 px-2"><Text variant="primary" className="font-medium">{player.name}</Text></td>
-                          <td className="py-3 px-2">
-                            <span className={`text-xs px-2 py-0.5 rounded ${player.team_id === match.t1_id ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'}`}>
+                          <td className="py-3 px-2 max-w-[100px]">
+                            <span className={`text-xs px-2 py-0.5 rounded inline-block max-w-full truncate ${player.team_id === match.t1_id ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'}`}>
                               {player.team_id === match.t1_id ? match.t1_name : match.t2_name}
                             </span>
                           </td>
@@ -428,11 +474,101 @@ function MatchContent() {
                 </div>
               </div>
             )}
+
+            {/* Spirit Tab */}
+            {activeTab === 'spirit' && (
+              <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
+                {spirits.length === 0 ? (
+                  <Text variant="secondary">No spirit scores submitted yet</Text>
+                ) : (
+                  <>
+                    {(t1OppSpirit || t2OppSpirit) && (
+                      <div className="mb-6">
+                        <Text variant="primary" className="text-center font-semibold text-blue-600 dark:text-blue-400 mb-3">Spirit Scores</Text>
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-200 dark:border-slate-700">
+                              <th className="py-2 px-2 text-left font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Criteria</th>
+                              <th className="py-2 px-2 text-center font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide truncate max-w-[100px]">{match.t1_name}</th>
+                              <th className="py-2 px-2 text-center font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide truncate max-w-[100px]">{match.t2_name}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {SPIRIT_CRITERIA.map(c => (
+                              <tr key={c.key} className="border-b border-gray-100 dark:border-slate-800">
+                                <td className="py-2.5 px-2"><Text variant="primary" className="text-sm">{c.label}</Text></td>
+                                <td className="py-2.5 px-2 text-center"><Text variant="primary">{t1OppSpirit ? t1OppSpirit[c.key] : '-'}</Text></td>
+                                <td className="py-2.5 px-2 text-center"><Text variant="primary">{t2OppSpirit ? t2OppSpirit[c.key] : '-'}</Text></td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-gray-300 dark:border-slate-600">
+                              <td className="py-2.5 px-2"><Text variant="primary" className="font-semibold">Total</Text></td>
+                              <td className="py-2.5 px-2 text-center"><Text variant="primary" className="font-semibold">{t1OppSpirit ? t1OppSpirit.total : '-'}</Text></td>
+                              <td className="py-2.5 px-2 text-center"><Text variant="primary" className="font-semibold">{t2OppSpirit ? t2OppSpirit.total : '-'}</Text></td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {(t1SelfSpirit || t2SelfSpirit) && (
+                      <div className="mb-6">
+                        <Text variant="primary" className="text-center font-semibold text-blue-600 dark:text-blue-400 mb-3">Spirit Scores - Self</Text>
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-200 dark:border-slate-700">
+                              <th className="py-2 px-2 text-left font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide">Criteria</th>
+                              <th className="py-2 px-2 text-center font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide truncate max-w-[100px]">{match.t1_name}</th>
+                              <th className="py-2 px-2 text-center font-medium text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wide truncate max-w-[100px]">{match.t2_name}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {SPIRIT_CRITERIA.map(c => (
+                              <tr key={c.key} className="border-b border-gray-100 dark:border-slate-800">
+                                <td className="py-2.5 px-2"><Text variant="primary" className="text-sm">{c.label}</Text></td>
+                                <td className="py-2.5 px-2 text-center"><Text variant="primary">{t1SelfSpirit ? t1SelfSpirit[c.key] : '-'}</Text></td>
+                                <td className="py-2.5 px-2 text-center"><Text variant="primary">{t2SelfSpirit ? t2SelfSpirit[c.key] : '-'}</Text></td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-gray-300 dark:border-slate-600">
+                              <td className="py-2.5 px-2"><Text variant="primary" className="font-semibold">Total</Text></td>
+                              <td className="py-2.5 px-2 text-center"><Text variant="primary" className="font-semibold">{t1SelfSpirit ? t1SelfSpirit.total : '-'}</Text></td>
+                              <td className="py-2.5 px-2 text-center"><Text variant="primary" className="font-semibold">{t2SelfSpirit ? t2SelfSpirit.total : '-'}</Text></td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {mvps.length > 0 && (
+                      <div className="mb-4">
+                        <Text variant="primary" className="text-center font-semibold text-blue-600 dark:text-blue-400 mb-2">MVPs</Text>
+                        {mvps.map((m, i) => (
+                          <div key={i} className="mb-1">
+                            <Text variant="primary" className="font-medium">{m.player!.name}</Text>
+                            <Text variant="secondary" className="text-xs uppercase tracking-wide">{m.byTeam}</Text>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {msps.length > 0 && (
+                      <div>
+                        <Text variant="primary" className="text-center font-semibold text-blue-600 dark:text-blue-400 mb-2">MSPs</Text>
+                        {msps.map((m, i) => (
+                          <div key={i} className="mb-1">
+                            <Text variant="primary" className="font-medium">{m.player!.name}</Text>
+                            <Text variant="secondary" className="text-xs uppercase tracking-wide">{m.byTeam}</Text>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </>
         )}
 
         {isUpcoming && (
-          <div className="rounded-sm p-4 md:p-6 bg-white dark:bg-slate-900">
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
             <Text variant="secondary">This match has not started yet.</Text>
           </div>
         )}
@@ -443,7 +579,7 @@ function MatchContent() {
 
 export default function MatchesPage() {
   return (
-    <Suspense fallback={<div className="py-4 px-4 min-h-screen"><div className="max-w-7xl mx-auto"><Text variant="primary">Loading...</Text></div></div>}>
+    <Suspense fallback={<div className="py-4 px-3 min-h-screen"><div className="max-w-2xl mx-auto"><Text variant="primary">Loading...</Text></div></div>}>
       <MatchContent />
     </Suspense>
   );

@@ -124,8 +124,8 @@ function TeamContent() {
   };
 
   const getRoundLabel = (type: number) => {
-    if (type === 1001) return 'Playoffs';
-    if (type === 1002) return 'Finals';
+    if (type === 1001) return 'Playoff 1';
+    if (type === 1002) return 'Playoff 2';
     return `Round ${type}`;
   };
 
@@ -166,7 +166,7 @@ function TeamContent() {
                 { icon: Sparkle, value: team.spirit_avg.toFixed(1), label: 'Spirit Avg' },
                 { icon: AlignStartVertical, value: team.spirit_rank.toString(), label: 'Spirit Rank' },
                 { icon: Star, value: team.init_rank.toString(), label: 'Init Rank' },
-                { icon: team.init_rank <= team.current_rank ? TrendingUp : TrendingDown, value: team.current_rank.toString(), label: 'Curr Rank', color: team.current_rank < team.init_rank ? 'text-green-500' : team.current_rank > team.init_rank ? 'text-red-500' : '' },
+                { icon: team.current_rank < team.init_rank ? TrendingUp : TrendingDown, value: team.current_rank.toString(), label: 'Curr Rank', color: team.current_rank < team.init_rank ? 'text-green-500' : team.current_rank > team.init_rank ? 'text-red-500' : '' },
               ].map((stat, i) => (
                 <div 
                   key={i}
@@ -227,7 +227,7 @@ function TeamContent() {
               <div className="flex gap-3">
                 {[
                   { icon: Star, value: team.init_rank.toString(), label: 'Init Rank' },
-                  { icon: team.init_rank <= team.current_rank ? TrendingUp : TrendingDown, value: team.current_rank.toString(), label: 'Curr Rank', color: team.current_rank < team.init_rank ? 'text-green-500' : team.current_rank > team.init_rank ? 'text-red-500' : '' },
+                  { icon: team.current_rank < team.init_rank ? TrendingUp : TrendingDown, value: team.current_rank.toString(), label: 'Curr Rank', color: team.current_rank < team.init_rank ? 'text-green-500' : team.current_rank > team.init_rank ? 'text-red-500' : '' },
                 ].map((stat, i) => (
                   <div key={i} className="flex-1 flex items-center gap-2 px-3 py-2 rounded bg-gray-100 dark:bg-slate-800">
                     <stat.icon className={`w-4 h-4 ${stat.color || 'text-gray-500 dark:text-gray-400'}`} />
@@ -313,27 +313,31 @@ function TeamContent() {
                     </div>
                     
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Text variant="primary" className="font-medium">{team.name}</Text>
-                        <Text variant="primary" className="font-bold text-lg">{status === 'upcoming' ? '-' : ourScore}</Text>
+                      <div className="flex items-center justify-between gap-2">
+                        <Text variant="primary" className="font-medium truncate min-w-0 flex-1">{team.name}</Text>
+                        <Text variant="primary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : ourScore}</Text>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <Text variant="secondary">{opponent}</Text>
-                        <Text variant="secondary" className="font-bold text-lg">{status === 'upcoming' ? '-' : theirScore}</Text>
+                      <div className="flex items-center justify-between gap-2">
+                        <Text variant="secondary" className="truncate min-w-0 flex-1">{opponent}</Text>
+                        <Text variant="secondary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : theirScore}</Text>
                       </div>
                     </div>
                     
                     <div className="mt-3 pt-3 border-t border-gray-200 dark:border-slate-700 flex items-center justify-between">
-                      <div className="flex gap-4">
-                        <div className="text-center">
-                          <Text variant="secondary" className="text-xs">Spirit</Text>
-                          <Text variant="primary" className="text-sm font-extrabold">{ourSpirit ?? 'TBD'}</Text>
+                      {ourSpirit !== null && theirSpirit !== null ? (
+                        <div className="flex gap-4">
+                          <div className="text-center">
+                            <Text variant="secondary" className="text-xs">Spirit</Text>
+                            <Text variant="primary" className="text-sm font-extrabold">{ourSpirit}</Text>
+                          </div>
+                          <div className="text-center">
+                            <Text variant="secondary" className="text-xs">Spirit</Text>
+                            <Text variant="secondary" className="text-sm">{theirSpirit}</Text>
+                          </div>
                         </div>
-                        <div className="text-center">
-                          <Text variant="secondary" className="text-xs">Spirit</Text>
-                          <Text variant="secondary" className="text-sm">{theirSpirit ?? 'TBD'}</Text>
-                        </div>
-                      </div>
+                      ) : (
+                        <div />
+                      )}
                       <Text variant="secondary" className="text-xs">{match.field_name}</Text>
                     </div>
                   </div>
@@ -361,7 +365,7 @@ function TeamContent() {
                     <tr key={player.id} className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700">
                       <td className="py-3 px-2">
                         <div className="flex items-center gap-2">
-                          <Text variant="primary" className="font-medium">{player.name}</Text>
+                          <Text variant="primary" className="font-medium truncate max-w-[150px]">{player.name}</Text>
                           {player.is_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-yellow-500 text-white text-xs font-bold">C</span>}
                           {player.is_spirit_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-purple-500 text-white text-xs font-bold">SC</span>}
                         </div>

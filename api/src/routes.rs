@@ -42,6 +42,9 @@ fn poc_routes() -> Router<AppState> {
         .route("/poc/players/:id", delete(team::delete_poc_player))
         .route("/poc/matches", get(matches::get_poc_matches))
         .route("/poc/matches/:id/spirit", put(matches::submit_spirit_score))
+        .route("/poc/matches/:id/spirit-wfdf", put(matches::submit_wfdf_spirit))
+        .route("/poc/matches/:id/confirm-score", post(matches::confirm_score))
+        .route("/poc/matches/:id/opponent-players", get(matches::get_opponent_players))
 }
 
 // Volunteer/Admin routes (protected)
@@ -51,6 +54,7 @@ fn volunteer_routes() -> Router<AppState> {
         .route("/admin/matches/:id/start", post(matches::start_match))
         .route("/admin/matches/:id/end", post(matches::end_match))
         .route("/admin/matches/:id/event", post(matches::record_event))
+    .route("/admin/matches/:id/switch-possession", post(matches::switch_possession))
         .route("/admin/matches/:id/undo", post(matches::undo_event))
 }
 
@@ -85,6 +89,8 @@ fn match_routes() -> Router<AppState> {
         .route("/fields", get(matches::get_fields))
         .route("/matches/:id", get(matches::get_match_detail))
         .route("/matches/:id/events", get(matches::get_match_events))
+        .route("/matches/:id/spirits", get(matches::get_match_spirits))
+        .route("/matches/:id/score-confirmations", get(matches::get_score_confirmations))
 }
 
 // Schedule routes (public)

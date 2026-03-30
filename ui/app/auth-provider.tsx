@@ -34,7 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = useCallback((token: string, role: number) => {
     localStorage.setItem('auth_token', token);
-    const roleName = role === 0 ? 'SUPER' : role === 1 ? 'ADMIN' : role === 3 ? 'POC' : null;
+    const roleName = role === 0 ? 'SUPER' : role === 1 ? 'ADMIN' : role === 3 ? 'MYTEAM' : null;
     setAuthState({
       isLoggedIn: true,
       role,
@@ -76,7 +76,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const data = await response.json();
       if (data.valid && data.role !== null && data.role !== undefined) {
-        const roleName = data.role === 0 ? 'SUPER' : data.role === 1 ? 'ADMIN' : data.role === 3 ? 'POC' : null;
+        const roleName = data.role === 0 ? 'SUPER' : data.role === 1 ? 'ADMIN' : data.role === 3 ? 'MYTEAM' : null;
         setAuthState({
           isLoggedIn: true,
           role: data.role,
