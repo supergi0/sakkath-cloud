@@ -6,6 +6,7 @@ import { ArrowLeftRight, ChevronLeft, Circle, RotateCcw, Save, Shield, AlertTria
 import useSWR from 'swr';
 import { Text } from '../components/Text';
 import { useAuth } from '../auth-provider';
+import { getTeamAbbreviation } from '../lib/team-name';
 
 interface UpcomingMatch {
   id: number;
@@ -13,6 +14,8 @@ interface UpcomingMatch {
   t2_id: number;
   t1_name: string;
   t2_name: string;
+  t1_abbreviation?: string | null;
+  t2_abbreviation?: string | null;
   field_name: string;
   time: string;
   possession: number | null;
@@ -40,6 +43,8 @@ interface MatchDetail {
   t2_id: number;
   t1_name: string;
   t2_name: string;
+  t1_abbreviation?: string | null;
+  t2_abbreviation?: string | null;
   t1_score: number;
   t2_score: number;
   possession: number | null;
@@ -71,14 +76,6 @@ function formatTime(time: string) {
 
 function formatLogTime(time: string) {
   return new Date(time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
-function getInitials(name: string) {
-  return name.split(/\s+/).map(w => w[0]).join('').toUpperCase();
-}
-
-function abbreviate(name: string, maxLen = 12) {
-  return name.length <= maxLen ? name : getInitials(name);
 }
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
@@ -356,8 +353,8 @@ function AdminContent() {
 
   // LIVE REPORTING VIEW
   if (activeMatch && matchStatus === 'live') {
-    const t1Abbr = abbreviate(activeMatch.t1_name);
-    const t2Abbr = abbreviate(activeMatch.t2_name);
+    const t1Abbr = getTeamAbbreviation(activeMatch.t1_name, activeMatch.t1_abbreviation, 12);
+    const t2Abbr = getTeamAbbreviation(activeMatch.t2_name, activeMatch.t2_abbreviation, 12);
 
     return (
       <div className="min-h-screen px-3 py-3 md:px-0">

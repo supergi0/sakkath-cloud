@@ -18,3 +18,8 @@ release_v*/
 
 #db
 sakkath.db
+
+#specs
+specs/
+
+teams.csv

@@ -1,9 +1,59 @@
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::path::Path;
+
+pub enum SeedSource {
+    MockData,
+    TeamsCsv { path: Option<String> },
+}
+
+pub fn default_database_path() -> Result<PathBuf, sqlx::Error> {
+    let current_dir = std::env::current_dir().map_err(|err| {
+        sqlx::Error::Configuration(format!("Failed to read current directory: {err}").into())
+    })?;
+
+    if current_dir.file_name().and_then(|name| name.to_str()) == Some("api") {
+        if let Some(parent) = current_dir.parent() {
+            return Ok(parent.join("sakkath.db"));
+        }
+    }
+
+    let current_exe = std::env::current_exe().map_err(|err| {
+        sqlx::Error::Configuration(format!("Failed to read current executable: {err}").into())
+    })?;
+
+    if let Some(exe_dir) = current_exe.parent() {
+        if exe_dir.file_name().and_then(|name| name.to_str()) == Some("api") {
+            if let Some(parent) = exe_dir.parent() {
+                return Ok(parent.join("sakkath.db"));
+            }
+        }
+    }
+
+    Ok(current_dir.join("sakkath.db"))
+}
+
+pub fn resolve_database_url() -> Result<String, sqlx::Error> {
+    if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        return Ok(database_url);
+    }
+
+    let database_path = default_database_path()?;
+    Ok(format!("sqlite:{}", database_path.display()))
+}
+
+pub fn sqlite_path_from_url(database_url: &str) -> Option<PathBuf> {
+    database_url.strip_prefix("sqlite:").map(PathBuf::from)
+}
+
+pub fn is_sqlite_file_present(database_url: &str) -> bool {
+    sqlite_path_from_url(database_url)
+        .map(|path| path.exists())
+        .unwrap_or(true)
+}
 
 /// Initialize the database connection pool
-pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error> {
+pub async fn init_db_pool(database_url: &str, create_if_missing: bool) -> Result<SqlitePool, sqlx::Error> {
     tracing::info!("Connecting to database: {}", database_url);
     
     if let Some(path) = database_url.strip_prefix("sqlite:") {
@@ -17,10 +67,20 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
         }
         
         if !Path::new(path).exists() {
-            std::fs::File::create(path)
-                .map_err(|e| sqlx::Error::Configuration(
-                    format!("Failed to create database file: {}", e).into()
-                ))?;
+            if create_if_missing {
+                std::fs::File::create(path)
+                    .map_err(|e| sqlx::Error::Configuration(
+                        format!("Failed to create database file: {}", e).into()
+                    ))?;
+            } else {
+                return Err(sqlx::Error::Configuration(
+                    format!(
+                        "Database file not found at {}. Run `sakkath-api create-database` first.",
+                        path
+                    )
+                    .into(),
+                ));
+            }
         }
     }
     
@@ -41,7 +101,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name VARCHAR(255) NOT NULL,
-            email VARCHAR(255) NOT NULL,
+            email VARCHAR(255),
             phone VARCHAR(20),
             dob DATE,
             team_id INTEGER,
@@ -65,6 +125,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS teams (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name VARCHAR(255) NOT NULL,
+            abbreviation VARCHAR(5),
             admin_id INTEGER,
             division INTEGER DEFAULT 0,
             location VARCHAR(255),
@@ -180,6 +241,55 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
+
+    let teams_has_abbreviation: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM pragma_table_info('teams') WHERE name='abbreviation'"
+    ).fetch_optional(pool).await.unwrap_or(None);
+
+    if teams_has_abbreviation.is_none() {
+        sqlx::query("ALTER TABLE teams ADD COLUMN abbreviation VARCHAR(5)").execute(pool).await?;
+    }
+
+    let users_email_not_null: Option<(i64,)> = sqlx::query_as(
+        "SELECT \"notnull\" FROM pragma_table_info('users') WHERE name='email'"
+    ).fetch_optional(pool).await.unwrap_or(None);
+
+    if matches!(users_email_not_null, Some((1,))) {
+        let mut conn = pool.acquire().await?;
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE users_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(255) NOT NULL,
+                email VARCHAR(255),
+                phone VARCHAR(20),
+                dob DATE,
+                team_id INTEGER,
+                role INTEGER DEFAULT 2,
+                password_hash VARCHAR(255),
+                is_captain INTEGER DEFAULT 0,
+                is_spirit_captain INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP,
+                FOREIGN KEY (team_id) REFERENCES teams(id)
+            )
+            "#
+        ).execute(&mut *conn).await?;
+
+        sqlx::query(
+            r#"INSERT INTO users_new (id, name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at)
+                SELECT id, name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at FROM users"#
+        ).execute(&mut *conn).await?;
+
+        sqlx::query("DROP TABLE users").execute(&mut *conn).await?;
+        sqlx::query("ALTER TABLE users_new RENAME TO users").execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_team_id ON users(team_id)").execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)").execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)").execute(&mut *conn).await?;
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
+    }
     
     // Migrate existing match_events table if needed (add team_id column)
     let has_team_id: (i64,) = sqlx::query_as(
@@ -247,15 +357,6 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)").execute(pool).await?;
     }
     
-    // Populate mock data
-    let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
-        .fetch_one(pool)
-        .await?;
-    
-    if user_count.0 == 0 {
-        crate::seeder::populate_mock_data(pool).await?;
-    }
-    
     // Spirit scores table: WFDF 5-category spirit per team per match
     sqlx::query(
         r#"
@@ -310,6 +411,35 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_score_confirmations_match_id ON score_confirmations(match_id)").execute(pool).await?;
 
     Ok(())
+}
+
+pub async fn seed_database(pool: &SqlitePool, source: SeedSource) -> Result<(), sqlx::Error> {
+    let team_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM teams")
+        .fetch_one(pool)
+        .await?;
+    let user_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await?;
+    let field_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM fields")
+        .fetch_one(pool)
+        .await?;
+    let match_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM matches")
+        .fetch_one(pool)
+        .await?;
+    let announcement_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM announcements")
+        .fetch_one(pool)
+        .await?;
+
+    if team_count.0 > 0 || user_count.0 > 0 || field_count.0 > 0 || match_count.0 > 0 || announcement_count.0 > 0 {
+        return Err(sqlx::Error::Configuration(
+            "Database already has data. Refusing to seed a non-empty database.".into(),
+        ));
+    }
+
+    match source {
+        SeedSource::MockData => crate::seeder::populate_mock_data(pool).await,
+        SeedSource::TeamsCsv { path } => crate::helpers::csv_seed::populate_from_teams_csv(pool, path.as_deref()).await,
+    }
 }
 
 /// Check if migrations were successful

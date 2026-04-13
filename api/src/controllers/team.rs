@@ -13,6 +13,7 @@ pub struct DivisionQuery {
 pub struct Team {
     pub id: i64,
     pub name: String,
+    pub abbreviation: Option<String>,
     pub division: i64,
     pub location: Option<String>,
     pub init_rank: Option<i64>,
@@ -24,6 +25,7 @@ pub struct Team {
 pub struct TeamDetail {
     pub id: i64,
     pub name: String,
+    pub abbreviation: Option<String>,
     pub location: String,
     pub division: i64,
     pub init_rank: i64,
@@ -42,6 +44,7 @@ pub struct TeamDetail {
 pub struct TeamStanding {
     pub id: i64,
     pub name: String,
+    pub abbreviation: Option<String>,
     pub location: String,
     pub init_rank: i64,
     pub wins: i64,
@@ -82,9 +85,15 @@ pub struct TeamPlayerStat {
 pub struct PocTeam {
     pub id: i64,
     pub name: String,
+    pub abbreviation: Option<String>,
     pub location: Option<String>,
     pub full_logo: Option<String>,
     pub small_logo: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePocTeamRequest {
+    pub abbreviation: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -100,7 +109,7 @@ pub struct PocPlayer {
 #[derive(Deserialize)]
 pub struct UpdatePlayerRequest {
     pub name: String,
-    pub email: String,
+    pub email: Option<String>,
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
@@ -109,7 +118,7 @@ pub struct UpdatePlayerRequest {
 #[derive(Deserialize)]
 pub struct AddPlayerRequest {
     pub name: String,
-    pub email: String,
+    pub email: Option<String>,
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
@@ -118,17 +127,17 @@ pub struct AddPlayerRequest {
 // All teams
 pub async fn get_teams(State(state): State<crate::AppState>) -> Json<Vec<Team>> {
     let teams = sqlx::query_as::<_, Team>(
-        "SELECT id, name, division, location, init_rank, full_logo, small_logo FROM teams WHERE deleted_at IS NULL ORDER BY division, init_rank"
+        "SELECT id, name, abbreviation, division, location, init_rank, full_logo, small_logo FROM teams WHERE deleted_at IS NULL ORDER BY division, init_rank"
     ).fetch_all(&state.db).await.unwrap_or_default();
     Json(teams)
 }
 
 // Single team detail with computed stats in one query
 pub async fn get_team_detail(State(state): State<crate::AppState>, Path(id): Path<i64>) -> Json<TeamDetail> {
-    let result = sqlx::query_as::<_, (i64, String, Option<String>, i64, Option<i64>, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
+    let result = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
         r#"
         SELECT 
-            t.id, t.name, t.location, t.division, t.init_rank,
+            t.id, t.name, t.abbreviation, t.location, t.division, t.init_rank,
             (SELECT COUNT(*) FROM users WHERE team_id = t.id AND deleted_at IS NULL) as players,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score > t2_score) OR (t2_id = t.id AND t2_score > t1_score))) as wins,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score < t2_score) OR (t2_id = t.id AND t2_score < t1_score))) as losses,
@@ -149,20 +158,21 @@ pub async fn get_team_detail(State(state): State<crate::AppState>, Path(id): Pat
         Ok(Some(r)) => Json(TeamDetail {
             id: r.0,
             name: r.1,
-            location: r.2.unwrap_or_default(),
-            division: r.3,
-            init_rank: r.4.unwrap_or(0),
-            players: r.5,
-            games_played: r.6 + r.7,
-            wins: r.6,
-            losses: r.7,
-            spirit_avg: r.8,
-            spirit_rank: r.9,
-            current_rank: r.4.unwrap_or(0),
-            full_logo: r.10,
-            small_logo: r.11,
+            abbreviation: r.2,
+            location: r.3.unwrap_or_default(),
+            division: r.4,
+            init_rank: r.5.unwrap_or(0),
+            players: r.6,
+            games_played: r.7 + r.8,
+            wins: r.7,
+            losses: r.8,
+            spirit_avg: r.9,
+            spirit_rank: r.10,
+            current_rank: r.5.unwrap_or(0),
+            full_logo: r.11,
+            small_logo: r.12,
         }),
-        _ => Json(TeamDetail { id: 0, name: "Not Found".to_string(), location: "".to_string(), division: 0, init_rank: 0, players: 0, games_played: 0, wins: 0, losses: 0, spirit_avg: 0.0, spirit_rank: 0, current_rank: 0, full_logo: None, small_logo: None }),
+        _ => Json(TeamDetail { id: 0, name: "Not Found".to_string(), abbreviation: None, location: "".to_string(), division: 0, init_rank: 0, players: 0, games_played: 0, wins: 0, losses: 0, spirit_avg: 0.0, spirit_rank: 0, current_rank: 0, full_logo: None, small_logo: None }),
     }
 }
 
@@ -196,6 +206,7 @@ pub async fn get_standings(State(state): State<crate::AppState>, Query(params): 
     let standings: Vec<TeamStanding> = sorted.iter().map(|t| TeamStanding {
         id: t.team_id,
         name: t.name.clone(),
+        abbreviation: t.abbreviation.clone(),
         location: String::new(),
         init_rank: t.init_rank,
         wins: t.wins,
@@ -247,7 +258,7 @@ pub async fn get_poc_team(
     let email = extract_email(&headers)?;
     
     let team = sqlx::query_as::<_, PocTeam>(
-        "SELECT t.id, t.name, t.location, t.full_logo, t.small_logo FROM teams t 
+        "SELECT t.id, t.name, t.abbreviation, t.location, t.full_logo, t.small_logo FROM teams t 
          INNER JOIN users u ON u.team_id = t.id 
          WHERE u.email = ? AND u.role = 3 AND u.deleted_at IS NULL"
     ).bind(&email).fetch_optional(&state.db).await
@@ -257,6 +268,30 @@ pub async fn get_poc_team(
         Some(t) => Ok(Json(t)),
         None => Err(axum::http::StatusCode::FORBIDDEN),
     }
+}
+
+pub async fn update_poc_team(
+    State(state): State<crate::AppState>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<UpdatePocTeamRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let email = extract_email(&headers)?;
+
+    let team_id: Option<(i64,)> = sqlx::query_as(
+        "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL"
+    ).bind(&email).fetch_optional(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
+    let abbreviation = normalize_team_abbreviation(payload.abbreviation.as_deref())?;
+
+    sqlx::query(
+        "UPDATE teams SET abbreviation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    ).bind(&abbreviation).bind(team_id)
+     .execute(&state.db).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"success": true, "abbreviation": abbreviation})))
 }
 
 // Get POC's team players
@@ -274,7 +309,7 @@ pub async fn get_poc_players(
     let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
     
     let players = sqlx::query_as::<_, PocPlayer>(
-        "SELECT id, name, email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain 
+        "SELECT id, name, COALESCE(email, '') as email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain 
          FROM users WHERE team_id = ? AND deleted_at IS NULL ORDER BY name"
     ).bind(team_id).fetch_all(&state.db).await.unwrap_or_default();
     
@@ -289,9 +324,11 @@ pub async fn update_poc_player(
     Json(payload): Json<UpdatePlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    let normalized_email = normalize_optional_email(payload.email.as_deref());
+    let normalized_phone = normalize_optional_text(payload.phone.as_deref());
     
     // Validate required fields
-    if payload.name.trim().is_empty() || payload.email.trim().is_empty() {
+    if payload.name.trim().is_empty() {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
     
@@ -307,19 +344,20 @@ pub async fn update_poc_player(
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
     
-    // Check if email already used by another user
-    let existing: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE email = ? AND id != ? AND deleted_at IS NULL"
-    ).bind(&payload.email).bind(player_id).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    if existing.is_some() {
-        return Err(axum::http::StatusCode::CONFLICT);
+    if let Some(ref email_value) = normalized_email {
+        let existing: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM users WHERE email = ? AND id != ? AND deleted_at IS NULL"
+        ).bind(email_value).bind(player_id).fetch_optional(&state.db).await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if existing.is_some() {
+            return Err(axum::http::StatusCode::CONFLICT);
+        }
     }
     
     sqlx::query(
         "UPDATE users SET name = ?, email = ?, phone = ?, is_captain = ?, is_spirit_captain = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-    ).bind(&payload.name).bind(&payload.email).bind(&payload.phone)
+    ).bind(&payload.name).bind(&normalized_email).bind(&normalized_phone)
      .bind(payload.is_captain).bind(payload.is_spirit_captain).bind(player_id)
      .execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -334,9 +372,11 @@ pub async fn add_poc_player(
     Json(payload): Json<AddPlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    let normalized_email = normalize_optional_email(payload.email.as_deref());
+    let normalized_phone = normalize_optional_text(payload.phone.as_deref());
     
     // Validate required fields
-    if payload.name.trim().is_empty() || payload.email.trim().is_empty() {
+    if payload.name.trim().is_empty() {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
     
@@ -347,19 +387,20 @@ pub async fn add_poc_player(
     
     let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
     
-    // Check if email already exists
-    let existing: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL"
-    ).bind(&payload.email).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    if existing.is_some() {
-        return Err(axum::http::StatusCode::CONFLICT);
+    if let Some(ref email_value) = normalized_email {
+        let existing: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM users WHERE email = ? AND deleted_at IS NULL"
+        ).bind(email_value).fetch_optional(&state.db).await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if existing.is_some() {
+            return Err(axum::http::StatusCode::CONFLICT);
+        }
     }
     
     let result = sqlx::query(
         "INSERT INTO users (name, email, phone, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, 2, ?, ?)"
-    ).bind(&payload.name).bind(&payload.email).bind(&payload.phone)
+    ).bind(&payload.name).bind(&normalized_email).bind(&normalized_phone)
      .bind(team_id).bind(payload.is_captain).bind(payload.is_spirit_captain)
      .execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -443,4 +484,38 @@ fn extract_email(headers: &axum::http::HeaderMap) -> Result<String, axum::http::
     ).map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
 
     Ok(token_data.claims.email)
+}
+
+fn normalize_optional_email(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    Some(value.to_ascii_lowercase())
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    Some(value.to_string())
+}
+
+fn normalize_team_abbreviation(value: Option<&str>) -> Result<Option<String>, axum::http::StatusCode> {
+    let Some(value) = value.map(str::trim) else {
+        return Ok(None);
+    };
+
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    if value.len() > 5 || !value.chars().all(|char| char.is_ascii_alphanumeric()) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    Ok(Some(value.to_string()))
 }

@@ -11,7 +11,7 @@ export function SponsorBanner() {
   ];
 
   return (
-    <div className="bg-white dark:bg-slate-900 py-8 mt-8">
+    <div className="mt-3 bg-white py-6 dark:bg-slate-900 sm:mt-6 sm:py-8">
       <div className="max-w-7xl mx-auto px-4">
         <div className="grid grid-cols-4 gap-4">
           {sponsors.map((sponsor) => (

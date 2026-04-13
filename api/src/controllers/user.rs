@@ -19,6 +19,7 @@ pub struct Claims {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -44,10 +45,72 @@ pub struct RoleResponse {
     pub role_name: String,
 }
 
+#[derive(Deserialize)]
+struct TurnstileVerifyResponse {
+    success: bool,
+}
+
+fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .map(|value| value.trim().to_string())
+        })
+}
+
+async fn verify_turnstile(headers: &HeaderMap, captcha_token: Option<&str>) -> Result<(), StatusCode> {
+    let secret = match env::var("TURNSTILE_SECRET_KEY") {
+        Ok(secret) if !secret.trim().is_empty() => secret,
+        _ => return Ok(()),
+    };
+
+    let token = captcha_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or(StatusCode::FORBIDDEN)?;
+
+    let mut form_fields = vec![
+        ("secret", secret),
+        ("response", token.to_string()),
+    ];
+
+    if let Some(remote_ip) = extract_client_ip(headers) {
+        form_fields.push(("remoteip", remote_ip));
+    }
+
+    let response = reqwest::Client::new()
+        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+        .form(&form_fields)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let verify_response: TurnstileVerifyResponse = response
+        .json()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if verify_response.success {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
 pub async fn login(
     State(state): State<crate::AppState>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
+    verify_turnstile(&headers, payload.captcha_token.as_deref()).await?;
+
     let password_hash = format!("{:x}", md5::compute(&payload.password));
     
     let user: Option<(i64, String, i64)> = sqlx::query_as(

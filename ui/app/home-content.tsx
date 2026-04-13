@@ -1,14 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { Calendar, Clock, LayoutGrid, MapPin, Target, Trophy, Users } from 'lucide-react';
 import { Text } from './components/Text';
+import { getTeamAbbreviation } from './lib/team-name';
 
 interface TeamStanding {
   id: number;
   name: string;
+  abbreviation?: string | null;
   location: string;
   init_rank: number;
   wins: number;
@@ -46,6 +48,15 @@ export function HomeContent() {
   const [womenStandings, setWomenStandings] = useState<TeamStanding[]>([]);
   const [stats, setStats] = useState<Stats>({ teams: 0, players: 0, points: 0, games: 0, fields: 0 });
   const [loading, setLoading] = useState(true);
+  
+  const headerScrollRef = useRef<HTMLDivElement>(null);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+
+  const handleTableScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (headerScrollRef.current) {
+      headerScrollRef.current.scrollLeft = e.currentTarget.scrollLeft;
+    }
+  };
 
   useEffect(() => {
     setMounted(true);
@@ -102,10 +113,18 @@ export function HomeContent() {
 
   const currentStandings = sortStandings(division === 'open' ? openStandings : womenStandings);
 
+  const getDisplayTeamName = (team: TeamStanding) => {
+    if (team.name.length <= 17) {
+      return team.name;
+    }
+
+    return getTeamAbbreviation(team.name, team.abbreviation, 17);
+  };
+
   if (!mounted) return null;
 
   return (
-    <div className="min-h-screen overflow-x-hidden px-4 py-4 md:px-0">
+    <div className="min-h-screen px-4 py-4 md:px-0">
       <div className="mx-auto max-w-7xl">
         <div className="mb-5 rounded-sm bg-white p-6 dark:bg-slate-900">
           <div className="md:grid md:grid-cols-[minmax(260px,320px)_1fr_minmax(220px,280px)] md:items-stretch md:gap-6">
@@ -222,7 +241,7 @@ export function HomeContent() {
           </div>
         </div>
 
-        <div className="rounded-sm bg-white p-6 dark:bg-slate-900">
+        <div className="rounded-sm bg-white p-4 dark:bg-slate-900 sm:p-6">
           <div className="mb-4 hidden items-center justify-between gap-3 sm:flex">
             <div className="flex items-center gap-4">
               <Text as="h2" variant="primary" className="text-xl">
@@ -256,11 +275,11 @@ export function HomeContent() {
             </div>
           </div>
 
-          <div className="mb-4 flex flex-col gap-3 sm:hidden">
+          <div className="sticky top-14 z-20 -mx-4 mb-3 border-b border-gray-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900 sm:hidden">
             <Text as="h2" variant="primary" className="text-xl">
               Standings
             </Text>
-            <div className="flex gap-2">
+            <div className="mt-3 flex gap-2">
               {(['game', 'initial', 'spirit'] as SortBy[]).map((selection) => (
                 <button
                   key={selection}
@@ -271,7 +290,7 @@ export function HomeContent() {
                 </button>
               ))}
             </div>
-            <div className="flex gap-2">
+            <div className="mt-2 flex gap-2">
               <button
                 onClick={() => setDivision('open')}
                 className={`flex-1 rounded px-3 py-2.5 text-sm font-medium transition-colors ${division === 'open' ? 'bg-blue-900 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-slate-800 dark:text-gray-300 dark:hover:bg-slate-700'}`}
@@ -285,35 +304,54 @@ export function HomeContent() {
                 Women
               </button>
             </div>
+            
+            {/* Synced Mobile Header */}
+            <div 
+              ref={headerScrollRef}
+              className="mt-3 -mb-3 -mx-4 px-4 pt-2 overflow-hidden border-t border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+            >
+              <div className="w-full min-w-[470px] flex text-sm font-medium text-gray-500 dark:text-gray-400">
+                <div className="w-6 min-w-[24px] px-1 pb-1 text-left shrink-0">#</div>
+                <div className="w-[160px] min-w-[160px] px-1 pr-2 pb-1 text-left shrink-0">Team</div>
+                <div className="w-8 min-w-[32px] px-0.5 pb-1 text-center shrink-0">P</div>
+                <div className="w-8 min-w-[32px] px-0.5 pb-1 text-center shrink-0">W</div>
+                <div className="w-8 min-w-[32px] px-0.5 pb-1 text-center shrink-0">L</div>
+                <div className="w-10 min-w-[40px] px-0.5 pb-1 text-center shrink-0">Diff</div>
+                <div className="w-12 min-w-[48px] px-0.5 pb-1 text-center shrink-0">Spirit</div>
+                <div className="w-full grow shrink-0"></div>
+              </div>
+            </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
+          <div className="overflow-x-auto" ref={tableScrollRef} onScroll={handleTableScroll}>
+            <table className="w-full min-w-[470px] text-sm sm:min-w-[620px]">
+              <thead className="hidden sm:table-header-group bg-white dark:bg-slate-900 sm:sticky sm:top-14 sm:z-20">
                 <tr className="border-b border-gray-200 dark:border-slate-700">
-                  <th className="px-2 py-3 text-left font-medium text-gray-500 dark:text-gray-400">#</th>
-                  <th className="px-2 py-3 text-left font-medium text-gray-500 dark:text-gray-400">Team</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">P</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">W</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">L</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">PF</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">PA</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">Diff</th>
-                  <th className="px-2 py-3 text-center font-medium text-gray-500 dark:text-gray-400">Spirit</th>
+                  <th className="w-6 min-w-[24px] px-1 py-3 text-left font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:min-w-0 sm:px-2">#</th>
+                  <th className="w-[160px] max-w-[160px] min-w-[160px] px-1 pr-2 py-3 text-left font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:min-w-0 sm:max-w-none sm:pr-1 sm:px-2">Team</th>
+                  <th className="w-8 min-w-[32px] px-0.5 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:px-2">P</th>
+                  <th className="w-8 min-w-[32px] px-0.5 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:px-2">W</th>
+                  <th className="w-8 min-w-[32px] px-0.5 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:px-2">L</th>
+                  <th className="hidden w-9 px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 md:table-cell md:px-2">PF</th>
+                  <th className="hidden w-9 px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 md:table-cell md:px-2">PA</th>
+                  <th className="w-10 min-w-[40px] px-0.5 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:px-2">Diff</th>
+                  <th className="w-12 min-w-[48px] px-0.5 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:px-2">Spirit</th>
+                  <th className="w-full sm:hidden"></th>
                 </tr>
               </thead>
               <tbody>
                 {!loading && currentStandings.map((team, index) => {
                   const diff = team.points_for - team.points_against;
                   const initial = team.name.charAt(0).toUpperCase();
+                  const displayName = getDisplayTeamName(team);
 
                   return (
                     <tr key={team.id} className="border-b border-gray-200 hover:opacity-80 dark:border-slate-700">
-                      <td className="px-2 py-3">
+                      <td className="w-6 min-w-[24px] px-1 py-3 sm:w-auto sm:min-w-0 sm:px-2">
                         <Text variant="primary" className="font-medium">{index + 1}</Text>
                       </td>
-                      <td className="px-2 py-3">
-                        <Link href={`/teams?team_id=${team.id}`} className="flex items-center gap-2 hover:underline">
+                      <td className="w-[160px] max-w-[160px] min-w-[160px] px-1 pr-2 py-3 overflow-hidden sm:w-auto sm:max-w-none sm:min-w-0 sm:overflow-visible sm:pr-1 sm:px-2">
+                        <Link href={`/teams?team_id=${team.id}`} className="flex items-center gap-1.5 hover:underline sm:gap-2" title={team.name}>
                           <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-900 text-xs font-bold text-white sm:h-6 sm:w-6">
                             {team.small_logo ? (
                               <img src={team.small_logo} alt={team.name} className="h-full w-full object-cover" />
@@ -321,26 +359,27 @@ export function HomeContent() {
                               initial
                             )}
                           </div>
-                          <Text variant="primary" className="font-medium truncate max-w-[100px] sm:max-w-[180px]">{team.name}</Text>
+                          <Text variant="primary" className="block min-w-0 font-medium whitespace-nowrap">{displayName}</Text>
                         </Link>
                       </td>
-                      <td className="px-2 py-3 text-center">
+                      <td className="w-8 min-w-[32px] px-0.5 py-3 text-center sm:w-auto sm:min-w-0 sm:px-2">
                         <Text variant="secondary">{team.wins + team.losses}</Text>
                       </td>
-                      <td className="px-2 py-3 text-center text-green-500">{team.wins}</td>
-                      <td className="px-2 py-3 text-center text-red-500">{team.losses}</td>
-                      <td className="px-2 py-3 text-center">
+                      <td className="w-8 min-w-[32px] px-0.5 py-3 text-center text-green-500 sm:w-auto sm:min-w-0 sm:px-2">{team.wins}</td>
+                      <td className="w-8 min-w-[32px] px-0.5 py-3 text-center text-red-500 sm:w-auto sm:min-w-0 sm:px-2">{team.losses}</td>
+                      <td className="hidden px-1 py-3 text-center md:table-cell md:px-2">
                         <Text variant="primary">{team.points_for}</Text>
                       </td>
-                      <td className="px-2 py-3 text-center">
+                      <td className="hidden px-1 py-3 text-center md:table-cell md:px-2">
                         <Text variant="primary">{team.points_against}</Text>
                       </td>
-                      <td className={`px-2 py-3 text-center font-medium ${diff > 0 ? 'text-green-500' : diff < 0 ? 'text-red-500' : 'text-gray-900 dark:text-white'}`}>
+                      <td className={`w-10 min-w-[40px] px-0.5 py-3 text-center font-medium sm:w-auto sm:min-w-0 sm:px-2 ${diff > 0 ? 'text-green-500' : diff < 0 ? 'text-red-500' : 'text-gray-900 dark:text-white'}`}>
                         {diff > 0 ? '+' : ''}{diff}
                       </td>
-                      <td className="px-2 py-3 text-center">
+                      <td className="w-12 min-w-[48px] px-0.5 py-3 text-center sm:w-auto sm:min-w-0 sm:px-2">
                         <Text variant="primary">{team.spirit_avg.toFixed(1)}</Text>
                       </td>
+                      <td className="w-full sm:hidden"></td>
                     </tr>
                   );
                 })}

@@ -2,7 +2,6 @@ use serde::{Serialize, Deserialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use rand::Rng;
 use crate::helpers::cache;
 
 // Core team data fetched once from DB, reused across all criteria
@@ -10,6 +9,7 @@ use crate::helpers::cache;
 pub struct TeamSortData {
     pub team_id: i64,
     pub name: String,
+    pub abbreviation: Option<String>,
     pub small_logo: Option<String>,
     pub init_rank: i64,
     pub wins: i64,
@@ -28,8 +28,8 @@ pub struct TeamSortData {
 
 // Fetch all sort data for a division in minimal queries
 pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
-    let teams: Vec<(i64, String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT id, name, small_logo, COALESCE(init_rank, 9999) FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC"
+    let teams: Vec<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id, name, abbreviation, small_logo, COALESCE(init_rank, 9999) FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC"
     ).bind(division).fetch_all(db).await.unwrap_or_default();
 
     // All completed swiss matches for this division
@@ -42,10 +42,11 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
     ).bind(division).fetch_all(db).await.unwrap_or_default();
 
     let mut data_map: HashMap<i64, TeamSortData> = HashMap::new();
-    for (id, name, logo, rank) in &teams {
+    for (id, name, abbreviation, logo, rank) in &teams {
         data_map.insert(*id, TeamSortData {
             team_id: *id,
             name: name.clone(),
+            abbreviation: abbreviation.clone(),
             small_logo: logo.clone(),
             init_rank: *rank,
             wins: 0,
@@ -167,9 +168,12 @@ pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b_mom.cmp(&a_mom)
 }
 
-// C7: True random coin flip tiebreaker
-pub fn c7_rng(_a: &TeamSortData, _b: &TeamSortData) -> Ordering {
-    if rand::rng().random_bool(0.5) { Ordering::Less } else { Ordering::Greater }
+// C7: Stable final fallback using seed, then team id
+pub fn c7_stable_seed(a: &TeamSortData, b: &TeamSortData) -> Ordering {
+    let a_rank = if a.init_rank > 0 { a.init_rank } else { i64::MAX };
+    let b_rank = if b.init_rank > 0 { b.init_rank } else { i64::MAX };
+
+    a_rank.cmp(&b_rank).then_with(|| a.team_id.cmp(&b.team_id))
 }
 
 // Master sort: apply all criteria in order c1..c7
@@ -195,7 +199,7 @@ pub fn sort_teams(teams: &mut Vec<TeamSortData>) {
         ord = c6_momentum_score(a, b);
         if ord != Ordering::Equal { return ord; }
 
-        c7_rng(a, b)
+        c7_stable_seed(a, b)
     });
 }
 

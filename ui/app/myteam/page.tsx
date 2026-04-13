@@ -9,6 +9,7 @@ import { useAuth } from "../auth-provider";
 interface Team {
   id: number;
   name: string;
+  abbreviation: string | null;
   location: string | null;
   full_logo: string | null;
   small_logo: string | null;
@@ -200,8 +201,10 @@ export default function MyTeamPage() {
   const { isLoggedIn, isPoc, token, roleName, isLoading } = useAuth();
   const router = useRouter();
   const [team, setTeam] = useState<Team | null>(null);
+  const [teamAbbreviation, setTeamAbbreviation] = useState('');
   const [players, setPlayers] = useState<Player[]>([]);
   const [matches, setMatches] = useState<PocMatch[]>([]);
+  const [savingTeamAbbreviation, setSavingTeamAbbreviation] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<Partial<Player>>({});
@@ -238,11 +241,37 @@ export default function MyTeamPage() {
         fetch(`${API_URL}/v1/poc/players`, { headers: { Authorization: `Bearer ${token}` } }),
         fetch(`${API_URL}/v1/poc/matches`, { headers: { Authorization: `Bearer ${token}` } }),
       ]);
-      if (teamRes.ok) setTeam(await teamRes.json());
+      if (teamRes.ok) {
+        const teamData = await teamRes.json();
+        setTeam(teamData);
+        setTeamAbbreviation(teamData.abbreviation || '');
+      }
       if (playersRes.ok) setPlayers(await playersRes.json());
       if (matchesRes.ok) setMatches(await matchesRes.json());
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
+  };
+
+  const handleTeamAbbreviationSave = async () => {
+    if (!token || !team) return;
+
+    const trimmed = teamAbbreviation.trim();
+    if (trimmed && !/^[A-Za-z0-9]{1,5}$/.test(trimmed)) {
+      return;
+    }
+
+    try {
+      setSavingTeamAbbreviation(true);
+      const res = await fetch(`${API_URL}/v1/poc/team`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ abbreviation: trimmed || null }),
+      });
+      if (res.ok) {
+        setTeam({ ...team, abbreviation: trimmed || null });
+      }
+    } catch (err) { console.error(err); }
+    finally { setSavingTeamAbbreviation(false); }
   };
 
   const handleEdit = (player: Player) => {
@@ -285,7 +314,7 @@ export default function MyTeamPage() {
   };
 
   const handleAdd = () => {
-    if (!token || !newPlayer.name || !newPlayer.email) return;
+    if (!token || !newPlayer.name) return;
     setConfirmDialog({
       title: 'Add Player', message: `Add ${newPlayer.name} as ${newRole}?`,
       onConfirm: async () => {
@@ -512,6 +541,24 @@ export default function MyTeamPage() {
               {team.location && <Text variant="secondary" className="text-xs">{team.location}</Text>}
             </div>
           </div>
+          <div className="mt-3 flex items-center gap-2">
+            <input
+              type="text"
+              value={teamAbbreviation}
+              maxLength={5}
+              placeholder="Team code"
+              onChange={e => setTeamAbbreviation(e.target.value.replace(/[^a-zA-Z0-9]/g, ''))}
+              className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm uppercase text-gray-900 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+            />
+            <button
+              onClick={handleTeamAbbreviationSave}
+              disabled={savingTeamAbbreviation || (team.abbreviation || '') === teamAbbreviation.trim()}
+              className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
+            >
+              {savingTeamAbbreviation ? 'Saving' : 'Save code'}
+            </button>
+            <Text variant="secondary" className="text-[11px]">Up to 5 letters or numbers.</Text>
+          </div>
         </div>
 
         {/* Matches - unified tiles */}
@@ -673,20 +720,24 @@ export default function MyTeamPage() {
             )}
           </div>
 
+          <p className="mb-3 text-xs text-gray-600 dark:text-slate-400">
+            Emails and phone numbers are not mandatory, but please fill contact details for a few people so they are reachable in case of issues.
+          </p>
+
           {isAdding && (
             <div className="mb-2 p-3 rounded-xl border border-cyan-200 dark:border-cyan-800 bg-cyan-50/50 dark:bg-cyan-900/10 space-y-2">
               <input type="text" placeholder="Name *" value={newPlayer.name || ''} onChange={e => setNewPlayer({ ...newPlayer, name: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
-              <input type="email" placeholder="Email *" value={newPlayer.email || ''} onChange={e => setNewPlayer({ ...newPlayer, email: e.target.value })}
+              <input type="email" placeholder="Email (optional)" value={newPlayer.email || ''} onChange={e => setNewPlayer({ ...newPlayer, email: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
-              <input type="text" placeholder="Phone" value={newPlayer.phone || ''} onChange={e => setNewPlayer({ ...newPlayer, phone: e.target.value })}
+              <input type="text" placeholder="Phone (optional)" value={newPlayer.phone || ''} onChange={e => setNewPlayer({ ...newPlayer, phone: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
               <select value={newRole} onChange={e => setNewRole(e.target.value as PlayerRole)}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
                 {PLAYER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
               <div className="flex gap-2">
-                <button onClick={handleAdd} disabled={!newPlayer.name || !newPlayer.email}
+                <button onClick={handleAdd} disabled={!newPlayer.name}
                   className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold disabled:opacity-50 transition">
                   <Save className="w-3 h-3" /> Add
                 </button>
@@ -707,9 +758,9 @@ export default function MyTeamPage() {
                     <div className="p-2.5 space-y-2">
                       <input type="text" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
-                      <input type="email" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
+                      <input type="email" placeholder="Email (optional)" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
-                      <input type="text" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })}
+                      <input type="text" placeholder="Phone (optional)" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <select value={editRole} onChange={e => setEditRole(e.target.value as PlayerRole)}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
@@ -730,7 +781,7 @@ export default function MyTeamPage() {
                           <Text variant="primary" className="text-sm font-medium">{player.name}</Text>
                           {roleBadge(role)}
                         </div>
-                        <Text variant="secondary" className="text-xs truncate">{player.email}</Text>
+                        <Text variant="secondary" className="text-xs truncate">{player.email || 'No email added'}</Text>
                       </div>
                       <div className="flex gap-0.5 shrink-0">
                         <button onClick={() => handleEdit(player)} className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition">

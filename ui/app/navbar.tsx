@@ -180,7 +180,7 @@ export function Navbar() {
       </nav>
 
       {/* Mobile Navbar */}
-      <nav className={`flex md:hidden items-center justify-between px-2 py-3 sticky top-0 z-50 ${shellClasses}`}>
+      <nav className={`sticky top-0 z-50 flex h-14 items-center justify-between px-2 md:hidden ${shellClasses}`}>
         <button
           onClick={() => setSidebarOpen(true)}
           className="p-2 rounded hover:bg-white/70 dark:hover:bg-slate-900/70 transition-colors"

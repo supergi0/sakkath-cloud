@@ -34,7 +34,7 @@ fn routes_with_auth() -> Router<AppState> {
 // POC routes (protected)
 fn poc_routes() -> Router<AppState> {
     Router::new()
-        .route("/poc/team", get(team::get_poc_team))
+        .route("/poc/team", get(team::get_poc_team).put(team::update_poc_team))
         .route("/poc/team/logo", put(team::update_poc_team_logo))
         .route("/poc/players", get(team::get_poc_players))
         .route("/poc/players", post(team::add_poc_player))
@@ -97,6 +97,7 @@ fn match_routes() -> Router<AppState> {
 fn schedule_routes() -> Router<AppState> {
     Router::new()
         .route("/schedule/state", get(scheduling::read_tournament_state))
+    .route("/schedule/grid", get(scheduling::get_schedule_grid))
         .route("/schedule/matches", get(scheduling::get_schedule_matches))
         .route("/schedule/early-fixtures", get(scheduling::get_early_fixtures))
 }
@@ -106,6 +107,8 @@ fn schedule_admin_routes() -> Router<AppState> {
     Router::new()
         .route("/admin/schedule/:division/generate", post(scheduling::generate_next_round))
         .route("/admin/schedule/:division/check-gates", post(scheduling::check_and_populate_gates))
+    .route("/super/schedule/rows/:row_key", put(scheduling::update_schedule_row))
+    .route("/super/schedule/matches/:id/slot", put(scheduling::move_schedule_match))
 }
 
 // Combine all routes

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
 
@@ -34,7 +34,7 @@ interface StatsPreferences {
 
 const STATS_PREFS_KEY = 'sakkath:stats:preferences';
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 32;
 
 export default function Stats() {
   const [players, setPlayers] = useState<PlayerStat[]>([]);
@@ -45,6 +45,8 @@ export default function Stats() {
   const [sortField, setSortField] = useState<SortField>('goals');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [page, setPage] = useState(1);
+  const [tableStickyTop, setTableStickyTop] = useState(112);
+  const headerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const savedPreferences = localStorage.getItem(STATS_PREFS_KEY);
@@ -75,6 +77,19 @@ export default function Stats() {
     const preferences: StatsPreferences = { division, teamFilter };
     localStorage.setItem(STATS_PREFS_KEY, JSON.stringify(preferences));
   }, [division, teamFilter]);
+
+  useEffect(() => {
+    const updateStickyTop = () => {
+      const navbarHeight = 56;
+      const headerHeight = headerRef.current?.offsetHeight ?? 0;
+      setTableStickyTop(navbarHeight + headerHeight);
+    };
+
+    updateStickyTop();
+    window.addEventListener('resize', updateStickyTop);
+
+    return () => window.removeEventListener('resize', updateStickyTop);
+  }, []);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -146,13 +161,11 @@ export default function Stats() {
 
   if (loading) {
     return (
-      <div className="min-h-screen">
-        <div className="sticky top-16 md:top-[72px] z-20 bg-white dark:bg-slate-900 shadow-sm">
-          <div className="max-w-7xl mx-auto px-4 py-6">
-            <Text variant="primary" className="text-xl">Player Statistics</Text>
-          </div>
+      <div className="bg-gray-100 dark:bg-slate-950">
+        <div className="px-4 py-4 sm:mx-auto sm:max-w-7xl sm:px-4">
+          <Text variant="primary" className="text-xl">Player Statistics</Text>
         </div>
-        <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="px-4 py-8 sm:mx-auto sm:max-w-7xl sm:px-4">
           <Text variant="secondary">Loading...</Text>
         </div>
       </div>
@@ -160,52 +173,49 @@ export default function Stats() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-slate-950">
-      {/* Sticky header - no gap with navbar */}
-      <div className="sticky top-16 md:top-[72px] z-20 bg-white dark:bg-slate-900 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+    <div className="bg-gray-100 dark:bg-slate-950 pb-2 sm:pb-4">
+      <div className="sticky top-14 z-30 bg-gray-100 dark:bg-slate-950">
+        <div ref={headerRef} className="px-4 py-3 sm:mx-auto sm:max-w-7xl sm:px-4">
+          <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
             <Text as="h1" variant="primary" className="text-xl">
               Player Statistics
             </Text>
-            <div className="flex gap-2 w-full sm:w-auto">
+            <div className="flex w-full gap-2 sm:w-auto">
               <div className="relative">
                 <select
                   value={division}
                   onChange={(e) => { setDivision(e.target.value as typeof division); setTeamFilter(null); setPage(1); }}
-                  className="appearance-none px-3 py-2 pr-8 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 cursor-pointer"
+                  className="appearance-none rounded bg-white px-3 py-2 pr-8 text-sm text-gray-700 shadow-sm ring-1 ring-gray-200 dark:bg-slate-900 dark:text-gray-300 dark:ring-slate-700"
                 >
                   <option value="all">All Divisions</option>
                   <option value="open">Open</option>
                   <option value="women">Women</option>
                 </select>
-                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
               </div>
               <div className="relative flex-1 sm:flex-none">
                 <select
                   value={teamFilter ?? ''}
                   onChange={(e) => { setTeamFilter(e.target.value ? Number(e.target.value) : null); setPage(1); }}
-                  className="appearance-none w-full px-3 py-2 pr-8 text-sm rounded bg-gray-100 dark:bg-slate-800 border-0 text-gray-700 dark:text-gray-300 cursor-pointer sm:min-w-[180px]"
+                  className="appearance-none w-full rounded bg-white px-3 py-2 pr-8 text-sm text-gray-700 shadow-sm ring-1 ring-gray-200 dark:bg-slate-900 dark:text-gray-300 dark:ring-slate-700 sm:min-w-[180px]"
                 >
                   <option value="">All Teams</option>
                   {filteredTeams.map(t => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
                 </select>
-                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+                <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Table section */}
-      <div className="max-w-7xl mx-auto px-4 py-4">
-        <div className="rounded-sm bg-white dark:bg-slate-900 overflow-hidden">
-          <div className="overflow-x-auto max-h-[calc(100vh-240px)] overflow-y-auto">
-            <table className="w-full text-xs sm:text-sm min-w-[800px]">
-              <thead className="sticky top-0 bg-white dark:bg-slate-900 z-20">
-                <tr className="border-b border-gray-200 dark:border-slate-700">
+      <div className="pb-2 sm:mx-auto sm:max-w-7xl sm:px-4">
+        <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-140px)] border-y border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900 sm:rounded-sm sm:border">
+          <table className="w-full min-w-[720px] text-xs sm:min-w-[800px] sm:text-sm">
+            <thead className="sticky top-0 z-20 bg-white dark:bg-slate-900 shadow-[0_2px_4px_rgba(0,0,0,0.05)] dark:shadow-[0_2px_4px_rgba(0,0,0,0.2)]">
+              <tr className="border-b border-gray-200 dark:border-slate-700">
                   <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30" />
                   <SortHeader field="team" label="Team" className="text-left" />
                   <SortHeader field="goals" label="Gls" />
@@ -227,37 +237,37 @@ export default function Stats() {
                       key={player.id} 
                       className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700"
                     >
-                      <td className="py-3 px-2 sticky left-0 bg-white dark:bg-slate-900 z-10 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] dark:shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]">
+                      <td className="sticky left-0 z-10 bg-white px-2 py-2.5 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] dark:bg-slate-900 dark:shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]">
                         <Text variant="primary" className="font-medium truncate max-w-[150px] block">{player.name}</Text>
                       </td>
-                      <td className="py-3 px-2">
+                      <td className="px-2 py-2.5">
                         <Text variant="secondary" className="truncate max-w-[120px] block">{player.team_name}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.goals}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.assists}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.blocks}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.turnovers}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="secondary">{player.matches}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="secondary">{(player.goals / m).toFixed(2)}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="secondary">{(player.assists / m).toFixed(2)}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="secondary">{(player.blocks / m).toFixed(2)}</Text>
                       </td>
-                      <td className="py-3 px-2 text-center">
+                      <td className="px-2 py-2.5 text-center">
                         <Text variant="secondary">{(player.turnovers / m).toFixed(2)}</Text>
                       </td>
                     </tr>
@@ -266,9 +276,9 @@ export default function Stats() {
               </tbody>
             </table>
           </div>
-
+            
           {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-2 p-4 border-t border-gray-200 dark:border-slate-700">
+            <div className="flex items-center justify-center gap-2 border-b border-gray-200 bg-white p-3 dark:bg-slate-900 dark:border-slate-700 sm:border-x sm:rounded-b-sm">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
@@ -290,6 +300,5 @@ export default function Stats() {
           )}
         </div>
       </div>
-    </div>
   );
 }

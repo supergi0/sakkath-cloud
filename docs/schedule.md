@@ -7,7 +7,7 @@ The scheduler is split between two files:
 - `api/src/helpers/sorting.rs` ranks teams
 - `api/src/helpers/rounds.rs` creates swiss pairings
 
-The controller in `api/src/controllers/scheduling.rs` decides when to generate the next round, playoffs, and finals.
+The controller in `api/src/controllers/scheduling.rs` decides when to generate the next round, playoffs, and finals, and it maps those matches into a fixed public slot grid.
 
 ## Standings rules
 
@@ -21,15 +21,15 @@ Teams are sorted by these criteria, in this exact order:
 - `C4`: point difference
 - `C5`: total points scored
 - `C6`: momentum score, which rewards earlier wins more than later wins
-- `C7`: random coin flip
+- `C7`: initial seed rank, then team id if seed rank is missing
 
-`C7` is a real random tiebreak in the current code, so two fully tied teams can swap order.
+`C7` is deterministic in the current code so the standings sort always has a stable total order.
 
 ## How swiss rounds are generated
 
 Round 1 is generated from seeding if a division has no matches yet.
 
-The current code uses `OPEN_ROUNDS = 5` and `WOMEN_ROUNDS = 5`.
+The current code uses `OPEN_ROUNDS = 6` and `WOMEN_ROUNDS = 6`.
 
 For later rounds:
 
@@ -43,9 +43,36 @@ For later rounds:
 
 The scheduler will not create the next swiss round until the previous one is fully completed.
 
+## Fixed slot layout
+
+The public schedule is one combined table for both divisions.
+
+- `G1` to `G4` are the only grounds used in the scheduler
+- Friday contains swiss rounds `1` to `3`
+- Saturday contains swiss rounds `4` to `6`
+- Sunday contains playoff round `1001` first, then playoff round `1002`
+
+Row timing rules in the current code:
+
+- swiss rows use `60` minute matches with `15` minute gaps
+- playoff rows use `75` minute matches with `15` minute gaps
+- Friday and Saturday rows start at `06:30`
+- Sunday rows start at `06:30`
+
+Slot codes are fixed before pairings are known. Examples:
+
+- `O R1-01`
+- `W R1-01`
+- `O P1-01`
+- `W P2-01`
+
+Teams can optionally save a custom compact abbreviation. When that is blank, the UI falls back to the generated abbreviation helper.
+
+SUPER users can edit row start and end times and move not-started matches between compatible slots. Live and completed matches stay locked.
+
 ## How playoffs and finals are handled
 
-After all 5 swiss rounds are completed, the controller creates post-swiss matches for the whole standings table.
+After all 6 swiss rounds are completed, the controller creates post-swiss matches for the whole standings table.
 
 The standings are split into brackets of 4 teams in seed order:
 

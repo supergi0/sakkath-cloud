@@ -31,6 +31,8 @@ pub struct TeamMatch {
     pub t2_id: i64,
     pub t1_name: String,
     pub t2_name: String,
+    pub t1_abbreviation: Option<String>,
+    pub t2_abbreviation: Option<String>,
     pub t1_score: i64,
     pub t2_score: i64,
     pub t1_spirit: Option<i64>,
@@ -67,6 +69,8 @@ pub struct MatchDetail {
     pub t2_id: i64,
     pub t1_name: String,
     pub t2_name: String,
+    pub t1_abbreviation: Option<String>,
+    pub t2_abbreviation: Option<String>,
     pub t1_score: i64,
     pub t2_score: i64,
     pub t1_spirit: Option<i64>,
@@ -90,6 +94,8 @@ pub struct UpcomingMatch {
     pub t2_id: i64,
     pub t1_name: String,
     pub t2_name: String,
+    pub t1_abbreviation: Option<String>,
+    pub t2_abbreviation: Option<String>,
     pub field_name: String,
     pub time: String,
     pub possession: Option<i64>,
@@ -147,7 +153,8 @@ pub async fn get_stats(State(state): State<crate::AppState>) -> Json<Stats> {
 pub async fn get_team_matches(State(state): State<crate::AppState>, Path(team_id): Path<i64>) -> Json<Vec<TeamMatch>> {
     let matches = sqlx::query_as::<_, TeamMatch>(
         r#"
-        SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit, 
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
              m.possession, m.stream_url, m.type as match_type
@@ -185,7 +192,7 @@ pub async fn get_match_events(State(state): State<crate::AppState>, Path(match_i
 pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_id): Path<i64>) -> Json<MatchDetail> {
     let match_row = sqlx::query(
         r#"
-        SELECT m.id, m.t1_id, m.t2_id, t1.name, t2.name, m.t1_score, m.t2_score, 
+        SELECT m.id, m.t1_id, m.t2_id, t1.name, t2.name, t1.abbreviation, t2.abbreviation, m.t1_score, m.t2_score, 
                m.t1_spirit, m.t2_spirit, t1.division, t2.division, t1.small_logo, t2.small_logo, m.possession,
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time, m.stream_url
         FROM matches m
@@ -196,27 +203,29 @@ pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_i
         "#
     ).bind(match_id).fetch_optional(&state.db).await.unwrap_or(None);
 
-    let (id, t1_id, t2_id, t1_name, t2_name, t1_score, t2_score, t1_spirit, t2_spirit, t1_division, t2_division, t1_small_logo, t2_small_logo, possession, field_name, time, stream_url) = match match_row {
+    let (id, t1_id, t2_id, t1_name, t2_name, t1_abbreviation, t2_abbreviation, t1_score, t2_score, t1_spirit, t2_spirit, t1_division, t2_division, t1_small_logo, t2_small_logo, possession, field_name, time, stream_url) = match match_row {
         Some(row) => (
             row.get::<i64, _>(0),
             row.get::<i64, _>(1),
             row.get::<i64, _>(2),
             row.get::<String, _>(3),
             row.get::<String, _>(4),
-            row.get::<i64, _>(5),
-            row.get::<i64, _>(6),
-            row.get::<Option<i64>, _>(7),
-            row.get::<Option<i64>, _>(8),
-            row.get::<i64, _>(9),
-            row.get::<i64, _>(10),
-            row.get::<Option<String>, _>(11),
-            row.get::<Option<String>, _>(12),
-            row.get::<Option<i64>, _>(13),
-            row.get::<String, _>(14),
-            row.get::<String, _>(15),
-            row.get::<Option<String>, _>(16),
+            row.get::<Option<String>, _>(5),
+            row.get::<Option<String>, _>(6),
+            row.get::<i64, _>(7),
+            row.get::<i64, _>(8),
+            row.get::<Option<i64>, _>(9),
+            row.get::<Option<i64>, _>(10),
+            row.get::<i64, _>(11),
+            row.get::<i64, _>(12),
+            row.get::<Option<String>, _>(13),
+            row.get::<Option<String>, _>(14),
+            row.get::<Option<i64>, _>(15),
+            row.get::<String, _>(16),
+            row.get::<String, _>(17),
+            row.get::<Option<String>, _>(18),
         ),
-        None => (0, 0, 0, "".to_string(), "".to_string(), 0, 0, None, None, 1, 1, None, None, None, "".to_string(), "".to_string(), None)
+        None => (0, 0, 0, "".to_string(), "".to_string(), None, None, 0, 0, None, None, 1, 1, None, None, None, "".to_string(), "".to_string(), None)
     };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
@@ -238,7 +247,7 @@ pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_i
     ).bind(match_id).fetch_all(&state.db).await.unwrap_or_default();
 
     Json(MatchDetail { 
-        id, t1_id, t2_id, t1_name, t2_name, t1_score, t2_score, 
+        id, t1_id, t2_id, t1_name, t2_name, t1_abbreviation, t2_abbreviation, t1_score, t2_score, 
         t1_spirit, t2_spirit, t1_division, t2_division, t1_small_logo, t2_small_logo, possession, 
         field_name, time, stream_url, players, events 
     })
@@ -255,7 +264,8 @@ pub async fn get_upcoming_matches(
         let team_id = access.team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?;
         sqlx::query_as::<_, UpcomingMatch>(
             r#"
-            SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                 SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                     t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                    COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
                    m.possession
             FROM matches m
@@ -272,7 +282,8 @@ pub async fn get_upcoming_matches(
     } else {
         sqlx::query_as::<_, UpcomingMatch>(
             r#"
-            SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                 SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                     t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                    COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
                    m.possession
             FROM matches m
