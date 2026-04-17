@@ -23,3 +23,6 @@ sakkath.db
 specs/
 
 teams.csv
+
+sakkath.db-shm
+sakkath.db-wal

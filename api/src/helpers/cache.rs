@@ -85,6 +85,54 @@ pub async fn del_pattern(pattern: &str) {
     }
 }
 
+// Push a JSON value onto a Redis list.
+pub async fn push_json_list<T: Serialize>(key: &str, value: &T) -> bool {
+    if let Some(mut conn) = get_conn().await {
+        if let Ok(json) = serde_json::to_string(value) {
+            let result: Result<i64, _> = redis::cmd("RPUSH")
+                .arg(key)
+                .arg(json)
+                .query_async(&mut conn)
+                .await;
+            return result.is_ok();
+        }
+    }
+
+    false
+}
+
+// Pop a JSON value from the head of a Redis list.
+pub async fn pop_json_list<T: DeserializeOwned>(key: &str) -> Option<T> {
+    let mut conn = get_conn().await?;
+    let value: Option<String> = redis::cmd("LPOP")
+        .arg(key)
+        .query_async(&mut conn)
+        .await
+        .ok()?;
+
+    value.and_then(|entry| serde_json::from_str(&entry).ok())
+}
+
+// Increment a Redis counter and attach TTL on first write.
+pub async fn incr_with_ttl(key: &str, ttl_secs: u64) -> Option<i64> {
+    let mut conn = get_conn().await?;
+    let value: i64 = redis::cmd("INCR")
+        .arg(key)
+        .query_async(&mut conn)
+        .await
+        .ok()?;
+
+    if value == 1 {
+        let _: Result<bool, _> = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(ttl_secs)
+            .query_async(&mut conn)
+            .await;
+    }
+
+    Some(value)
+}
+
 // --- Domain-specific cache helpers ---
 
 // Standings cache key for a division

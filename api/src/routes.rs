@@ -13,7 +13,6 @@ use crate::controllers::{
     scheduling,
 };
 use crate::middleware::auth::auth_middleware;
-use crate::middleware::logger::logger_middleware;
 use crate::AppState;
 
 // Public routes without authentication
@@ -129,6 +128,5 @@ pub fn api_routes() -> Router<AppState> {
             .layer(middleware::from_fn(auth_middleware))
     );
 
-    // Add logger middleware to all routes
-    router.layer(middleware::from_fn(logger_middleware))
+    router
 }

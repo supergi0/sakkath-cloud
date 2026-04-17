@@ -1,18 +1,18 @@
 use axum::Router;
+use axum::middleware as axum_middleware;
+use axum::routing::{get, get_service};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use std::process;
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
 use tower_http::cors::{CorsLayer, Any};
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder, key_extractor::PeerIpKeyExtractor};
-use std::sync::Arc;
 
 mod migration;
 mod seeder;
 mod controllers;
 mod middleware;
 mod routes;
+mod telemetry;
 pub mod helpers;
 
 // Tournament configuration: number of swiss rounds per division
@@ -22,6 +22,7 @@ pub const WOMEN_ROUNDS: i64 = 6;
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
+    pub telemetry_enabled: bool,
 }
 
 enum CliCommand {
@@ -89,6 +90,9 @@ async fn main() {
     let release_mode = std::env::var("release")
         .unwrap_or_else(|_| "false".to_string())
         .to_lowercase() == "true";
+    let telemetry_enabled = std::env::var("emit_telemetry")
+        .unwrap_or_else(|_| "false".to_string())
+        .to_lowercase() == "true";
 
     let cli_command = parse_cli_command();
     
@@ -145,51 +149,52 @@ async fn main() {
 
     // Init redis cache (non-blocking, works without redis)
     helpers::cache::init_redis().await;
+    telemetry::init(db_pool.clone(), telemetry_enabled).await;
 
     // Auto-generate R1 for divisions with no matches
     controllers::scheduling::auto_generate_initial_rounds(&db_pool).await;
 
     let app_state = AppState {
         db: db_pool,
+        telemetry_enabled,
     };
 
+    let telemetry_routes = Router::new().route(
+        "/telemetry",
+        get(controllers::telemetry::get_telemetry)
+            .route_layer(middleware::rate_limit::telemetry_rate_limit_layer()),
+    );
+
     // Use routes from routes.rs
-    let api_routes = routes::api_routes()
-        .with_state(app_state);
+    let api_routes = routes::api_routes().layer(middleware::rate_limit::api_rate_limit_layer());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // Rate limiter: 100 requests per minute per IP (using PeerIpKeyExtractor for direct connections)
-    let rate_limit_config = Arc::new(
-        GovernorConfigBuilder::default()
-            .key_extractor(PeerIpKeyExtractor)
-            .per_second(2)
-            .burst_size(100)
-            .finish()
-            .unwrap()
-    );
-    let rate_limit_layer = GovernorLayer { config: rate_limit_config };
-
     let app = if release_mode {
         tracing::info!("Serving static UI files from ../ui");
         
         Router::new()
+            .merge(telemetry_routes)
             .nest("/v1", api_routes)
-            .fallback_service(ServeDir::new("../ui"))
-            .layer(rate_limit_layer)
+            .fallback_service(
+                get_service(ServeDir::new("../ui"))
+                    .layer(middleware::rate_limit::ui_rate_limit_layer()),
+            )
+            .with_state(app_state)
+            .layer(axum_middleware::from_fn(middleware::telemetry::telemetry_middleware))
             .layer(cors)
-            .layer(TraceLayer::new_for_http())
     } else {
         tracing::info!("Development mode: serving API only at /v1");
         
         Router::new()
+            .merge(telemetry_routes)
             .nest("/v1", api_routes)
-            .layer(rate_limit_layer)
+            .with_state(app_state)
+            .layer(axum_middleware::from_fn(middleware::telemetry::telemetry_middleware))
             .layer(cors)
-            .layer(TraceLayer::new_for_http())
     };
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

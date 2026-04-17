@@ -52,6 +52,22 @@ pub fn is_sqlite_file_present(database_url: &str) -> bool {
         .unwrap_or(true)
 }
 
+async fn enable_sqlite_wal_mode(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode = WAL;")
+        .fetch_one(pool)
+        .await?;
+
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(sqlx::Error::Configuration(
+            format!("Failed to enable SQLite WAL mode; SQLite reported journal_mode={journal_mode}").into(),
+        ));
+    }
+
+    tracing::info!("SQLite WAL mode enabled");
+
+    Ok(())
+}
+
 /// Initialize the database connection pool
 pub async fn init_db_pool(database_url: &str, create_if_missing: bool) -> Result<SqlitePool, sqlx::Error> {
     tracing::info!("Connecting to database: {}", database_url);
@@ -89,6 +105,10 @@ pub async fn init_db_pool(database_url: &str, create_if_missing: bool) -> Result
         .acquire_timeout(Duration::from_secs(3))
         .connect(database_url)
         .await?;
+
+    if database_url.starts_with("sqlite:") {
+        enable_sqlite_wal_mode(&pool).await?;
+    }
     
     Ok(pool)
 }
