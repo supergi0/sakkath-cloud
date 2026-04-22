@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AlertCircle, Bell, Info, Plus, Pencil, Trash2, X } from "lucide-react";
 import { Text } from "../components/Text";
 import { useAuth } from "../auth-provider";
+import { apiUrl } from "../lib/api";
 
 interface Announcement {
   id: number;
@@ -22,8 +23,6 @@ interface EditingAnnouncement {
   expires_at: string;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
-
 export default function Announcements() {
   const { isSuperAdmin, token } = useAuth();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
@@ -32,7 +31,7 @@ export default function Announcements() {
   const [isCreating, setIsCreating] = useState(false);
 
   const fetchAnnouncements = () => {
-    fetch(`${API_URL}/v1/announcements`)
+    fetch(apiUrl('/v1/announcements'))
       .then(res => res.json())
       .then(data => {
         setAnnouncements(data);
@@ -98,13 +97,13 @@ export default function Announcements() {
     };
 
     if (isCreating) {
-      await fetch(`${API_URL}/v1/super/announcements`, {
+      await fetch(apiUrl('/v1/super/announcements'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       });
     } else if (editing.id) {
-      await fetch(`${API_URL}/v1/super/announcements/${editing.id}`, {
+      await fetch(apiUrl(`/v1/super/announcements/${editing.id}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
@@ -119,7 +118,7 @@ export default function Announcements() {
   const handleDelete = async (id: number) => {
     if (!token || !confirm('Delete this announcement?')) return;
     
-    await fetch(`${API_URL}/v1/super/announcements/${id}`, {
+    await fetch(apiUrl(`/v1/super/announcements/${id}`), {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });

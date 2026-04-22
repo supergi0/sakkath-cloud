@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { MapPin, Users, Trophy, Target, ArrowUp, ArrowDown, Star, TrendingUp, TrendingDown, Sparkle, AlignStartVertical, Play, Circle } from "lucide-react";
 import { Text } from "../components/Text";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
+import { apiUrl } from '../lib/api';
 
 interface Team {
   id: number;
@@ -51,8 +52,6 @@ interface TeamMatch {
   match_type: number;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
-
 type TabType = 'matches' | 'players' | 'timeline';
 interface TeamsPreferences {
   activeTab: TabType;
@@ -90,9 +89,9 @@ function TeamContent() {
 
   useEffect(() => {
     Promise.all([
-      fetch(`${API_URL}/v1/teams/${teamId}`).then(r => r.json()),
-      fetch(`${API_URL}/v1/teams/${teamId}/players`).then(r => r.json()),
-      fetch(`${API_URL}/v1/teams/${teamId}/matches`).then(r => r.json()),
+      fetch(apiUrl(`/v1/teams/${teamId}`)).then(r => r.json()),
+      fetch(apiUrl(`/v1/teams/${teamId}/players`)).then(r => r.json()),
+      fetch(apiUrl(`/v1/teams/${teamId}/matches`)).then(r => r.json()),
     ]).then(([teamData, playersData, matchesData]) => {
       setTeam(teamData);
       setPlayerStats(playersData);

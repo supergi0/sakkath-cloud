@@ -5,6 +5,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { Calendar, Clock, LayoutGrid, MapPin, Target, Trophy, Users } from 'lucide-react';
 import { Text } from './components/Text';
+import { apiUrl } from './lib/api';
 import { getTeamAbbreviation } from './lib/team-name';
 
 interface TeamStanding {
@@ -28,8 +29,6 @@ interface Stats {
   games: number;
   fields: number;
 }
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type SortBy = 'game' | 'initial' | 'spirit';
 
@@ -76,9 +75,9 @@ export function HomeContent() {
     }
 
     Promise.all([
-      fetch(`${API_URL}/v1/standings?division=0`).then((response) => response.json()),
-      fetch(`${API_URL}/v1/standings?division=1`).then((response) => response.json()),
-      fetch(`${API_URL}/v1/stats`).then((response) => response.json()),
+      fetch(apiUrl('/v1/standings?division=0')).then((response) => response.json()),
+      fetch(apiUrl('/v1/standings?division=1')).then((response) => response.json()),
+      fetch(apiUrl('/v1/stats')).then((response) => response.json()),
     ]).then(([open, women, statsData]) => {
       setOpenStandings(open);
       setWomenStandings(women);
@@ -325,7 +324,7 @@ export function HomeContent() {
 
           <div className="overflow-x-auto" ref={tableScrollRef} onScroll={handleTableScroll}>
             <table className="w-full min-w-[470px] text-sm sm:min-w-[620px]">
-              <thead className="hidden sm:table-header-group bg-white dark:bg-slate-900 sm:sticky sm:top-14 sm:z-20">
+              <thead className="hidden bg-white dark:bg-slate-900 sm:table-header-group">
                 <tr className="border-b border-gray-200 dark:border-slate-700">
                   <th className="w-6 min-w-[24px] px-1 py-3 text-left font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:min-w-0 sm:px-2">#</th>
                   <th className="w-[160px] max-w-[160px] min-w-[160px] px-1 pr-2 py-3 text-left font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:min-w-0 sm:max-w-none sm:pr-1 sm:px-2">Team</th>

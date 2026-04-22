@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { Text } from "../components/Text";
 import { useAuth } from "../auth-provider";
+import { apiUrl } from "../lib/api";
 
 interface Team {
   id: number;
@@ -195,8 +196,6 @@ function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp
   );
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
-
 export default function MyTeamPage() {
   const { isLoggedIn, isPoc, token, roleName, isLoading } = useAuth();
   const router = useRouter();
@@ -237,9 +236,9 @@ export default function MyTeamPage() {
     if (!token) return;
     try {
       const [teamRes, playersRes, matchesRes] = await Promise.all([
-        fetch(`${API_URL}/v1/poc/team`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_URL}/v1/poc/players`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_URL}/v1/poc/matches`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/v1/poc/team'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/v1/poc/players'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/v1/poc/matches'), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (teamRes.ok) {
         const teamData = await teamRes.json();
@@ -262,7 +261,7 @@ export default function MyTeamPage() {
 
     try {
       setSavingTeamAbbreviation(true);
-      const res = await fetch(`${API_URL}/v1/poc/team`, {
+      const res = await fetch(apiUrl('/v1/poc/team'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ abbreviation: trimmed || null }),
@@ -289,7 +288,7 @@ export default function MyTeamPage() {
         const flags = roleToFlags(editRole);
         const payload = { ...editForm, ...flags };
         try {
-          const res = await fetch(`${API_URL}/v1/poc/players/${editingId}`, {
+          const res = await fetch(apiUrl(`/v1/poc/players/${editingId}`), {
             method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify(payload),
           });
@@ -306,7 +305,7 @@ export default function MyTeamPage() {
       onConfirm: async () => {
         setConfirmDialog(null);
         try {
-          const res = await fetch(`${API_URL}/v1/poc/players/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+          const res = await fetch(apiUrl(`/v1/poc/players/${id}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
           if (res.ok) setPlayers(players.filter(p => p.id !== id));
         } catch (err) { console.error(err); }
       },
@@ -322,7 +321,7 @@ export default function MyTeamPage() {
         const flags = roleToFlags(newRole);
         const payload = { ...newPlayer, ...flags };
         try {
-          const res = await fetch(`${API_URL}/v1/poc/players`, {
+          const res = await fetch(apiUrl('/v1/poc/players'), {
             method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify(payload),
           });
@@ -340,7 +339,7 @@ export default function MyTeamPage() {
   const fetchOpponentPlayers = async (matchId: number) => {
     if (!token || opponentPlayers[matchId]) return;
     try {
-      const res = await fetch(`${API_URL}/v1/poc/matches/${matchId}/opponent-players`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/opponent-players`), { headers: { Authorization: `Bearer ${token}` } });
       if (res.ok) {
         const data = await res.json();
         setOpponentPlayers(prev => ({ ...prev, [matchId]: data }));
@@ -377,7 +376,7 @@ export default function MyTeamPage() {
     try {
       // 1. Confirm score
       if (!confirmedMatches.has(matchId)) {
-        const res = await fetch(`${API_URL}/v1/poc/matches/${matchId}/confirm-score`, {
+        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/confirm-score`), {
           method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ t1_score: form.t1_score, t2_score: form.t2_score }),
         });
@@ -386,7 +385,7 @@ export default function MyTeamPage() {
 
       // 2. Submit opponent spirit
       if (!submittedSpirits.has(matchId)) {
-        const res = await fetch(`${API_URL}/v1/poc/matches/${matchId}/spirit-wfdf`, {
+        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
           method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
         });
@@ -396,7 +395,7 @@ export default function MyTeamPage() {
       // 3. Submit self spirit (no MVP/MSP for self-rating)
       if (!submittedSelfSpirits.has(matchId)) {
         const { mvp_player_id, msp_player_id, ...selfSpiritNoMvp } = form.selfSpirit;
-        const res = await fetch(`${API_URL}/v1/poc/matches/${matchId}/spirit-wfdf`, {
+        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
           method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
           body: JSON.stringify({ ...selfSpiritNoMvp, mvp_player_id: null, msp_player_id: null, team_id: team.id }),
         });
@@ -412,8 +411,8 @@ export default function MyTeamPage() {
     for (const m of matches.filter(m => m.possession !== null && m.possession >= 3)) {
       try {
         const [spiritRes, confirmRes] = await Promise.all([
-          fetch(`${API_URL}/v1/matches/${m.id}/spirits`),
-          fetch(`${API_URL}/v1/matches/${m.id}/score-confirmations`),
+          fetch(apiUrl(`/v1/matches/${m.id}/spirits`)),
+          fetch(apiUrl(`/v1/matches/${m.id}/score-confirmations`)),
         ]);
         if (spiritRes.ok) {
           const spirits: SpiritScoreRow[] = await spiritRes.json();
@@ -482,7 +481,7 @@ export default function MyTeamPage() {
     try {
       const fullLogo = await compressImage(logoPreview, 10, 0.9);
       const smallLogo = await compressImage(logoPreview, 1, 0.5);
-      const res = await fetch(`${API_URL}/v1/poc/team/logo`, {
+      const res = await fetch(apiUrl('/v1/poc/team/logo'), {
         method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ full_logo: fullLogo, small_logo: smallLogo }),
       });

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { MapPin, Navigation } from "lucide-react";
 import { Text } from "../components/Text";
+import { apiUrl } from "../lib/api";
 
 interface Field {
   id: number;
@@ -10,8 +11,6 @@ interface Field {
   hints: string;
   map_link: string;
 }
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 const FIELD_COLORS = [
   'from-emerald-600 to-green-800',
@@ -32,7 +31,7 @@ export default function Fields() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_URL}/v1/fields`)
+    fetch(apiUrl('/v1/fields'))
       .then(res => res.json())
       .then(data => {
         setFields(data);

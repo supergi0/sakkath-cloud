@@ -6,6 +6,7 @@ import { ArrowLeftRight, ChevronLeft, Circle, RotateCcw, Save, Shield, AlertTria
 import useSWR from 'swr';
 import { Text } from '../components/Text';
 import { useAuth } from '../auth-provider';
+import { apiUrl } from '../lib/api';
 import { getTeamAbbreviation } from '../lib/team-name';
 
 interface UpcomingMatch {
@@ -58,7 +59,6 @@ type MatchStatus = 'upcoming' | 'live' | 'ended';
 type PanelKey = 't1' | 'log' | 't2';
 type ConfirmAction = 'end' | 'save' | 'undo' | 'possession';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 const EVENT_LABELS = ['Score', 'Assist', 'Block', 'Turnover'];
 const EVENT_COLORS = ['text-green-500', 'text-sky-400', 'text-violet-400', 'text-amber-400'];
 
@@ -135,7 +135,7 @@ function AdminContent() {
 
   const fetchVolunteerMatches = async (): Promise<UpcomingMatch[]> => {
     if (!token) return [];
-    const response = await fetch(`${API_URL}/v1/admin/matches`, { headers: { Authorization: `Bearer ${token}` } });
+    const response = await fetch(apiUrl('/v1/admin/matches'), { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) return [];
     return response.json();
   };
@@ -147,13 +147,13 @@ function AdminContent() {
   };
 
   const { data: matches = [], mutate: mutateMatches, isLoading: matchesLoading } = useSWR(
-    token && isLoggedIn && canReport ? `${API_URL}/v1/admin/matches` : null,
+    token && isLoggedIn && canReport ? apiUrl('/v1/admin/matches') : null,
     fetchVolunteerMatches,
     { refreshInterval: 4000, revalidateOnFocus: true }
   );
 
   const { data: activeMatch, mutate: mutateActiveMatch } = useSWR(
-    activeMatchId ? `${API_URL}/v1/matches/${activeMatchId}` : null,
+    activeMatchId ? apiUrl(`/v1/matches/${activeMatchId}`) : null,
     fetchMatchDetail,
     { refreshInterval: 3000, revalidateOnFocus: true }
   );
@@ -190,7 +190,7 @@ function AdminContent() {
   async function startReporting(matchId: number, possession: 1 | 2) {
     try {
       setIsSubmitting(true);
-      const response = await fetch(`${API_URL}/v1/admin/matches/${matchId}/start`, {
+      const response = await fetch(apiUrl(`/v1/admin/matches/${matchId}/start`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ possession }),
@@ -217,7 +217,7 @@ function AdminContent() {
     if (!activeMatchId) return;
     try {
       setIsSubmitting(true);
-      await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/undo`);
+      await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/undo`));
       resetComposer();
       await mutateActiveMatch();
       await mutateMatches();
@@ -232,7 +232,7 @@ function AdminContent() {
     if (!activeMatchId) return;
     try {
       setIsSubmitting(true);
-      await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/end`);
+      await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/end`));
       resetComposer();
       setActiveMatchId(null);
       await mutateMatches();
@@ -251,16 +251,16 @@ function AdminContent() {
     try {
       setIsSubmitting(true);
       if (pendingSwitchOnly) {
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/switch-possession`);
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/switch-possession`));
       } else if (isOffView && pendingTurnover) {
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/event`, { player_id: null, event_type: 3 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: null, event_type: 3 });
       } else if (isOffView && pendingTurnoverId !== null) {
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/event`, { player_id: pendingTurnoverId, event_type: 3 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingTurnoverId, event_type: 3 });
       } else if (isOffView && pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId !== pendingAssisterId) {
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/event`, { player_id: pendingScorerId, event_type: 0 });
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/event`, { player_id: pendingAssisterId, event_type: 1 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingScorerId, event_type: 0 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingAssisterId, event_type: 1 });
       } else if (!isOffView && pendingBlockId !== null) {
-        await postAction(`${API_URL}/v1/admin/matches/${activeMatchId}/event`, { player_id: pendingBlockId, event_type: 2 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingBlockId, event_type: 2 });
       }
       resetComposer();
       await mutateActiveMatch();

@@ -6,8 +6,7 @@ import { useRouter } from "next/navigation";
 import { Text } from "../components/Text";
 import { Toast } from "../components/Toast";
 import { useAuth } from "../auth-provider";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
+import { apiUrl } from "../lib/api";
 const TURNSTILE_SITE_KEY = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || '';
 
 declare global {
@@ -81,7 +80,7 @@ export default function Login() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/v1/auth/login`, {
+      const response = await fetch(apiUrl('/v1/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, captcha_token: captchaToken || undefined }),

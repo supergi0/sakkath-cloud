@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
+import { apiUrl } from "../lib/api";
 
 interface PlayerStat {
   id: number;
@@ -22,8 +23,6 @@ interface Team {
   name: string;
   division: number;
 }
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type SortField = 'name' | 'team' | 'goals' | 'assists' | 'blocks' | 'turnovers' | 'matches' | 'gpm' | 'apm' | 'bpm' | 'tpm';
 type SortDir = 'asc' | 'desc';
@@ -64,8 +63,8 @@ export default function Stats() {
     }
 
     Promise.all([
-      fetch(`${API_URL}/v1/player-stats`).then(r => r.json()),
-      fetch(`${API_URL}/v1/teams`).then(r => r.json()),
+      fetch(apiUrl('/v1/player-stats')).then(r => r.json()),
+      fetch(apiUrl('/v1/teams')).then(r => r.json()),
     ]).then(([playersData, teamsData]) => {
       setPlayers(playersData);
       setTeams(teamsData);

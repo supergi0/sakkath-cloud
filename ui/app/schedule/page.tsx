@@ -7,9 +7,8 @@ import { ChevronDown, ExternalLink, GripVertical, Shield, X } from 'lucide-react
 import { useAuth } from '../auth-provider';
 import { Text } from '../components/Text';
 import { Toast } from '../components/Toast';
+import { apiUrl } from '../lib/api';
 import { getTeamAbbreviation } from '../lib/team-name';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
 
 type CellStatus = 'empty' | 'upcoming' | 'live' | 'done';
 
@@ -246,7 +245,7 @@ export default function SchedulePage() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/v1/schedule/grid`);
+      const response = await fetch(apiUrl('/v1/schedule/grid'));
       if (!response.ok) {
         throw new Error('Unable to load schedule');
       }
@@ -313,7 +312,7 @@ export default function SchedulePage() {
 
     try {
       setSavingRow(rowKey);
-      const response = await fetch(`${API_URL}/v1/super/schedule/rows/${rowKey}`, {
+      const response = await fetch(apiUrl(`/v1/super/schedule/rows/${rowKey}`), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -353,7 +352,7 @@ export default function SchedulePage() {
 
     try {
       setMovingMatchId(draggedMatch.matchId);
-      const response = await fetch(`${API_URL}/v1/super/schedule/matches/${draggedMatch.matchId}/slot`, {
+      const response = await fetch(apiUrl(`/v1/super/schedule/matches/${draggedMatch.matchId}/slot`), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

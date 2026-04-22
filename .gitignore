@@ -26,3 +26,5 @@ teams.csv
 
 sakkath.db-shm
 sakkath.db-wal
+
+.env

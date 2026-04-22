@@ -6,6 +6,7 @@ import { ArrowLeft, Circle, Play } from "lucide-react";
 import { Text } from "../components/Text";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import useSWR from 'swr';
+import { apiUrl } from '../lib/api';
 
 interface MatchDetail {
   id: number;
@@ -62,8 +63,6 @@ interface SpiritScoreRow {
   submitted_by_team_id: number;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:9000';
-
 type MatchTabType = 'log' | 'chart' | 'stats' | 'spirit';
 interface MatchesPreferences {
   activeTab: MatchTabType;
@@ -104,7 +103,7 @@ function MatchContent() {
 
   useEffect(() => {
     if (!matchId) return;
-    fetch(`${API_URL}/v1/matches/${matchId}/spirits`)
+    fetch(apiUrl(`/v1/matches/${matchId}/spirits`))
       .then(r => r.ok ? r.json() : [])
       .then(setSpirits)
       .catch(() => {});
@@ -117,7 +116,7 @@ function MatchContent() {
 
   // Determine if match is live to set refresh interval
   const { data: match, error, isLoading } = useSWR<MatchDetail>(
-    matchId ? `${API_URL}/v1/matches/${matchId}` : null,
+    matchId ? apiUrl(`/v1/matches/${matchId}`) : null,
     fetcher,
     {
       refreshInterval: (data) => {
