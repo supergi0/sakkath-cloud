@@ -28,6 +28,8 @@ interface ScheduleGridCell {
   t2_name: string | null;
   t1_abbreviation: string | null;
   t2_abbreviation: string | null;
+  t1_seed_rank: number | null;
+  t2_seed_rank: number | null;
   t1_score: number | null;
   t2_score: number | null;
   t1_small_logo: string | null;
@@ -91,12 +93,29 @@ function getStageLabel(cell: ScheduleGridCell) {
 
 function getStatusLabel(status: CellStatus) {
   if (status === 'done') {
-    return 'Complete';
+    return 'Ended';
   }
   if (status === 'live') {
     return 'Live';
   }
   return 'Pending';
+}
+
+function getStatusDotClass(status: CellStatus) {
+  if (status === 'done') {
+    return 'bg-slate-400 dark:bg-slate-500';
+  }
+  if (status === 'live') {
+    return 'bg-red-500 animate-pulse shadow-[0_0_0_3px_rgba(239,68,68,0.16)]';
+  }
+  return 'bg-amber-400 shadow-[0_0_0_3px_rgba(251,191,36,0.16)]';
+}
+
+function getSeedLabel(cell: ScheduleGridCell) {
+  if (typeof cell.t1_seed_rank !== 'number' || typeof cell.t2_seed_rank !== 'number') {
+    return null;
+  }
+  return `${cell.t1_seed_rank} v ${cell.t2_seed_rank}`;
 }
 
 function TeamLogo({ name, logo }: { name: string | null; logo: string | null }) {
@@ -233,6 +252,7 @@ export default function SchedulePage() {
   const [selectedDay, setSelectedDay] = useState<(typeof DAY_ORDER)[number]>('fri');
   const [selectedCell, setSelectedCell] = useState<{ row: ScheduleGridRow; cell: ScheduleGridCell } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [statusLabelCellKey, setStatusLabelCellKey] = useState<string | null>(null);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -381,6 +401,8 @@ export default function SchedulePage() {
     );
     const droppable = isSuperAdmin && canDropIntoCell(cell);
     const stageLabel = getStageLabel(cell);
+    const seedLabel = getSeedLabel(cell);
+    const cellKey = `${row.key}-${cell.field_index}`;
     const t1Short = cell.t1_name ? getTeamAbbreviation(cell.t1_name, cell.t1_abbreviation) : '';
     const t2Short = cell.t2_name ? getTeamAbbreviation(cell.t2_name, cell.t2_abbreviation) : '';
 
@@ -397,7 +419,7 @@ export default function SchedulePage() {
     return (
       <td
         key={`${row.key}-${cell.field_index}`}
-        className="w-[116px] border-r border-t border-gray-200 align-top dark:border-slate-700 sm:w-[140px]"
+        className="w-[92px] border-r border-t border-gray-200 align-top dark:border-slate-700 sm:w-[104px]"
         onDragOver={(event) => {
           if (droppable) {
             event.preventDefault();
@@ -432,37 +454,62 @@ export default function SchedulePage() {
           }}
           onClick={() => {
             if (interactive && !isDragging) {
+              setStatusLabelCellKey(null);
               setSelectedCell({ row, cell });
             }
           }}
-          className={`min-h-[88px] rounded-none border-0 px-1.5 py-2 transition sm:px-2 ${className} ${
+          className={`min-h-[88px] rounded-none border-0 px-1 py-1.5 transition sm:px-1.5 ${className} ${
             interactive ? 'cursor-pointer hover:shadow-sm' : ''
           } ${droppable ? 'ring-2 ring-sky-500/60' : ''}`}
         >
           {cell.slot_code ? (
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <p className="truncate text-[10px] font-semibold uppercase tracking-[0.16em]">{stageLabel}</p>
+                <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] sm:text-[11px]">{stageLabel}</p>
               </div>
-              {draggable ? <GripVertical className="h-4 w-4 shrink-0 text-gray-400 dark:text-slate-500" /> : null}
+              <div className="relative flex shrink-0 items-center gap-1.5">
+                {draggable ? <GripVertical className="h-4 w-4 shrink-0 text-gray-400 dark:text-slate-500" /> : null}
+                {hasMatch ? (
+                  <>
+                    <button
+                      type="button"
+                      aria-label={`Show ${getStatusLabel(cell.status)} status`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setStatusLabelCellKey((current) => (current === cellKey ? null : cellKey));
+                      }}
+                      className="flex h-4 w-4 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70"
+                    >
+                      <span className={`h-2.5 w-2.5 rounded-full ${getStatusDotClass(cell.status)}`} />
+                    </button>
+                    {statusLabelCellKey === cellKey ? (
+                      <span className="absolute right-0 top-full z-10 mt-1 whitespace-nowrap rounded-md bg-slate-950 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-white shadow-lg dark:bg-slate-100 dark:text-slate-950">
+                        {getStatusLabel(cell.status)}
+                      </span>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
           {hasMatch ? (
-            <div className="mt-2 space-y-1">
-              <div className="space-y-1">
-                <div className="grid grid-cols-[minmax(0,1fr)_10px] items-center gap-x-0.5">
-                  <p className="truncate text-[13px] font-semibold leading-tight sm:text-sm">{t1Short}</p>
-                  <span className="text-[13px] font-semibold leading-none sm:text-sm">{cell.t1_score ?? 0}</span>
+            <div className="mt-1.5 space-y-1.5">
+              <div className="space-y-1.5">
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t1Short}</p>
+                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{cell.t1_score ?? 0}</span>
                 </div>
-                <div className="grid grid-cols-[minmax(0,1fr)_10px] items-center gap-x-0.5">
-                  <p className="truncate text-[13px] font-semibold leading-tight sm:text-sm">{t2Short}</p>
-                  <span className="text-[13px] font-semibold leading-none sm:text-sm">{cell.t2_score ?? 0}</span>
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t2Short}</p>
+                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{cell.t2_score ?? 0}</span>
                 </div>
               </div>
-              <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.16em]">
-                <span>{getStatusLabel(cell.status)}</span>
-                {movingMatchId === cell.match_id ? <span>Saving</span> : null}
+              <div className="space-y-0.5 text-[10px] uppercase tracking-[0.12em]">
+                {seedLabel ? (
+                  <p className="text-[11px] font-semibold tracking-[0.1em] text-gray-500 dark:text-slate-400 sm:text-[12px]">{seedLabel}</p>
+                ) : null}
+                {movingMatchId === cell.match_id ? <p className="text-[9px]">Saving</p> : null}
               </div>
             </div>
           ) : cell.slot_code ? (
@@ -530,10 +577,10 @@ export default function SchedulePage() {
 
       <div className="pb-2 sm:mx-auto sm:max-w-7xl sm:px-4 sm:py-4">
         <div className="overflow-x-auto border-y border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900 sm:rounded-sm sm:border">
-          <table className="w-full min-w-[540px] border-separate border-spacing-0 text-xs sm:min-w-[690px] sm:text-sm">
+          <table className="w-full min-w-[452px] border-separate border-spacing-0 text-xs sm:min-w-[510px] sm:text-sm">
             <thead>
               <tr className="bg-white dark:bg-slate-900">
-                <th className="sticky left-0 z-20 w-[76px] border-r border-gray-200 bg-white px-2 py-3 text-left font-medium text-gray-500 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-400 sm:w-[92px]">
+                <th className="sticky left-0 z-20 w-[84px] border-r border-gray-200 bg-white px-2 py-3 text-left font-medium text-gray-500 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-400 sm:w-[96px]">
                   Time
                 </th>
                 {[1, 2, 3, 4].map((fieldIndex) => (
@@ -553,13 +600,13 @@ export default function SchedulePage() {
 
                 return (
                   <tr key={row.key} className="align-top">
-                    <td className="sticky left-0 z-10 min-w-[76px] border-r border-t border-gray-200 bg-white px-2 py-3 align-middle dark:border-slate-700 dark:bg-slate-900 sm:w-[92px]">
-                      <div className="flex min-h-[88px] items-center justify-between gap-2">
-                        <div className="space-y-1">
-                          <Text variant="primary" className="text-sm font-medium leading-tight text-gray-500 dark:text-gray-400">
+                    <td className="sticky left-0 z-10 min-w-[84px] border-r border-t border-gray-200 bg-white px-2 py-3 align-middle dark:border-slate-700 dark:bg-slate-900 sm:w-[96px]">
+                      <div className={`min-h-[88px] ${isSuperAdmin ? 'flex items-start justify-between gap-2' : 'flex flex-col justify-center'}`}>
+                        <div className="space-y-0.5">
+                          <Text variant="primary" className="whitespace-nowrap text-sm font-medium leading-tight text-gray-500 dark:text-gray-400 sm:text-[15px]">
                             {getRowTitle(row.label)}
                           </Text>
-                          <div className="space-y-0.5 text-sm text-gray-500 dark:text-gray-400">
+                          <div className="space-y-0 text-sm leading-tight text-gray-500 dark:text-gray-400 sm:text-[15px]">
                             <p>St {formatCompactTime(row.start_time)}</p>
                             <p>Ed {formatCompactTime(row.end_time)}</p>
                           </div>

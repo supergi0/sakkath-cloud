@@ -92,10 +92,16 @@ First post-swiss round:
 Second post-swiss round:
 
 - match type is `1002`
-- each 4-team bracket then plays `1 vs 2` and `3 vs 4`
+- each 4-team bracket then plays `1 vs 2` and `3 vs 4` using the updated seed holders after round `1001`
 - 2-team brackets do not get a second match
 
-This second round is seed-based. It does not depend on who won the first post-swiss round.
+Round `1001` can change who owns a seed inside each 4-team bracket:
+
+- if the higher seed wins, seed ownership stays the same
+- if the lower seed wins, the two teams swap seeds for the placement round
+- example: if `4` beats `1`, the bracket carries forward with that team as seed `1` and the other team as seed `4`
+
+That means round `1002` is still seed-based, but it is based on the swapped post-playoff seed holders rather than the original swiss ordering.
 
 ## Match state fields that drive scheduling
 

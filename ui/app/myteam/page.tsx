@@ -14,6 +14,7 @@ interface Team {
   location: string | null;
   full_logo: string | null;
   small_logo: string | null;
+  roster_moves_remaining: number;
 }
 
 interface Player {
@@ -87,8 +88,11 @@ interface PostMatchForm {
   selfSpirit: WfdfSpirit;
 }
 
-type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain' | 'Manager' | 'Coach';
-const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain', 'Manager', 'Coach'];
+type FeedbackState = { type: 'error' | 'success'; message: string } | null;
+
+const MAX_TEAM_PLAYERS = 22;
+type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain';
+const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain'];
 
 function roleFromPlayer(p: Partial<Player>): PlayerRole {
   if (p.is_captain) return 'Captain';
@@ -105,8 +109,6 @@ function roleBadge(role: PlayerRole) {
   const c: Record<string, string> = {
     'Captain': 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300',
     'Spirit Captain': 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300',
-    'Manager': 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300',
-    'Coach': 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300',
   };
   return <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${c[role] || ''}`}>{role}</span>;
 }
@@ -223,12 +225,16 @@ export default function MyTeamPage() {
   const [otherTeamSpirits, setOtherTeamSpirits] = useState<Set<number>>(new Set());
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
+  const [feedback, setFeedback] = useState<FeedbackState>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isLoading) return;
     if (!isLoggedIn) { router.push('/login'); return; }
-    if (!isPoc && roleName !== 'SUPER' && roleName !== 'ADMIN') { router.push('/'); return; }
+    if (!isPoc) {
+      router.push(roleName === 'SUPER' || roleName === 'ADMIN' ? '/admin' : '/');
+      return;
+    }
     fetchData();
   }, [isLoggedIn, isPoc, roleName, router, token, isLoading]);
 
@@ -261,6 +267,7 @@ export default function MyTeamPage() {
 
     try {
       setSavingTeamAbbreviation(true);
+      setFeedback(null);
       const res = await fetch(apiUrl('/v1/poc/team'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -268,6 +275,8 @@ export default function MyTeamPage() {
       });
       if (res.ok) {
         setTeam({ ...team, abbreviation: trimmed || null });
+      } else {
+        setFeedback({ type: 'error', message: 'Unable to save the team code right now.' });
       }
     } catch (err) { console.error(err); }
     finally { setSavingTeamAbbreviation(false); }
@@ -280,11 +289,12 @@ export default function MyTeamPage() {
   };
 
   const handleSave = () => {
-    if (!editingId || !token) return;
+    if (!editingId || !token || !team) return;
     setConfirmDialog({
       title: 'Save Changes', message: 'Save changes to this player?',
       onConfirm: async () => {
         setConfirmDialog(null);
+        setFeedback(null);
         const flags = roleToFlags(editRole);
         const payload = { ...editForm, ...flags };
         try {
@@ -292,21 +302,39 @@ export default function MyTeamPage() {
             method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify(payload),
           });
-          if (res.ok) { setPlayers(players.map(p => p.id === editingId ? { ...p, ...payload } as Player : p)); setEditingId(null); }
+          if (res.ok) {
+            const data = await res.json();
+            setPlayers(players.map(p => p.id === editingId ? { ...p, ...payload } as Player : p));
+            setTeam({ ...team, roster_moves_remaining: data.roster_moves_remaining ?? team.roster_moves_remaining });
+            setEditingId(null);
+          } else if (res.status === 409) {
+            setFeedback({ type: 'error', message: 'No roster edit/remove slots remain for this team.' });
+          } else {
+            setFeedback({ type: 'error', message: 'Unable to save this player right now.' });
+          }
         } catch (err) { console.error(err); }
       },
     });
   };
 
   const handleDelete = (id: number, name: string) => {
-    if (!token) return;
+    if (!token || !team) return;
     setConfirmDialog({
       title: 'Delete Player', message: `Remove ${name} from the team? This cannot be undone.`,
       onConfirm: async () => {
         setConfirmDialog(null);
+        setFeedback(null);
         try {
           const res = await fetch(apiUrl(`/v1/poc/players/${id}`), { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-          if (res.ok) setPlayers(players.filter(p => p.id !== id));
+          if (res.ok) {
+            const data = await res.json();
+            setPlayers(players.filter(p => p.id !== id));
+            setTeam({ ...team, roster_moves_remaining: data.roster_moves_remaining ?? team.roster_moves_remaining });
+          } else if (res.status === 409) {
+            setFeedback({ type: 'error', message: 'No roster edit/remove slots remain for this team.' });
+          } else {
+            setFeedback({ type: 'error', message: 'Unable to remove this player right now.' });
+          }
         } catch (err) { console.error(err); }
       },
     });
@@ -314,10 +342,15 @@ export default function MyTeamPage() {
 
   const handleAdd = () => {
     if (!token || !newPlayer.name) return;
+    if (players.length >= MAX_TEAM_PLAYERS) {
+      setFeedback({ type: 'error', message: `This team already has the maximum ${MAX_TEAM_PLAYERS} players.` });
+      return;
+    }
     setConfirmDialog({
       title: 'Add Player', message: `Add ${newPlayer.name} as ${newRole}?`,
       onConfirm: async () => {
         setConfirmDialog(null);
+        setFeedback(null);
         const flags = roleToFlags(newRole);
         const payload = { ...newPlayer, ...flags };
         try {
@@ -330,6 +363,10 @@ export default function MyTeamPage() {
             setPlayers([...players, { id: data.id, ...payload } as Player]);
             setNewPlayer({ name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
             setNewRole('Player'); setIsAdding(false);
+          } else if (res.status === 409) {
+            setFeedback({ type: 'error', message: `This team already has the maximum ${MAX_TEAM_PLAYERS} players.` });
+          } else {
+            setFeedback({ type: 'error', message: 'Unable to add this player right now.' });
           }
         } catch (err) { console.error(err); }
       },
@@ -381,6 +418,7 @@ export default function MyTeamPage() {
           body: JSON.stringify({ t1_score: form.t1_score, t2_score: form.t2_score }),
         });
         if (res.ok) setConfirmedMatches(prev => new Set([...prev, matchId]));
+        else throw new Error('confirm-score');
       }
 
       // 2. Submit opponent spirit
@@ -390,20 +428,33 @@ export default function MyTeamPage() {
           body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
         });
         if (res.ok) setSubmittedSpirits(prev => new Set([...prev, matchId]));
+        else throw new Error('opponent-spirit');
       }
 
       // 3. Submit self spirit (no MVP/MSP for self-rating)
       if (!submittedSelfSpirits.has(matchId)) {
-        const { mvp_player_id, msp_player_id, ...selfSpiritNoMvp } = form.selfSpirit;
         const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
           method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ ...selfSpiritNoMvp, mvp_player_id: null, msp_player_id: null, team_id: team.id }),
+          body: JSON.stringify({
+            rules_knowledge: form.selfSpirit.rules_knowledge,
+            fouls_contact: form.selfSpirit.fouls_contact,
+            fair_mindedness: form.selfSpirit.fair_mindedness,
+            positive_attitude: form.selfSpirit.positive_attitude,
+            communication: form.selfSpirit.communication,
+            mvp_player_id: null,
+            msp_player_id: null,
+            team_id: team.id,
+          }),
         });
         if (res.ok) setSubmittedSelfSpirits(prev => new Set([...prev, matchId]));
+        else throw new Error('self-spirit');
       }
 
       setExpandedMatch(null);
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error(err);
+      setFeedback({ type: 'error', message: 'Unable to complete the full post-match submission right now.' });
+    }
   };
 
   const fetchExistingSpirits = async () => {
@@ -560,6 +611,16 @@ export default function MyTeamPage() {
           </div>
         </div>
 
+        {feedback && (
+          <div className={`rounded-2xl border px-4 py-3 text-sm ${
+            feedback.type === 'error'
+              ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200'
+          }`}>
+            {feedback.message}
+          </div>
+        )}
+
         {/* Matches - unified tiles */}
         {matches.length > 0 && (
           <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
@@ -592,7 +653,6 @@ export default function MyTeamPage() {
                   case 'done': return <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300">Completed</span>;
                   default:
                     if (action.startsWith('waiting:')) {
-                      const w = action.split(':')[1];
                       return <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">Waiting</span>;
                     }
                     return null;
@@ -711,9 +771,18 @@ export default function MyTeamPage() {
         {/* Squad */}
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
           <div className="flex items-center justify-between mb-2">
-            <Text as="h2" variant="primary" className="text-sm font-bold uppercase tracking-wider">Squad</Text>
+            <div>
+              <Text as="h2" variant="primary" className="text-sm font-bold uppercase tracking-wider">Squad</Text>
+              <Text variant="secondary" className="text-[11px]">
+                {players.length}/{MAX_TEAM_PLAYERS} players · {team.roster_moves_remaining} roster edits/removals left
+              </Text>
+            </div>
             {!isAdding && (
-              <button onClick={() => setIsAdding(true)} className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition">
+              <button
+                onClick={() => { setFeedback(null); setIsAdding(true); }}
+                disabled={players.length >= MAX_TEAM_PLAYERS}
+                className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 <Plus className="w-3 h-3" /> Add
               </button>
             )}
@@ -783,10 +852,18 @@ export default function MyTeamPage() {
                         <Text variant="secondary" className="text-xs truncate">{player.email || 'No email added'}</Text>
                       </div>
                       <div className="flex gap-0.5 shrink-0">
-                        <button onClick={() => handleEdit(player)} className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition">
+                        <button
+                          onClick={() => handleEdit(player)}
+                          disabled={team.roster_moves_remaining <= 0}
+                          className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
                           <Edit2 className="w-3.5 h-3.5 text-gray-500" />
                         </button>
-                        <button onClick={() => handleDelete(player.id, player.name)} className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 transition">
+                        <button
+                          onClick={() => handleDelete(player.id, player.name)}
+                          disabled={team.roster_moves_remaining <= 0}
+                          className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 transition disabled:cursor-not-allowed disabled:opacity-40"
+                        >
                           <Trash2 className="w-3.5 h-3.5 text-red-500" />
                         </button>
                       </div>

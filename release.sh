@@ -10,7 +10,7 @@ LOCAL_UI_DIR="$LOCAL_RELEASE_DIR/ui"
 LOCAL_DB_PATH="$REPO_ROOT/sakkath.db"
 ROOT_ENV_FILE="$REPO_ROOT/.env"
 
-DATABASE_UPLOAD="false"
+DATABASE_REPLACE="false"
 UPLOAD="false"
 
 REMOTE_SERVICE_STOPPED="false"
@@ -21,12 +21,19 @@ SSH_KEY_PATH=""
 REMOTE_RELEASE_DIR=""
 REMOTE_SERVICE_NAME=""
 
+backup_remote_database() {
+    local remote_backup_root="$REMOTE_RELEASE_DIR/backups"
+
+    echo "Creating remote database backup snapshot..."
+    ssh_cmd "set -e; backup_root='$remote_backup_root'; release_dir='$REMOTE_RELEASE_DIR'; timestamp=\$(date '+%Y%m%d-%H%M%S'); backup_dir=\"\$backup_root/\$timestamp\"; mkdir -p \"\$backup_dir\"; for db_file in sakkath.db sakkath.db-shm sakkath.db-wal; do if [ -f \"\$release_dir/\$db_file\" ]; then cp -p \"\$release_dir/\$db_file\" \"\$backup_dir/\$db_file\"; fi; done"
+}
+
 usage() {
     cat <<'EOF'
-Usage: ./release.sh [--database_upload true|false] [--upload true|false]
+Usage: ./release.sh [--database_replace true|false] [--upload true|false]
 
 Flags:
-  --database_upload true|false   Replace release_v1 database files from the local repo root database. Default: false
+  --database_replace true|false   Replace release_v1 database files from the local repo root database. Default: false
   --upload true|false            Upload the built release to the remote server using root .env credentials. Default: false
   --help                         Show this help message.
 EOF
@@ -48,9 +55,9 @@ normalize_bool() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --database_upload)
-                [[ $# -ge 2 ]] || { echo "Missing value for --database_upload" >&2; usage; exit 1; }
-                DATABASE_UPLOAD="$(normalize_bool "$2")"
+            --database_replace)
+                [[ $# -ge 2 ]] || { echo "Missing value for --database_replace" >&2; usage; exit 1; }
+                DATABASE_REPLACE="$(normalize_bool "$2")"
                 shift 2
                 ;;
             --upload)
@@ -156,7 +163,7 @@ sync_local_release() {
     echo "Replacing local UI files in release_v1/ui..."
     cp -a "$ui_build_dir"/. "$LOCAL_UI_DIR"/
 
-    if [[ "$DATABASE_UPLOAD" == "true" ]]; then
+    if [[ "$DATABASE_REPLACE" == "true" ]]; then
         require_file "$LOCAL_DB_PATH" "local database"
 
         echo "Replacing local database files in release_v1/..."
@@ -215,8 +222,9 @@ upload_release() {
     ssh_cmd "mkdir -p '$REMOTE_RELEASE_DIR' && rm -rf '$REMOTE_RELEASE_DIR/ui' && tar -xzf '$remote_tmp_ui_archive' -C '$REMOTE_RELEASE_DIR' && rm -f '$remote_tmp_ui_archive'"
     rm -f "$local_ui_archive"
 
-    if [[ "$DATABASE_UPLOAD" == "true" ]]; then
+    if [[ "$DATABASE_REPLACE" == "true" ]]; then
         echo "Uploading database files..."
+        backup_remote_database
         scp_file "$LOCAL_RELEASE_DIR/sakkath.db" "$REMOTE_RELEASE_DIR/sakkath.db"
         ssh_cmd "rm -f '$REMOTE_RELEASE_DIR/sakkath.db-shm' '$REMOTE_RELEASE_DIR/sakkath.db-wal'"
 
@@ -239,7 +247,7 @@ upload_release() {
 main() {
     parse_args "$@"
 
-    echo "database_upload=$DATABASE_UPLOAD"
+    echo "database_replace=$DATABASE_REPLACE"
     echo "upload=$UPLOAD"
 
     build_release_artifacts

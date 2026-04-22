@@ -68,6 +68,139 @@ async fn enable_sqlite_wal_mode(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn table_has_column(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let query = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?");
+    let count: (i64,) = sqlx::query_as(&query)
+        .bind(column)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(count.0 > 0)
+}
+
+async fn table_column_is_not_null(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let query = format!("SELECT \"notnull\" FROM pragma_table_info('{table}') WHERE name = ?");
+    let not_null: Option<(i64,)> = sqlx::query_as(&query)
+        .bind(column)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(matches!(not_null, Some((1,))))
+}
+
+async fn create_match_indexes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t1_id ON matches(t1_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t2_id ON matches(t2_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_deleted_at ON matches(deleted_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_time ON matches(time)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type_time ON matches(type, time)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_field_time ON matches(field_id, time)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn create_match_event_indexes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_player_id ON match_events(player_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_match_id ON match_events(match_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_team_id ON match_events(team_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_event_type ON match_events(event_type)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn rebuild_matches_without_volunteer_id(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("ALTER TABLE matches RENAME TO matches_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            t1_id INTEGER NOT NULL,
+            t2_id INTEGER NOT NULL,
+            field_id INTEGER,
+            time TIMESTAMP,
+            t1_score INTEGER DEFAULT 0,
+            t2_score INTEGER DEFAULT 0,
+            t1_spirit INTEGER,
+            t2_spirit INTEGER,
+            stream_url VARCHAR(500),
+            possession INTEGER,
+            type INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            FOREIGN KEY (t1_id) REFERENCES teams(id),
+            FOREIGN KEY (t2_id) REFERENCES teams(id),
+            FOREIGN KEY (field_id) REFERENCES fields(id)
+        )
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO matches (
+            id, t1_id, t2_id, field_id, time, t1_score, t2_score,
+            t1_spirit, t2_spirit, stream_url, possession, type,
+            created_at, updated_at, deleted_at
+        )
+        SELECT
+            id, t1_id, t2_id, field_id, time, t1_score, t2_score,
+            t1_spirit, t2_spirit, stream_url, possession, COALESCE(type, 1),
+            created_at, updated_at, deleted_at
+        FROM matches_old
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("DROP TABLE matches_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *conn)
+        .await?;
+
+    drop(conn);
+    create_match_indexes(pool).await
+}
+
 /// Initialize the database connection pool
 pub async fn init_db_pool(database_url: &str, create_if_missing: bool) -> Result<SqlitePool, sqlx::Error> {
     tracing::info!("Connecting to database: {}", database_url);
@@ -151,6 +284,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             location VARCHAR(255),
             full_logo TEXT,
             small_logo TEXT,
+            roster_moves_remaining INTEGER NOT NULL DEFAULT 3,
             init_rank INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -193,15 +327,13 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             t2_spirit INTEGER,
             stream_url VARCHAR(500),
             possession INTEGER,
-            volunteer_id INTEGER,
             type INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             deleted_at TIMESTAMP,
             FOREIGN KEY (t1_id) REFERENCES teams(id),
             FOREIGN KEY (t2_id) REFERENCES teams(id),
-            FOREIGN KEY (field_id) REFERENCES fields(id),
-            FOREIGN KEY (volunteer_id) REFERENCES users(id)
+            FOREIGN KEY (field_id) REFERENCES fields(id)
         )
         "#
     )
@@ -252,29 +384,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_teams_division ON teams(division)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_teams_deleted_at ON teams(deleted_at)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t1_id ON matches(t1_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_t2_id ON matches(t2_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_deleted_at ON matches(deleted_at)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_player_id ON match_events(player_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_match_id ON match_events(match_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
+    create_match_indexes(pool).await?;
+    create_match_event_indexes(pool).await?;
 
-    let teams_has_abbreviation: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM pragma_table_info('teams') WHERE name='abbreviation'"
-    ).fetch_optional(pool).await.unwrap_or(None);
-
-    if teams_has_abbreviation.is_none() {
+    if !table_has_column(pool, "teams", "abbreviation").await? {
         sqlx::query("ALTER TABLE teams ADD COLUMN abbreviation VARCHAR(5)").execute(pool).await?;
     }
 
-    let users_email_not_null: Option<(i64,)> = sqlx::query_as(
-        "SELECT \"notnull\" FROM pragma_table_info('users') WHERE name='email'"
-    ).fetch_optional(pool).await.unwrap_or(None);
+    if !table_has_column(pool, "teams", "roster_moves_remaining").await? {
+        sqlx::query("ALTER TABLE teams ADD COLUMN roster_moves_remaining INTEGER NOT NULL DEFAULT 3")
+            .execute(pool)
+            .await?;
+    }
 
-    if matches!(users_email_not_null, Some((1,))) {
+    if table_column_is_not_null(pool, "users", "email").await? {
         let mut conn = pool.acquire().await?;
         sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await?;
         sqlx::query(
@@ -310,72 +433,41 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)").execute(&mut *conn).await?;
         sqlx::query("PRAGMA foreign_keys=ON").execute(&mut *conn).await?;
     }
-    
-    // Migrate existing match_events table if needed (add team_id column)
-    let has_team_id: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('match_events') WHERE name='team_id'"
-    ).fetch_one(pool).await.unwrap_or((0,));
-    
-    if has_team_id.0 == 0 {
-        // Table needs migration - recreate with new schema
-        sqlx::query("ALTER TABLE match_events RENAME TO match_events_old").execute(pool).await?;
-        
+
+    if !table_has_column(pool, "match_events", "team_id").await? {
+        sqlx::query("ALTER TABLE match_events ADD COLUMN team_id INTEGER")
+            .execute(pool)
+            .await?;
+
         sqlx::query(
-            r#"CREATE TABLE match_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                match_id INTEGER NOT NULL,
-                player_id INTEGER,
-                team_id INTEGER,
-                event_type INTEGER NOT NULL,
-                actor_user_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (match_id) REFERENCES matches(id),
-                FOREIGN KEY (player_id) REFERENCES users(id),
-                FOREIGN KEY (team_id) REFERENCES teams(id),
-                FOREIGN KEY (actor_user_id) REFERENCES users(id)
-            )"#
-        ).execute(pool).await?;
-        
-        // Copy old data (derive team_id from player_id)
-        sqlx::query(
-                r#"INSERT INTO match_events (id, match_id, player_id, team_id, event_type, actor_user_id, created_at)
-                    SELECT me.id, me.match_id, me.player_id, u.team_id, me.event_type, NULL, me.created_at
-               FROM match_events_old me
-               LEFT JOIN users u ON u.id = me.player_id"#
-        ).execute(pool).await?;
-        
-        sqlx::query("DROP TABLE match_events_old").execute(pool).await?;
-        
-        // Recreate indexes
-        sqlx::query("CREATE INDEX idx_match_events_player_id ON match_events(player_id)").execute(pool).await?;
-        sqlx::query("CREATE INDEX idx_match_events_match_id ON match_events(match_id)").execute(pool).await?;
-        sqlx::query("CREATE INDEX idx_match_events_team_id ON match_events(team_id)").execute(pool).await?;
-        sqlx::query("CREATE INDEX idx_match_events_actor_user_id ON match_events(actor_user_id)").execute(pool).await?;
-        sqlx::query("CREATE INDEX idx_match_events_event_type ON match_events(event_type)").execute(pool).await?;
+            r#"UPDATE match_events
+               SET team_id = (
+                   SELECT u.team_id
+                   FROM users u
+                   WHERE u.id = match_events.player_id
+               )
+               WHERE team_id IS NULL"#,
+        )
+        .execute(pool)
+        .await?;
     }
 
-    let has_actor_user_id: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('match_events') WHERE name='actor_user_id'"
-    ).fetch_one(pool).await.unwrap_or((0,));
-
-    if has_actor_user_id.0 == 0 {
+    if !table_has_column(pool, "match_events", "actor_user_id").await? {
         sqlx::query("ALTER TABLE match_events ADD COLUMN actor_user_id INTEGER")
             .execute(pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_match_events_actor_user_id ON match_events(actor_user_id)")
-            .execute(pool)
-            .await?;
     }
-    
-    // Migrate matches table: add type column if not exists
-    let has_type: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('matches') WHERE name='type'"
-    ).fetch_one(pool).await.unwrap_or((0,));
-    
-    if has_type.0 == 0 {
+
+    if !table_has_column(pool, "matches", "type").await? {
         sqlx::query("ALTER TABLE matches ADD COLUMN type INTEGER DEFAULT 1").execute(pool).await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_type ON matches(type)").execute(pool).await?;
     }
+
+    if table_has_column(pool, "matches", "volunteer_id").await? {
+        rebuild_matches_without_volunteer_id(pool).await?;
+    }
+
+    create_match_event_indexes(pool).await?;
+    create_match_indexes(pool).await?;
     
     // Spirit scores table: WFDF 5-category spirit per team per match
     sqlx::query(
@@ -476,6 +568,18 @@ pub async fn verify_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         if count.0 == 0 {
             return Err(sqlx::Error::Configuration(format!("Table {} not found", table).into()));
         }
+    }
+
+    if !table_has_column(pool, "teams", "roster_moves_remaining").await? {
+        return Err(sqlx::Error::Configuration(
+            "Column teams.roster_moves_remaining not found".into(),
+        ));
+    }
+
+    if table_has_column(pool, "matches", "volunteer_id").await? {
+        return Err(sqlx::Error::Configuration(
+            "Legacy column matches.volunteer_id still exists".into(),
+        ));
     }
     
     Ok(())

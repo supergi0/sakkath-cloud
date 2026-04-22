@@ -131,9 +131,9 @@ pub async fn get_stats(State(state): State<crate::AppState>) -> Json<Stats> {
     let stats: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT 
             (SELECT COUNT(*) FROM teams WHERE deleted_at IS NULL),
-            (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND team_id IS NOT NULL),
+            (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND team_id IS NOT NULL AND role = 2),
             (SELECT COALESCE(SUM(t1_score + t2_score), 0) FROM matches WHERE deleted_at IS NULL),
-            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND t1_score > 0),
+            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3),
             (SELECT COUNT(*) FROM fields)"
     )
     .fetch_one(&state.db)
@@ -154,7 +154,7 @@ pub async fn get_team_matches(State(state): State<crate::AppState>, Path(team_id
     let matches = sqlx::query_as::<_, TeamMatch>(
         r#"
          SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
-             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
+                             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit, 
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
              m.possession, m.stream_url, m.type as match_type
@@ -229,7 +229,7 @@ pub async fn get_match_detail(State(state): State<crate::AppState>, Path(match_i
     };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
-        "SELECT id, name, team_id FROM users WHERE team_id IN (?, ?) AND deleted_at IS NULL"
+        "SELECT id, name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
     ).bind(t1_id).bind(t2_id).fetch_all(&state.db).await.unwrap_or_default();
 
     let events = sqlx::query_as::<_, MatchEvent>(
@@ -308,6 +308,7 @@ pub async fn start_match(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let access = verify_volunteer_user(&state, &headers).await?;
     ensure_match_access(&state, &access, match_id).await?;
+    ensure_match_not_finalized(&state.db, match_id).await?;
     
     let possession = payload.possession.unwrap_or(1);
     if possession != 1 && possession != 2 {
@@ -344,6 +345,7 @@ pub async fn end_match(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let access = verify_volunteer_user(&state, &headers).await?;
     ensure_match_access(&state, &access, match_id).await?;
+    ensure_match_not_finalized(&state.db, match_id).await?;
 
     let info: Option<(Option<i64>, i64)> = sqlx::query_as(
         r#"SELECT m.possession, t.division
@@ -379,6 +381,7 @@ pub async fn record_event(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let access = verify_volunteer_user(&state, &headers).await?;
     ensure_match_access(&state, &access, match_id).await?;
+    ensure_match_not_finalized(&state.db, match_id).await?;
     let actor_user_id = access.user_id;
     
     // Validate event_type (0=goal, 1=assist, 2=block, 3=turnover)
@@ -387,7 +390,7 @@ pub async fn record_event(
     }
     
     let match_info: Option<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ?"
+        "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ? AND deleted_at IS NULL"
     ).bind(match_id).fetch_optional(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     
@@ -400,18 +403,29 @@ pub async fn record_event(
     }
 
     let mut new_pos = current_pos;
-    let team_id = if current_pos == 1 { t1_id } else { t2_id };
+    let offense_team_id = if current_pos == 1 { t1_id } else { t2_id };
+    let defense_team_id = if current_pos == 1 { t2_id } else { t1_id };
     
     // Record event
     if let Some(player_id) = payload.player_id {
         // Player specified - get their team_id
         let player_team: Option<(i64,)> = sqlx::query_as(
-            "SELECT team_id FROM users WHERE id = ? AND deleted_at IS NULL"
+            "SELECT team_id FROM users WHERE id = ? AND role = 2 AND deleted_at IS NULL"
         ).bind(player_id).fetch_optional(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         
         let player_team_id = player_team.map(|t| t.0).ok_or(axum::http::StatusCode::BAD_REQUEST)?;
         if player_team_id != t1_id && player_team_id != t2_id {
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+
+        let expected_team_id = match payload.event_type {
+            0 | 1 | 3 => offense_team_id,
+            2 => defense_team_id,
+            _ => return Err(axum::http::StatusCode::BAD_REQUEST),
+        };
+
+        if player_team_id != expected_team_id {
             return Err(axum::http::StatusCode::BAD_REQUEST);
         }
         
@@ -420,9 +434,13 @@ pub async fn record_event(
             .execute(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     } else {
+        if payload.event_type == 2 {
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+
         // Team-level event (without player)
         sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type, actor_user_id) VALUES (?, NULL, ?, ?, ?)")
-            .bind(match_id).bind(team_id).bind(payload.event_type).bind(actor_user_id)
+            .bind(match_id).bind(offense_team_id).bind(payload.event_type).bind(actor_user_id)
             .execute(&state.db).await
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -452,6 +470,7 @@ pub async fn record_event(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_player_stats().await;
     }
     
     Ok(Json(serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos})))
@@ -464,6 +483,7 @@ pub async fn switch_possession(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let access = verify_volunteer_user(&state, &headers).await?;
     ensure_match_access(&state, &access, match_id).await?;
+    ensure_match_not_finalized(&state.db, match_id).await?;
 
     let match_info: Option<(i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, possession FROM matches WHERE id = ? AND deleted_at IS NULL"
@@ -488,6 +508,7 @@ pub async fn switch_possession(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
     }
 
     Ok(Json(serde_json::json!({"success": true, "possession": new_pos})))
@@ -501,6 +522,7 @@ pub async fn undo_event(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let access = verify_volunteer_user(&state, &headers).await?;
     ensure_match_access(&state, &access, match_id).await?;
+    ensure_match_not_finalized(&state.db, match_id).await?;
     
     let match_info: Option<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ?"
@@ -511,6 +533,9 @@ pub async fn undo_event(
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
     
     let mut current_pos = possession.unwrap_or(1);
+    if current_pos >= 3 {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
     
     // Get latest event
     let latest_event: Option<(i64, Option<i64>, i64, String)> = sqlx::query_as(
@@ -519,6 +544,8 @@ pub async fn undo_event(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     
     if let Some((event_id, _player_id, event_type, created_at)) = latest_event {
+        let mut deleted_goal = event_type == 0;
+
         // Delete the event
         sqlx::query("DELETE FROM match_events WHERE id = ?")
             .bind(event_id).execute(&state.db).await
@@ -534,7 +561,8 @@ pub async fn undo_event(
             ).bind(match_id).bind(&created_at).fetch_optional(&state.db).await
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
             
-            if let Some((paired_id, _paired_type)) = paired_event {
+            if let Some((paired_id, paired_type)) = paired_event {
+                deleted_goal |= paired_type == 0;
                 sqlx::query("DELETE FROM match_events WHERE id = ?")
                     .bind(paired_id).execute(&state.db).await
                     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -542,16 +570,17 @@ pub async fn undo_event(
         }
         
         // Revert score and possession based on event type
-        match event_type {
-            0 => { // Goal was scored - revert score and switch possession back
-                if current_pos == 1 { t2_score = (t2_score - 1).max(0); } 
-                else { t1_score = (t1_score - 1).max(0); }
-                current_pos = if current_pos == 1 { 2 } else { 1 };
-            }
+        if deleted_goal {
+            if current_pos == 1 { t2_score = (t2_score - 1).max(0); }
+            else { t1_score = (t1_score - 1).max(0); }
+            current_pos = if current_pos == 1 { 2 } else { 1 };
+        } else {
+            match event_type {
             2 | 3 => { // Block/Turnover - switch possession back
                 current_pos = if current_pos == 1 { 2 } else { 1 };
             }
             _ => {}
+        }
         }
         
         sqlx::query("UPDATE matches SET t1_score = ?, t2_score = ?, possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -565,6 +594,7 @@ pub async fn undo_event(
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Some((division,)) = division {
             sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+            cache::invalidate_player_stats().await;
         }
         
         Ok(Json(serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": current_pos})))
@@ -650,6 +680,7 @@ pub async fn get_poc_matches(
     let matches = sqlx::query_as::<_, TeamMatch>(
         r#"
         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit,
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
              m.possession, m.stream_url, m.type as match_type
@@ -728,6 +759,7 @@ fn extract_claims(headers: &axum::http::HeaderMap) -> Result<crate::controllers:
 #[derive(Deserialize)]
 pub struct WfdfSpiritRequest {
     pub team_id: i64,
+    pub submitted_by_team_id: Option<i64>,
     pub rules_knowledge: i64,
     pub fouls_contact: i64,
     pub fair_mindedness: i64,
@@ -757,6 +789,7 @@ pub struct SpiritScoreRow {
 pub struct ScoreConfirmRequest {
     pub t1_score: i64,
     pub t2_score: i64,
+    pub team_id: Option<i64>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -782,15 +815,7 @@ pub async fn submit_wfdf_spirit(
         if v < 0 || v > 4 { return Err(axum::http::StatusCode::BAD_REQUEST); }
     }
 
-    let poc_user: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT id, role, team_id FROM users WHERE email = ? AND deleted_at IS NULL"
-    ).bind(&email).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let (_, role, team_id_opt) = poc_user.ok_or(axum::http::StatusCode::FORBIDDEN)?;
-    // POC (3) or admin (0,1) can submit
-    if role > 3 { return Err(axum::http::StatusCode::FORBIDDEN); }
-    let my_team_id = team_id_opt.ok_or(axum::http::StatusCode::FORBIDDEN)?;
+    let my_team_id = resolve_post_match_team(&state.db, &email, payload.submitted_by_team_id).await?;
 
     let match_info: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, possession FROM matches WHERE id = ? AND deleted_at IS NULL"
@@ -803,11 +828,14 @@ pub async fn submit_wfdf_spirit(
 
     // Validate target team_id is one of the two teams in the match
     if payload.team_id != t1_id && payload.team_id != t2_id { return Err(axum::http::StatusCode::BAD_REQUEST); }
+        validate_spirit_player(&state.db, payload.mvp_player_id, payload.team_id).await?;
+        validate_spirit_player(&state.db, payload.msp_player_id, payload.team_id).await?;
+
     let total = payload.rules_knowledge + payload.fouls_contact + payload.fair_mindedness + payload.positive_attitude + payload.communication;
 
     sqlx::query(
         r#"INSERT INTO spirit_scores (match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness, positive_attitude, communication, total, mvp_player_id, msp_player_id, submitted_by_team_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(match_id, team_id, submitted_by_team_id) DO UPDATE SET
              rules_knowledge=excluded.rules_knowledge, fouls_contact=excluded.fouls_contact,
              fair_mindedness=excluded.fair_mindedness, positive_attitude=excluded.positive_attitude,
@@ -840,6 +868,7 @@ pub async fn submit_wfdf_spirit(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
     }
 
     Ok(Json(serde_json::json!({"success": true})))
@@ -865,14 +894,11 @@ pub async fn confirm_score(
     Json(payload): Json<ScoreConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    if payload.t1_score < 0 || payload.t2_score < 0 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
 
-    let user: Option<(i64, Option<i64>)> = sqlx::query_as(
-        "SELECT id, team_id FROM users WHERE email = ? AND deleted_at IS NULL"
-    ).bind(&email).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let (_, team_id_opt) = user.ok_or(axum::http::StatusCode::FORBIDDEN)?;
-    let my_team_id = team_id_opt.ok_or(axum::http::StatusCode::FORBIDDEN)?;
+    let my_team_id = resolve_post_match_team(&state.db, &email, payload.team_id).await?;
 
     let match_info: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, possession FROM matches WHERE id = ? AND deleted_at IS NULL"
@@ -882,6 +908,7 @@ pub async fn confirm_score(
     let (t1_id, t2_id, possession) = match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
     if possession.unwrap_or(0) < 3 { return Err(axum::http::StatusCode::BAD_REQUEST); }
     if my_team_id != t1_id && my_team_id != t2_id { return Err(axum::http::StatusCode::FORBIDDEN); }
+    ensure_match_not_finalized(&state.db, match_id).await?;
 
     sqlx::query(
         "INSERT INTO score_confirmations (match_id, team_id, t1_score, t2_score) VALUES (?, ?, ?, ?) ON CONFLICT(match_id, team_id) DO UPDATE SET t1_score=excluded.t1_score, t2_score=excluded.t2_score"
@@ -889,7 +916,10 @@ pub async fn confirm_score(
     .execute(&state.db).await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(serde_json::json!({"success": true})))
+    let finalized = match_scores_are_finalized(&state.db, match_id).await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"success": true, "finalized": finalized})))
 }
 
 // Get score confirmations for a match
@@ -931,9 +961,108 @@ pub async fn get_opponent_players(
     };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
-        "SELECT id, name, team_id FROM users WHERE team_id = ? AND deleted_at IS NULL ORDER BY name ASC"
+        "SELECT id, name, team_id FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL ORDER BY name ASC"
     ).bind(opponent_team_id).fetch_all(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(players))
+}
+
+async fn resolve_post_match_team(
+    db: &sqlx::SqlitePool,
+    email: &str,
+    requested_team_id: Option<i64>,
+) -> Result<i64, axum::http::StatusCode> {
+    let user: Option<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT role, team_id FROM users WHERE email = ? AND deleted_at IS NULL",
+    )
+    .bind(email)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (role, team_id) = user.ok_or(axum::http::StatusCode::FORBIDDEN)?;
+
+    match role {
+        0 | 1 => requested_team_id.or(team_id).ok_or(axum::http::StatusCode::BAD_REQUEST),
+        3 => {
+            let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?;
+            if let Some(requested_team_id) = requested_team_id {
+                if requested_team_id != team_id {
+                    return Err(axum::http::StatusCode::FORBIDDEN);
+                }
+            }
+            Ok(team_id)
+        }
+        _ => Err(axum::http::StatusCode::FORBIDDEN),
+    }
+}
+
+async fn validate_spirit_player(
+    db: &sqlx::SqlitePool,
+    player_id: Option<i64>,
+    expected_team_id: i64,
+) -> Result<(), axum::http::StatusCode> {
+    let Some(player_id) = player_id else {
+        return Ok(());
+    };
+
+    let player_team: Option<(i64,)> = sqlx::query_as(
+        "SELECT team_id FROM users WHERE id = ? AND role = 2 AND deleted_at IS NULL",
+    )
+    .bind(player_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if player_team.map(|row| row.0) != Some(expected_team_id) {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    Ok(())
+}
+
+async fn ensure_match_not_finalized(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<(), axum::http::StatusCode> {
+    if match_scores_are_finalized(db, match_id)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+
+    Ok(())
+}
+
+async fn match_scores_are_finalized(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let match_row: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT t1_score, t2_score, possession FROM matches WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((t1_score, t2_score, possession)) = match_row else {
+        return Ok(false);
+    };
+
+    if possession.unwrap_or(0) < 3 {
+        return Ok(false);
+    }
+
+    let confirmed: (i64,) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT team_id) FROM score_confirmations WHERE match_id = ? AND t1_score = ? AND t2_score = ?",
+    )
+    .bind(match_id)
+    .bind(t1_score)
+    .bind(t2_score)
+    .fetch_one(db)
+    .await?;
+
+    Ok(confirmed.0 >= 2)
 }

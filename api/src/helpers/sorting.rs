@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -26,8 +26,11 @@ pub struct TeamSortData {
     pub h2h: HashMap<i64, i8>,
 }
 
-// Fetch all sort data for a division in minimal queries
-pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
+async fn fetch_sort_data_with_round_limit(
+    db: &SqlitePool,
+    division: i64,
+    max_round: Option<i64>,
+) -> Vec<TeamSortData> {
     let teams: Vec<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
         "SELECT id, name, abbreviation, small_logo, COALESCE(init_rank, 9999) FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC"
     ).bind(division).fetch_all(db).await.unwrap_or_default();
@@ -38,8 +41,9 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
            WHERE t.division = ? AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
+             AND (? IS NULL OR m.type <= ?)
            ORDER BY m.type ASC"#
-    ).bind(division).fetch_all(db).await.unwrap_or_default();
+    ).bind(division).bind(max_round).bind(max_round).fetch_all(db).await.unwrap_or_default();
 
     let mut data_map: HashMap<i64, TeamSortData> = HashMap::new();
     for (id, name, abbreviation, logo, rank) in &teams {
@@ -96,12 +100,14 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
     let spirits: Vec<(i64, f64)> = sqlx::query_as(
         r#"SELECT team_id, AVG(spirit) FROM (
             SELECT m.t1_id as team_id, m.t1_spirit as spirit FROM matches m
-            JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.t1_spirit IS NOT NULL AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
+                        JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.t1_spirit IS NOT NULL AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
+                            AND (? IS NULL OR m.type <= ?)
             UNION ALL
             SELECT m.t2_id as team_id, m.t2_spirit as spirit FROM matches m
-            JOIN teams t ON m.t2_id = t.id WHERE t.division = ? AND m.t2_spirit IS NOT NULL AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
+                        JOIN teams t ON m.t2_id = t.id WHERE t.division = ? AND m.t2_spirit IS NOT NULL AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
+                            AND (? IS NULL OR m.type <= ?)
         ) GROUP BY team_id"#
-    ).bind(division).bind(division).fetch_all(db).await.unwrap_or_default();
+        ).bind(division).bind(max_round).bind(max_round).bind(division).bind(max_round).bind(max_round).fetch_all(db).await.unwrap_or_default();
 
     for (tid, avg) in spirits {
         if let Some(d) = data_map.get_mut(&tid) {
@@ -110,6 +116,11 @@ pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData
     }
 
     data_map.into_values().collect()
+}
+
+// Fetch all sort data for a division in minimal queries
+pub async fn fetch_sort_data(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
+    fetch_sort_data_with_round_limit(db, division, None).await
 }
 
 // C1: Compare by points (win=2, draw=1, loss=0) descending
@@ -210,6 +221,17 @@ pub async fn get_sorted_standings(db: &SqlitePool, division: i64) -> Vec<TeamSor
     teams
 }
 
+pub async fn get_sorted_standings_through_round(
+    db: &SqlitePool,
+    division: i64,
+    max_round: i64,
+) -> Vec<TeamSortData> {
+    let round_limit = Some(max_round.max(0));
+    let mut teams = fetch_sort_data_with_round_limit(db, division, round_limit).await;
+    sort_teams(&mut teams);
+    teams
+}
+
 // Intermediate rankings: includes live/in-progress match scores for display purposes.
 // Uses current scores from ongoing games on top of completed results.
 // NOT used for round generation — only for live standings display.
@@ -274,4 +296,43 @@ pub async fn get_cached_intermediate_standings(db: &SqlitePool, division: i64) -
 pub async fn refresh_intermediate_standings_cache(db: &SqlitePool, division: i64) {
     let standings = get_intermediate_standings(db, division).await;
     cache::set_intermediate_standings(division, &standings).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn team(team_id: i64, seed: i64) -> TeamSortData {
+        TeamSortData {
+            team_id,
+            name: format!("Team {team_id}"),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: seed,
+            wins: 2,
+            losses: 1,
+            draws: 0,
+            points: 4,
+            points_for: 30,
+            points_against: 20,
+            spirit_avg: 0.0,
+            round_results: vec![1, 1, -1],
+            opponents: vec![1, 2, 3],
+            h2h: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sort_teams_uses_head_to_head_before_later_tiebreakers() {
+        let mut first = team(1, 2);
+        let mut second = team(2, 1);
+        first.h2h.insert(2, 1);
+        second.h2h.insert(1, -1);
+
+        let mut teams = vec![second, first];
+        sort_teams(&mut teams);
+
+        assert_eq!(teams[0].team_id, 1);
+        assert_eq!(teams[1].team_id, 2);
+    }
 }

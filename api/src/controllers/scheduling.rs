@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::helpers::{cache, rounds, sorting};
 
@@ -100,6 +100,8 @@ pub struct ScheduleGridCell {
     pub t2_name: Option<String>,
     pub t1_abbreviation: Option<String>,
     pub t2_abbreviation: Option<String>,
+    pub t1_seed_rank: Option<i64>,
+    pub t2_seed_rank: Option<i64>,
     pub t1_score: Option<i64>,
     pub t2_score: Option<i64>,
     pub t1_small_logo: Option<String>,
@@ -499,9 +501,10 @@ pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<Sch
     let rows = build_schedule_rows(&overrides);
     let fields = fetch_field_slots(&state.db).await;
     let grid_matches = fetch_grid_matches(&state.db).await;
+    let rank_snapshots = build_schedule_rank_snapshots(&state.db, &rows).await;
 
     Json(ScheduleGridResponse {
-        rows: materialize_grid(rows, fields, grid_matches),
+        rows: materialize_grid(rows, fields, grid_matches, &rank_snapshots),
     })
 }
 
@@ -944,6 +947,37 @@ async fn create_playoffs_if_needed(db: &sqlx::SqlitePool, division: i64) -> Resu
     Ok(true)
 }
 
+async fn fetch_completed_playoff_results(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<Vec<rounds::PlayedMatchResult>, sqlx::Error> {
+    let rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = 1001 AND m.possession >= 3 AND m.deleted_at IS NULL
+           ORDER BY m.time ASC, m.field_id ASC, m.id ASC"#,
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
+            if t1_score == t2_score {
+                return None;
+            }
+
+            Some(rounds::PlayedMatchResult {
+                t1: t1_id,
+                t2: t2_id,
+                winner: if t1_score > t2_score { t1_id } else { t2_id },
+            })
+        })
+        .collect())
+}
+
 async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result<bool, sqlx::Error> {
     let finals_existing: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1002 AND m.deleted_at IS NULL",
@@ -971,12 +1005,13 @@ async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result
     }
 
     let sorted = sorting::get_sorted_standings(db, division).await;
-    let bracket_rounds = rounds::build_playoff_brackets(&sorted);
-    let Some(final_round) = bracket_rounds.iter().find(|round| round.name == "finals") else {
+    let playoff_results = fetch_completed_playoff_results(db, division).await?;
+    let final_pairings = rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
+    if final_pairings.is_empty() {
         return Ok(false);
-    };
+    }
 
-    insert_pairings_into_slots(db, division, 1002, &final_round.matches).await?;
+    insert_pairings_into_slots(db, division, 1002, &final_pairings).await?;
     Ok(true)
 }
 
@@ -1297,6 +1332,61 @@ fn row_name(row_index: usize) -> &'static str {
     }
 }
 
+fn standings_round_for_match_type(division: i64, match_type: i64) -> i64 {
+    if match_type <= 1 {
+        0
+    } else if match_type < 1000 {
+        match_type - 1
+    } else if division == 0 {
+        crate::OPEN_ROUNDS
+    } else {
+        crate::WOMEN_ROUNDS
+    }
+}
+
+async fn build_schedule_rank_snapshots(
+    db: &sqlx::SqlitePool,
+    rows: &[RowTemplate],
+) -> HashMap<(i64, i64), HashMap<i64, i64>> {
+    let mut needed_snapshots = HashSet::new();
+    let mut needed_final_snapshots = HashSet::new();
+    for row in rows {
+        for slot in &row.slots {
+            if row.match_type == 1002 {
+                needed_final_snapshots.insert(slot.division);
+            } else {
+                needed_snapshots.insert((slot.division, standings_round_for_match_type(slot.division, row.match_type)));
+            }
+        }
+    }
+
+    let mut snapshots = HashMap::new();
+    for (division, standings_round) in needed_snapshots {
+        let standings = sorting::get_sorted_standings_through_round(db, division, standings_round).await;
+        let ranks = standings
+            .into_iter()
+            .enumerate()
+            .map(|(index, team)| (team.team_id, index as i64 + 1))
+            .collect();
+        snapshots.insert((division, standings_round), ranks);
+    }
+
+    for division in needed_final_snapshots {
+        let standings = sorting::get_sorted_standings(db, division).await;
+        let playoff_results = fetch_completed_playoff_results(db, division)
+            .await
+            .unwrap_or_default();
+        let ranks = rounds::build_seed_order_after_playoffs(&standings, &playoff_results)
+            .into_iter()
+            .enumerate()
+            .map(|(index, team_id)| (team_id, index as i64 + 1))
+            .collect();
+        snapshots.insert((division, 1002), ranks);
+    }
+
+    snapshots
+}
+
 async fn fetch_field_slots(db: &sqlx::SqlitePool) -> Vec<FieldSlot> {
     let field_rows: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, name FROM fields ORDER BY id ASC LIMIT 4",
@@ -1343,6 +1433,7 @@ fn materialize_grid(
     rows: Vec<RowTemplate>,
     fields: Vec<FieldSlot>,
     matches: Vec<ScheduleGridMatchRecord>,
+    rank_snapshots: &HashMap<(i64, i64), HashMap<i64, i64>>,
 ) -> Vec<ScheduleGridRow> {
     let mut exact_matches = HashMap::new();
     let mut fallback_matches: HashMap<(i64, i64), VecDeque<ScheduleGridMatchRecord>> = HashMap::new();
@@ -1366,6 +1457,13 @@ fn materialize_grid(
                 .iter()
                 .find(|candidate| candidate.label == format!("G{field_index}"));
             let slot_template = row.slots.iter().find(|slot| slot.field_index == field_index);
+            let rank_snapshot_key = slot_template.map(|slot| {
+                if row.match_type == 1002 {
+                    (slot.division, 1002)
+                } else {
+                    (slot.division, standings_round_for_match_type(slot.division, row.match_type))
+                }
+            });
 
             let matched = match (field, slot_template) {
                 (Some(field), Some(slot)) => {
@@ -1392,6 +1490,7 @@ fn materialize_grid(
                 .as_ref()
                 .map(|record| record.possession.is_none())
                 .unwrap_or(false);
+            let rank_lookup = rank_snapshot_key.and_then(|key| rank_snapshots.get(&key));
 
             cells.push(ScheduleGridCell {
                 field_index: field_index as i64,
@@ -1407,6 +1506,12 @@ fn materialize_grid(
                 t2_name: matched.as_ref().map(|record| record.t2_name.clone()),
                 t1_abbreviation: matched.as_ref().and_then(|record| record.t1_abbreviation.clone()),
                 t2_abbreviation: matched.as_ref().and_then(|record| record.t2_abbreviation.clone()),
+                t1_seed_rank: matched
+                    .as_ref()
+                    .and_then(|record| rank_lookup.and_then(|lookup| lookup.get(&record.t1_id).copied())),
+                t2_seed_rank: matched
+                    .as_ref()
+                    .and_then(|record| rank_lookup.and_then(|lookup| lookup.get(&record.t2_id).copied())),
                 t1_score: matched.as_ref().map(|record| record.t1_score),
                 t2_score: matched.as_ref().map(|record| record.t2_score),
                 t1_small_logo: matched.as_ref().and_then(|record| record.t1_small_logo.clone()),
@@ -1496,6 +1601,69 @@ async fn verify_super(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swiss_round_rows_fit_open_and_women_team_counts() {
+        let rows = build_schedule_rows(&HashMap::new());
+
+        for round in 1..=6 {
+            let mut open_slots = 0;
+            let mut women_slots = 0;
+
+            for row in rows.iter().filter(|row| row.match_type == round) {
+                for slot in &row.slots {
+                    if slot.division == 0 {
+                        open_slots += 1;
+                    } else {
+                        women_slots += 1;
+                    }
+                }
+            }
+
+            assert_eq!(open_slots, 11, "round {round} should have 11 open swiss slots");
+            assert_eq!(women_slots, 5, "round {round} should have 5 women swiss slots");
+        }
+    }
+
+    #[test]
+    fn playoff_rows_fit_twenty_two_open_and_ten_women_teams() {
+        let rows = build_schedule_rows(&HashMap::new());
+
+        let playoff_one_open = rows
+            .iter()
+            .filter(|row| row.match_type == 1001)
+            .flat_map(|row| row.slots.iter())
+            .filter(|slot| slot.division == 0)
+            .count();
+        let playoff_one_women = rows
+            .iter()
+            .filter(|row| row.match_type == 1001)
+            .flat_map(|row| row.slots.iter())
+            .filter(|slot| slot.division == 1)
+            .count();
+        let playoff_two_open = rows
+            .iter()
+            .filter(|row| row.match_type == 1002)
+            .flat_map(|row| row.slots.iter())
+            .filter(|slot| slot.division == 0)
+            .count();
+        let playoff_two_women = rows
+            .iter()
+            .filter(|row| row.match_type == 1002)
+            .flat_map(|row| row.slots.iter())
+            .filter(|slot| slot.division == 1)
+            .count();
+
+        assert_eq!(playoff_one_open, 11);
+        assert_eq!(playoff_one_women, 5);
+        assert_eq!(playoff_two_open, 10);
+        assert_eq!(playoff_two_women, 4);
+    }
 }
 
 fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> {
