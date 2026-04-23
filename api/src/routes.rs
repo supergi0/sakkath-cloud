@@ -96,7 +96,8 @@ fn match_routes() -> Router<AppState> {
 fn schedule_routes() -> Router<AppState> {
     Router::new()
         .route("/schedule/state", get(scheduling::read_tournament_state))
-    .route("/schedule/grid", get(scheduling::get_schedule_grid))
+        .route("/schedule/teams", get(scheduling::get_schedule_teams))
+        .route("/schedule/grid", get(scheduling::get_schedule_grid))
         .route("/schedule/matches", get(scheduling::get_schedule_matches))
         .route("/schedule/early-fixtures", get(scheduling::get_early_fixtures))
 }

@@ -75,6 +75,20 @@ pub struct ScheduleGridResponse {
 }
 
 #[derive(Serialize)]
+pub struct ScheduleTeamsResponse {
+    pub teams: Vec<ScheduleGridTeam>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ScheduleGridTeam {
+    pub id: i64,
+    pub name: String,
+    pub abbreviation: Option<String>,
+    pub division: i64,
+    pub small_logo: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct ScheduleGridRow {
     pub key: String,
     pub day_key: String,
@@ -94,18 +108,8 @@ pub struct ScheduleGridCell {
     pub division: Option<i64>,
     pub match_type: Option<i64>,
     pub match_id: Option<i64>,
-    pub t1_id: Option<i64>,
-    pub t2_id: Option<i64>,
-    pub t1_name: Option<String>,
-    pub t2_name: Option<String>,
-    pub t1_abbreviation: Option<String>,
-    pub t2_abbreviation: Option<String>,
-    pub t1_seed_rank: Option<i64>,
-    pub t2_seed_rank: Option<i64>,
-    pub t1_score: Option<i64>,
-    pub t2_score: Option<i64>,
-    pub t1_small_logo: Option<String>,
-    pub t2_small_logo: Option<String>,
+    pub data: Option<[i64; 5]>,
+    pub seed_ranks: Option<[i64; 2]>,
     pub stream_url: Option<String>,
     pub possession: Option<i64>,
     pub status: String,
@@ -172,14 +176,8 @@ struct ScheduleGridMatchRecord {
     t1_id: i64,
     t2_id: i64,
     division: i64,
-    t1_name: String,
-    t2_name: String,
-    t1_abbreviation: Option<String>,
-    t2_abbreviation: Option<String>,
     t1_score: i64,
     t2_score: i64,
-    t1_small_logo: Option<String>,
-    t2_small_logo: Option<String>,
     field_id: Option<i64>,
     time: String,
     possession: Option<i64>,
@@ -506,6 +504,20 @@ pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<Sch
     Json(ScheduleGridResponse {
         rows: materialize_grid(rows, fields, grid_matches, &rank_snapshots),
     })
+}
+
+pub async fn get_schedule_teams(State(state): State<crate::AppState>) -> Json<ScheduleTeamsResponse> {
+    let teams = sqlx::query_as::<_, ScheduleGridTeam>(
+        r#"SELECT id, name, abbreviation, division, small_logo
+           FROM teams
+           WHERE deleted_at IS NULL
+           ORDER BY division ASC, init_rank ASC, id ASC"#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(ScheduleTeamsResponse { teams })
 }
 
 pub async fn update_schedule_row(
@@ -1191,23 +1203,23 @@ fn swiss_row_slots(round: i64, row_index: usize) -> Vec<SlotTemplate> {
             open_slot(1, round, 1),
             open_slot(2, round, 2),
             open_slot(3, round, 3),
-            women_slot(4, round, 1),
+            open_slot(4, round, 4),
         ],
         1 => vec![
-            open_slot(1, round, 4),
-            open_slot(2, round, 5),
-            open_slot(3, round, 6),
-            women_slot(4, round, 2),
+            open_slot(1, round, 5),
+            open_slot(2, round, 6),
+            open_slot(3, round, 7),
+            open_slot(4, round, 8),
         ],
         2 => vec![
-            open_slot(1, round, 7),
-            open_slot(2, round, 8),
-            open_slot(3, round, 9),
-            women_slot(4, round, 3),
+            open_slot(1, round, 9),
+            open_slot(2, round, 10),
+            open_slot(3, round, 11),
+            women_slot(4, round, 1),
         ],
         _ => vec![
-            open_slot(1, round, 10),
-            open_slot(2, round, 11),
+            women_slot(1, round, 2),
+            women_slot(2, round, 3),
             women_slot(3, round, 4),
             women_slot(4, round, 5),
         ],
@@ -1410,17 +1422,13 @@ async fn fetch_field_slots(db: &sqlx::SqlitePool) -> Vec<FieldSlot> {
 
 async fn fetch_grid_matches(db: &sqlx::SqlitePool) -> Vec<ScheduleGridMatchRecord> {
     sqlx::query_as::<_, ScheduleGridMatchRecord>(
-        r#"SELECT m.id, m.t1_id, m.t2_id, t1.division as division,
-               t1.name as t1_name, t2.name as t2_name,
-               t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
-               m.t1_score, m.t2_score,
-               t1.small_logo as t1_small_logo, t2.small_logo as t2_small_logo,
-             m.field_id, COALESCE(m.time, '') as time,
+                r#"SELECT m.id, m.t1_id, m.t2_id, t1.division as division,
+                             m.t1_score, m.t2_score,
+                             m.field_id, COALESCE(m.time, '') as time,
                m.possession, m.stream_url, m.type as match_type
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
-        LEFT JOIN fields f ON f.id = m.field_id
         WHERE m.deleted_at IS NULL
         ORDER BY m.time ASC, m.field_id ASC, m.id ASC"#,
     )
@@ -1500,22 +1508,23 @@ fn materialize_grid(
                 division: slot_template.map(|slot| slot.division),
                 match_type: slot_template.map(|_| row.match_type),
                 match_id: matched.as_ref().map(|record| record.id),
-                t1_id: matched.as_ref().map(|record| record.t1_id),
-                t2_id: matched.as_ref().map(|record| record.t2_id),
-                t1_name: matched.as_ref().map(|record| record.t1_name.clone()),
-                t2_name: matched.as_ref().map(|record| record.t2_name.clone()),
-                t1_abbreviation: matched.as_ref().and_then(|record| record.t1_abbreviation.clone()),
-                t2_abbreviation: matched.as_ref().and_then(|record| record.t2_abbreviation.clone()),
-                t1_seed_rank: matched
-                    .as_ref()
-                    .and_then(|record| rank_lookup.and_then(|lookup| lookup.get(&record.t1_id).copied())),
-                t2_seed_rank: matched
-                    .as_ref()
-                    .and_then(|record| rank_lookup.and_then(|lookup| lookup.get(&record.t2_id).copied())),
-                t1_score: matched.as_ref().map(|record| record.t1_score),
-                t2_score: matched.as_ref().map(|record| record.t2_score),
-                t1_small_logo: matched.as_ref().and_then(|record| record.t1_small_logo.clone()),
-                t2_small_logo: matched.as_ref().and_then(|record| record.t2_small_logo.clone()),
+                data: matched.as_ref().map(|record| {
+                    [
+                        record.t1_id,
+                        record.t2_id,
+                        record.match_type,
+                        record.t1_score,
+                        record.t2_score,
+                    ]
+                }),
+                seed_ranks: matched.as_ref().and_then(|record| {
+                    let t1_seed = rank_lookup.and_then(|lookup| lookup.get(&record.t1_id).copied());
+                    let t2_seed = rank_lookup.and_then(|lookup| lookup.get(&record.t2_id).copied());
+                    match (t1_seed, t2_seed) {
+                        (Some(t1_seed), Some(t2_seed)) => Some([t1_seed, t2_seed]),
+                        _ => None,
+                    }
+                }),
                 stream_url: matched.as_ref().and_then(|record| record.stream_url.clone()),
                 possession: matched.as_ref().and_then(|record| record.possession),
                 status,
@@ -1664,6 +1673,24 @@ mod tests {
         assert_eq!(playoff_two_open, 10);
         assert_eq!(playoff_two_women, 4);
     }
+
+    #[test]
+    fn swiss_slots_assign_open_before_women() {
+        let rows = build_schedule_rows(&HashMap::new());
+
+        for round in 1..=6 {
+            let slot_divisions: Vec<i64> = rows
+                .iter()
+                .filter(|row| row.match_type == round)
+                .flat_map(|row| row.slots.iter().map(|slot| slot.division))
+                .collect();
+
+            assert_eq!(slot_divisions.len(), 16, "round {round} should expose 16 total swiss slots");
+            assert!(slot_divisions[..11].iter().all(|division| *division == 0));
+            assert!(slot_divisions[11..].iter().all(|division| *division == 1));
+        }
+    }
+
 }
 
 fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> {

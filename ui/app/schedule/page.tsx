@@ -22,23 +22,21 @@ interface ScheduleGridCell {
   division: number | null;
   match_type: number | null;
   match_id: number | null;
-  t1_id: number | null;
-  t2_id: number | null;
-  t1_name: string | null;
-  t2_name: string | null;
-  t1_abbreviation: string | null;
-  t2_abbreviation: string | null;
-  t1_seed_rank: number | null;
-  t2_seed_rank: number | null;
-  t1_score: number | null;
-  t2_score: number | null;
-  t1_small_logo: string | null;
-  t2_small_logo: string | null;
+  data: [number, number, number, number, number] | null;
+  seed_ranks: [number, number] | null;
   stream_url: string | null;
   possession: number | null;
   status: CellStatus;
   clickable: boolean;
   movable: boolean;
+}
+
+interface ScheduleTeam {
+  id: number;
+  name: string;
+  abbreviation: string | null;
+  division: number;
+  small_logo: string | null;
 }
 
 interface ScheduleGridRow {
@@ -53,6 +51,10 @@ interface ScheduleGridRow {
 
 interface ScheduleGridResponse {
   rows: ScheduleGridRow[];
+}
+
+interface ScheduleTeamsResponse {
+  teams: ScheduleTeam[];
 }
 
 interface DragMatch {
@@ -79,14 +81,16 @@ function getRowTitle(label: string) {
 
 function getStageLabel(cell: ScheduleGridCell) {
   const divisionLabel = cell.division === 1 ? 'Women' : 'Open';
-  if (cell.match_type === 1002) {
+  const round = cell.data?.[2] ?? cell.match_type;
+
+  if (round === 1002) {
     return `${divisionLabel} F`;
   }
-  if (cell.match_type === 1001) {
+  if (round === 1001) {
     return `${divisionLabel} P1`;
   }
-  if (cell.match_type !== null) {
-    return `${divisionLabel} R${cell.match_type}`;
+  if (round !== null) {
+    return `${divisionLabel} R${round}`;
   }
   return cell.slot_code ?? '';
 }
@@ -112,10 +116,10 @@ function getStatusDotClass(status: CellStatus) {
 }
 
 function getSeedLabel(cell: ScheduleGridCell) {
-  if (typeof cell.t1_seed_rank !== 'number' || typeof cell.t2_seed_rank !== 'number') {
+  if (!cell.seed_ranks) {
     return null;
   }
-  return `${cell.t1_seed_rank} v ${cell.t2_seed_rank}`;
+  return `${cell.seed_ranks[0]} v ${cell.seed_ranks[1]}`;
 }
 
 function TeamLogo({ name, logo }: { name: string | null; logo: string | null }) {
@@ -128,17 +132,35 @@ function TeamLogo({ name, logo }: { name: string | null; logo: string | null }) 
   );
 }
 
+function InlineTeamLogo({ name, logo }: { name: string | null; logo: string | null }) {
+  const initial = (name ?? '?').trim().charAt(0).toUpperCase() || '?';
+
+  return (
+    <div className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-900 text-[10px] font-semibold text-white dark:bg-slate-700">
+      {logo ? <Image src={logo} alt="" width={20} height={20} unoptimized className="h-full w-full object-cover" /> : initial}
+    </div>
+  );
+}
+
 function ScheduleDetailModal({
   row,
   cell,
+  teamsById,
   onClose,
 }: {
   row: ScheduleGridRow;
   cell: ScheduleGridCell;
+  teamsById: Record<number, ScheduleTeam>;
   onClose: () => void;
 }) {
   const stageLabel = getStageLabel(cell);
   const hasMatch = cell.match_id !== null;
+  const t1Id = cell.data?.[0] ?? null;
+  const t2Id = cell.data?.[1] ?? null;
+  const t1Team = t1Id !== null ? teamsById[t1Id] : undefined;
+  const t2Team = t2Id !== null ? teamsById[t2Id] : undefined;
+  const t1Score = cell.data?.[3] ?? 0;
+  const t2Score = cell.data?.[4] ?? 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 backdrop-blur-sm" onClick={onClose}>
@@ -176,13 +198,13 @@ function ScheduleDetailModal({
             <div className="rounded-2xl border border-gray-200 p-4 dark:border-slate-700">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
-                  <TeamLogo name={cell.t1_name} logo={cell.t1_small_logo} />
+                  <TeamLogo name={t1Team?.name ?? null} logo={t1Team?.small_logo ?? null} />
                   <Text variant="primary" className="min-w-0 text-base font-semibold break-words">
-                    {cell.t1_name}
+                    {t1Team?.name ?? 'TBD'}
                   </Text>
                 </div>
                 <Text variant="primary" className="text-2xl font-semibold">
-                  {cell.t1_score ?? 0}
+                  {t1Score}
                 </Text>
               </div>
             </div>
@@ -190,13 +212,13 @@ function ScheduleDetailModal({
             <div className="rounded-2xl border border-gray-200 p-4 dark:border-slate-700">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
-                  <TeamLogo name={cell.t2_name} logo={cell.t2_small_logo} />
+                  <TeamLogo name={t2Team?.name ?? null} logo={t2Team?.small_logo ?? null} />
                   <Text variant="primary" className="min-w-0 text-base font-semibold break-words">
-                    {cell.t2_name}
+                    {t2Team?.name ?? 'TBD'}
                   </Text>
                 </div>
                 <Text variant="primary" className="text-2xl font-semibold">
-                  {cell.t2_score ?? 0}
+                  {t2Score}
                 </Text>
               </div>
             </div>
@@ -242,6 +264,7 @@ function ScheduleDetailModal({
 export default function SchedulePage() {
   const { isSuperAdmin, token } = useAuth();
   const [rows, setRows] = useState<ScheduleGridRow[]>([]);
+  const [teamsById, setTeamsById] = useState<Record<number, ScheduleTeam>>({});
   const [loading, setLoading] = useState(true);
   const [drafts, setDrafts] = useState<RowDraftMap>({});
   const [savingRow, setSavingRow] = useState<string | null>(null);
@@ -254,16 +277,12 @@ export default function SchedulePage() {
   const [isDragging, setIsDragging] = useState(false);
   const [statusLabelCellKey, setStatusLabelCellKey] = useState<string | null>(null);
 
-  const showToast = (message: string) => {
+  const showToast = useCallback((message: string) => {
     setToastMessage(message);
     setToastOpen(true);
-  };
+  }, []);
 
-  const fetchGrid = useCallback(async (initial = false) => {
-    if (initial) {
-      setLoading(true);
-    }
-
+  const fetchGrid = useCallback(async () => {
     try {
       const response = await fetch(apiUrl('/v1/schedule/grid'));
       if (!response.ok) {
@@ -282,20 +301,51 @@ export default function SchedulePage() {
       });
     } catch {
       showToast('Unable to load the schedule right now.');
-    } finally {
-      if (initial) {
-        setLoading(false);
-      }
+      throw new Error('schedule-grid-load-failed');
     }
-  }, []);
+  }, [showToast]);
+
+  const fetchTeams = useCallback(async () => {
+    try {
+      const response = await fetch(apiUrl('/v1/schedule/teams'));
+      if (!response.ok) {
+        throw new Error('Unable to load teams');
+      }
+      const data: ScheduleTeamsResponse = await response.json();
+      setTeamsById(
+        Object.fromEntries(data.teams.map((team) => [team.id, team])) as Record<number, ScheduleTeam>,
+      );
+    } catch {
+      showToast('Unable to load team info right now.');
+      throw new Error('schedule-teams-load-failed');
+    }
+
+  }, [showToast]);
 
   useEffect(() => {
-    fetchGrid(true).catch(() => undefined);
+    let active = true;
+
+    const loadInitial = async () => {
+      setLoading(true);
+      try {
+        await Promise.all([fetchTeams(), fetchGrid()]);
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadInitial().catch(() => undefined);
     const interval = setInterval(() => {
-      fetchGrid(false).catch(() => undefined);
+      fetchGrid().catch(() => undefined);
     }, 4000);
-    return () => clearInterval(interval);
-  }, [fetchGrid]);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [fetchGrid, fetchTeams]);
 
   const rowsByDay = useMemo(() => {
     const grouped: Record<string, ScheduleGridRow[]> = { fri: [], sat: [], sun: [] };
@@ -344,7 +394,7 @@ export default function SchedulePage() {
         throw new Error('Unable to save row time');
       }
       showToast('Row timing updated.');
-      await fetchGrid(false);
+      await fetchGrid();
     } catch {
       showToast('Row timing update was rejected.');
     } finally {
@@ -384,7 +434,7 @@ export default function SchedulePage() {
         throw new Error('Unable to move match');
       }
       showToast('Match moved.');
-      await fetchGrid(false);
+      await fetchGrid();
     } catch {
       showToast('Match move was rejected.');
     } finally {
@@ -403,8 +453,14 @@ export default function SchedulePage() {
     const stageLabel = getStageLabel(cell);
     const seedLabel = getSeedLabel(cell);
     const cellKey = `${row.key}-${cell.field_index}`;
-    const t1Short = cell.t1_name ? getTeamAbbreviation(cell.t1_name, cell.t1_abbreviation) : '';
-    const t2Short = cell.t2_name ? getTeamAbbreviation(cell.t2_name, cell.t2_abbreviation) : '';
+    const t1Id = cell.data?.[0] ?? null;
+    const t2Id = cell.data?.[1] ?? null;
+    const t1Team = t1Id !== null ? teamsById[t1Id] : undefined;
+    const t2Team = t2Id !== null ? teamsById[t2Id] : undefined;
+    const t1Short = t1Team ? getTeamAbbreviation(t1Team.name, t1Team.abbreviation) : '';
+    const t2Short = t2Team ? getTeamAbbreviation(t2Team.name, t2Team.abbreviation) : '';
+    const t1Score = cell.data?.[3] ?? 0;
+    const t2Score = cell.data?.[4] ?? 0;
 
     const className = hasMatch
       ? cell.status === 'upcoming'
@@ -419,7 +475,7 @@ export default function SchedulePage() {
     return (
       <td
         key={`${row.key}-${cell.field_index}`}
-        className="w-[92px] border-r border-t border-gray-200 align-top dark:border-slate-700 sm:w-[104px]"
+        className="w-[92px] border-r border-t border-gray-200 p-0 align-top dark:border-slate-700 sm:w-[104px]"
         onDragOver={(event) => {
           if (droppable) {
             event.preventDefault();
@@ -458,7 +514,7 @@ export default function SchedulePage() {
               setSelectedCell({ row, cell });
             }
           }}
-          className={`min-h-[88px] rounded-none border-0 px-1 py-1.5 transition sm:px-1.5 ${className} ${
+          className={`flex h-full min-h-[88px] flex-col justify-between rounded-none border-0 px-1 py-1.5 transition sm:px-1.5 ${className} ${
             interactive ? 'cursor-pointer hover:shadow-sm' : ''
           } ${droppable ? 'ring-2 ring-sky-500/60' : ''}`}
         >
@@ -496,13 +552,19 @@ export default function SchedulePage() {
           {hasMatch ? (
             <div className="mt-1.5 space-y-1.5">
               <div className="space-y-1.5">
-                <div className="flex min-w-0 items-center justify-between gap-1">
-                  <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t1Short}</p>
-                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{cell.t1_score ?? 0}</span>
+                <div className="flex min-w-0 items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <InlineTeamLogo name={t1Team?.name ?? null} logo={t1Team?.small_logo ?? null} />
+                    <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t1Short}</p>
+                  </div>
+                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{t1Score}</span>
                 </div>
-                <div className="flex min-w-0 items-center justify-between gap-1">
-                  <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t2Short}</p>
-                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{cell.t2_score ?? 0}</span>
+                <div className="flex min-w-0 items-center justify-between gap-1.5">
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <InlineTeamLogo name={t2Team?.name ?? null} logo={t2Team?.small_logo ?? null} />
+                    <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t2Short}</p>
+                  </div>
+                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{t2Score}</span>
                 </div>
               </div>
               <div className="space-y-0.5 text-[10px] uppercase tracking-[0.12em]">
@@ -600,8 +662,8 @@ export default function SchedulePage() {
 
                 return (
                   <tr key={row.key} className="align-top">
-                    <td className="sticky left-0 z-10 min-w-[84px] border-r border-t border-gray-200 bg-white px-2 py-3 align-middle dark:border-slate-700 dark:bg-slate-900 sm:w-[96px]">
-                      <div className={`min-h-[88px] ${isSuperAdmin ? 'flex items-start justify-between gap-2' : 'flex flex-col justify-center'}`}>
+                    <td className="sticky left-0 z-10 min-w-[84px] border-r border-t border-gray-200 bg-white p-0 align-middle dark:border-slate-700 dark:bg-slate-900 sm:w-[96px]">
+                      <div className={`min-h-[88px] px-2 py-3 ${isSuperAdmin ? 'flex h-full items-start justify-between gap-2' : 'flex h-full flex-col justify-center'}`}>
                         <div className="space-y-0.5">
                           <Text variant="primary" className="whitespace-nowrap text-sm font-medium leading-tight text-gray-500 dark:text-gray-400 sm:text-[15px]">
                             {getRowTitle(row.label)}
@@ -647,7 +709,12 @@ export default function SchedulePage() {
       </div>
 
       {selectedCell ? (
-        <ScheduleDetailModal row={selectedCell.row} cell={selectedCell.cell} onClose={() => setSelectedCell(null)} />
+        <ScheduleDetailModal
+          row={selectedCell.row}
+          cell={selectedCell.cell}
+          teamsById={teamsById}
+          onClose={() => setSelectedCell(null)}
+        />
       ) : null}
 
       <Toast message={toastMessage} isOpen={toastOpen} onClose={() => setToastOpen(false)} />
