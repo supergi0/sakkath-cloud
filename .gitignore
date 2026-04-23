@@ -15,6 +15,7 @@ agent/
 
 #release
 release_v*/
+logs/
 
 #db
 sakkath.db

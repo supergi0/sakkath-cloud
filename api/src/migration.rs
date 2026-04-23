@@ -1,4 +1,4 @@
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -86,6 +86,26 @@ async fn table_column_is_not_null(pool: &SqlitePool, table: &str, column: &str) 
         .await?;
 
     Ok(matches!(not_null, Some((1,))))
+}
+
+async fn table_has_foreign_key_target(
+    pool: &SqlitePool,
+    table: &str,
+    from_column: &str,
+    target_table: &str,
+) -> Result<bool, sqlx::Error> {
+    let query = format!("PRAGMA foreign_key_list('{table}')");
+    let rows = sqlx::query(&query).fetch_all(pool).await?;
+
+    for row in rows {
+        let foreign_key_column: String = row.try_get("from")?;
+        let foreign_key_target: String = row.try_get("table")?;
+        if foreign_key_column == from_column && foreign_key_target == target_table {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 async fn create_match_indexes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -199,6 +219,189 @@ async fn rebuild_matches_without_volunteer_id(pool: &SqlitePool) -> Result<(), s
 
     drop(conn);
     create_match_indexes(pool).await
+}
+
+async fn rebuild_match_events_with_current_foreign_keys(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("ALTER TABLE match_events RENAME TO match_events_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE match_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            player_id INTEGER,
+            team_id INTEGER,
+            event_type INTEGER NOT NULL,
+            actor_user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (player_id) REFERENCES users(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            FOREIGN KEY (actor_user_id) REFERENCES users(id)
+        )
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO match_events (id, match_id, player_id, team_id, event_type, actor_user_id, created_at)
+        SELECT id, match_id, player_id, team_id, event_type, actor_user_id, created_at
+        FROM match_events_old
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("DROP TABLE match_events_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *conn)
+        .await?;
+
+    drop(conn);
+    create_match_event_indexes(pool).await
+}
+
+async fn rebuild_spirit_scores_with_current_foreign_keys(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("ALTER TABLE spirit_scores RENAME TO spirit_scores_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE spirit_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            rules_knowledge INTEGER NOT NULL DEFAULT 2,
+            fouls_contact INTEGER NOT NULL DEFAULT 2,
+            fair_mindedness INTEGER NOT NULL DEFAULT 2,
+            positive_attitude INTEGER NOT NULL DEFAULT 2,
+            communication INTEGER NOT NULL DEFAULT 2,
+            total INTEGER NOT NULL DEFAULT 10,
+            mvp_player_id INTEGER,
+            msp_player_id INTEGER,
+            submitted_by_team_id INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            FOREIGN KEY (mvp_player_id) REFERENCES users(id),
+            FOREIGN KEY (msp_player_id) REFERENCES users(id),
+            FOREIGN KEY (submitted_by_team_id) REFERENCES teams(id),
+            UNIQUE(match_id, team_id, submitted_by_team_id)
+        )
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO spirit_scores (
+            id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            submitted_by_team_id, created_at
+        )
+        SELECT
+            id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            submitted_by_team_id, created_at
+        FROM spirit_scores_old
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("DROP TABLE spirit_scores_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *conn)
+        .await?;
+
+    drop(conn);
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_match_id ON spirit_scores(match_id)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_team_id ON spirit_scores(team_id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+async fn rebuild_score_confirmations_with_current_foreign_keys(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("ALTER TABLE score_confirmations RENAME TO score_confirmations_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE score_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            t1_score INTEGER NOT NULL,
+            t2_score INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (match_id) REFERENCES matches(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            UNIQUE(match_id, team_id)
+        )
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO score_confirmations (id, match_id, team_id, t1_score, t2_score, created_at)
+        SELECT id, match_id, team_id, t1_score, t2_score, created_at
+        FROM score_confirmations_old
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("DROP TABLE score_confirmations_old")
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *conn)
+        .await?;
+
+    drop(conn);
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_score_confirmations_match_id ON score_confirmations(match_id)")
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 /// Initialize the database connection pool
@@ -458,6 +661,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .await?;
     }
 
+    if !table_has_foreign_key_target(pool, "match_events", "match_id", "matches").await? {
+        rebuild_match_events_with_current_foreign_keys(pool).await?;
+    }
+
     if !table_has_column(pool, "matches", "type").await? {
         sqlx::query("ALTER TABLE matches ADD COLUMN type INTEGER DEFAULT 1").execute(pool).await?;
     }
@@ -501,6 +708,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_match_id ON spirit_scores(match_id)").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_team_id ON spirit_scores(team_id)").execute(pool).await?;
 
+    if !table_has_foreign_key_target(pool, "spirit_scores", "match_id", "matches").await? {
+        rebuild_spirit_scores_with_current_foreign_keys(pool).await?;
+    }
+
     // Score confirmations table: teams confirm the final score
     sqlx::query(
         r#"
@@ -521,6 +732,10 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_score_confirmations_match_id ON score_confirmations(match_id)").execute(pool).await?;
+
+    if !table_has_foreign_key_target(pool, "score_confirmations", "match_id", "matches").await? {
+        rebuild_score_confirmations_with_current_foreign_keys(pool).await?;
+    }
 
     Ok(())
 }

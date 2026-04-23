@@ -1,29 +1,13 @@
-use axum::Router;
 use axum::middleware as axum_middleware;
 use axum::routing::{get, get_service};
-use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use std::process;
 use tower_http::services::ServeDir;
 use tower_http::cors::{CorsLayer, Any};
 
-mod migration;
-mod seeder;
-mod controllers;
-mod middleware;
-mod routes;
-mod telemetry;
-pub mod helpers;
-
-// Tournament configuration: number of swiss rounds per division
-pub const OPEN_ROUNDS: i64 = 6;
-pub const WOMEN_ROUNDS: i64 = 6;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: SqlitePool,
-    pub telemetry_enabled: bool,
-}
+use api::{AppState, controllers, helpers, middleware, migration, routes, telemetry};
+use axum::Router;
+use sqlx::SqlitePool;
 
 enum CliCommand {
     Serve,
