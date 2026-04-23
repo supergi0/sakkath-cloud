@@ -195,8 +195,10 @@ pub fn sort_teams(teams: &mut Vec<TeamSortData>) {
         let mut ord = c1_points(a, b);
         if ord != Ordering::Equal { return ord; }
 
-        ord = c2_head_to_head(a, b);
-        if ord != Ordering::Equal { return ord; }
+        if tied_team_count(a.points, &snapshot) == 2 {
+            ord = c2_head_to_head(a, b);
+            if ord != Ordering::Equal { return ord; }
+        }
 
         ord = c3_buchholz(a, b, &snapshot);
         if ord != Ordering::Equal { return ord; }
@@ -212,6 +214,10 @@ pub fn sort_teams(teams: &mut Vec<TeamSortData>) {
 
         c7_stable_seed(a, b)
     });
+}
+
+fn tied_team_count(points: i64, teams: &[TeamSortData]) -> usize {
+    teams.iter().filter(|team| team.points == points).count()
 }
 
 // Full pipeline: fetch data and return sorted standings for a division (completed matches only)
@@ -334,5 +340,26 @@ mod tests {
 
         assert_eq!(teams[0].team_id, 1);
         assert_eq!(teams[1].team_id, 2);
+    }
+
+    #[test]
+    fn sort_teams_skips_pairwise_head_to_head_for_three_way_ties() {
+        let mut first = team(1, 1);
+        let mut second = team(2, 2);
+        let mut third = team(3, 3);
+
+        first.h2h.insert(2, 1);
+        first.h2h.insert(3, -1);
+        second.h2h.insert(1, -1);
+        second.h2h.insert(3, 1);
+        third.h2h.insert(1, 1);
+        third.h2h.insert(2, -1);
+
+        let mut teams = vec![third, second, first];
+        sort_teams(&mut teams);
+
+        assert_eq!(teams[0].team_id, 1);
+        assert_eq!(teams[1].team_id, 2);
+        assert_eq!(teams[2].team_id, 3);
     }
 }
