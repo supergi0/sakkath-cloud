@@ -2,7 +2,7 @@
 
 import { useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeftRight, ChevronLeft, Circle, RotateCcw, Save, Shield, AlertTriangle } from 'lucide-react';
+import { ArrowLeftRight, ChevronLeft, Circle, RotateCcw, Save, Shield, AlertTriangle, ToggleLeft, ToggleRight } from 'lucide-react';
 import useSWR from 'swr';
 import { Text } from '../components/Text';
 import { useAuth } from '../auth-provider';
@@ -20,6 +20,8 @@ interface UpcomingMatch {
   field_name: string;
   time: string;
   possession: number | null;
+  match_type: number;
+  reporting_enabled: boolean;
 }
 
 interface MatchEvent {
@@ -49,15 +51,24 @@ interface MatchDetail {
   t1_score: number;
   t2_score: number;
   possession: number | null;
+  match_type: number;
+  reporting_enabled: boolean;
   field_name: string;
   time: string;
   players: MatchPlayer[];
   events: MatchEvent[];
 }
 
+interface ReportingRoundSetting {
+  round_key: number;
+  label: string;
+  is_enabled: boolean;
+}
+
 type MatchStatus = 'upcoming' | 'live' | 'ended';
 type PanelKey = 't1' | 'log' | 't2';
 type ConfirmAction = 'end' | 'save' | 'undo' | 'possession';
+type AdminView = 'reporting' | 'allow-reporting';
 
 const EVENT_LABELS = ['Score', 'Assist', 'Block', 'Turnover'];
 const EVENT_COLORS = ['text-green-500', 'text-sky-400', 'text-violet-400', 'text-amber-400'];
@@ -76,6 +87,12 @@ function formatTime(time: string) {
 
 function formatLogTime(time: string) {
   return new Date(time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function getReportingLabel(matchType: number) {
+  if (matchType === 1001) return 'Playoffs';
+  if (matchType === 1002) return 'Finals';
+  return `Round ${matchType}`;
 }
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
@@ -101,12 +118,13 @@ function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string;
 }
 
 function AdminContent() {
-  const { isLoggedIn, isAdmin, isPoc, token, isLoading } = useAuth();
+  const { isLoggedIn, isAdmin, isPoc, isSuperAdmin, token, isLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
   const canReport = isAdmin || isPoc;
   const requestedMatchId = searchParams.get('match_id');
 
+  const [adminView, setAdminView] = useState<AdminView>('reporting');
   const [activeMatchId, setActiveMatchId] = useState<number | null>(null);
   const [panel, setPanel] = useState<PanelKey>('log');
   const [pendingScorerId, setPendingScorerId] = useState<number | null>(null);
@@ -120,6 +138,7 @@ function AdminContent() {
   const [choosingPossession, setChoosingPossession] = useState<number | null>(null);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [pendingPossession, setPendingPossession] = useState<{ matchId: number; possession: 1 | 2 } | null>(null);
+  const [savingRoundKey, setSavingRoundKey] = useState<number | null>(null);
 
   useEffect(() => {
     if (isLoading) return;
@@ -146,6 +165,13 @@ function AdminContent() {
     return response.json();
   };
 
+  const fetchReportingRounds = async (): Promise<ReportingRoundSetting[]> => {
+    if (!token) return [];
+    const response = await fetch(apiUrl('/v1/admin/reporting-rounds'), { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) return [];
+    return response.json();
+  };
+
   const { data: matches = [], mutate: mutateMatches, isLoading: matchesLoading } = useSWR(
     token && isLoggedIn && canReport ? apiUrl('/v1/admin/matches') : null,
     fetchVolunteerMatches,
@@ -158,10 +184,23 @@ function AdminContent() {
     { refreshInterval: 3000, revalidateOnFocus: true }
   );
 
+  const { data: reportingRounds = [], mutate: mutateReportingRounds, isLoading: reportingRoundsLoading } = useSWR(
+    token && isLoggedIn && canReport ? apiUrl('/v1/admin/reporting-rounds') : null,
+    fetchReportingRounds,
+    { refreshInterval: 4000, revalidateOnFocus: true }
+  );
+
   useEffect(() => {
-    if (!activeMatch || getMatchStatus(activeMatch) !== 'live') return;
-    setPanel(activeMatch.possession === 1 ? 't1' : 't2');
-    resetComposer();
+    const possession = activeMatch?.possession;
+    if (possession === undefined || possession === null || possession >= 3) return;
+    setPanel(possession === 1 ? 't1' : 't2');
+    setPendingScorerId(null);
+    setPendingAssisterId(null);
+    setPendingBlockId(null);
+    setPendingTurnover(false);
+    setPendingTurnoverId(null);
+    setPendingSwitchOnly(false);
+    setErrorMessage(null);
   }, [activeMatch?.possession]);
 
   async function postAction(path: string, body?: Record<string, number | null>) {
@@ -174,6 +213,7 @@ function AdminContent() {
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
+    if (response.status === 403) throw new Error('Reporting for this round is locked right now.');
     if (!response.ok) throw new Error('Request failed');
   }
 
@@ -190,19 +230,21 @@ function AdminContent() {
   async function startReporting(matchId: number, possession: 1 | 2) {
     try {
       setIsSubmitting(true);
+      setErrorMessage(null);
       const response = await fetch(apiUrl(`/v1/admin/matches/${matchId}/start`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ possession }),
       });
+      if (response.status === 403) throw new Error('Reporting for this round is locked right now.');
       if (!response.ok && response.status !== 409) throw new Error('Unable to start match');
       setActiveMatchId(matchId);
       setChoosingPossession(null);
       setPendingPossession(null);
       await mutateMatches();
       await mutateActiveMatch();
-    } catch {
-      setErrorMessage('Unable to start reporting right now.');
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to start reporting right now.');
     } finally {
       setIsSubmitting(false);
     }
@@ -217,12 +259,13 @@ function AdminContent() {
     if (!activeMatchId) return;
     try {
       setIsSubmitting(true);
+      setErrorMessage(null);
       await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/undo`));
       resetComposer();
       await mutateActiveMatch();
       await mutateMatches();
-    } catch {
-      setErrorMessage('Unable to undo the last event.');
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to undo the last event.');
     } finally {
       setIsSubmitting(false);
     }
@@ -232,12 +275,13 @@ function AdminContent() {
     if (!activeMatchId) return;
     try {
       setIsSubmitting(true);
+      setErrorMessage(null);
       await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/end`));
       resetComposer();
       setActiveMatchId(null);
       await mutateMatches();
-    } catch {
-      setErrorMessage('Unable to end the match right now.');
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to end the match right now.');
     } finally {
       setIsSubmitting(false);
     }
@@ -250,6 +294,7 @@ function AdminContent() {
       (panel === 't2' && activeMatch.possession === 2);
     try {
       setIsSubmitting(true);
+      setErrorMessage(null);
       if (pendingSwitchOnly) {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/switch-possession`));
       } else if (isOffView && pendingTurnover) {
@@ -265,10 +310,39 @@ function AdminContent() {
       resetComposer();
       await mutateActiveMatch();
       await mutateMatches();
-    } catch {
-      setErrorMessage('Unable to save that action.');
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to save that action.');
     } finally {
       setIsSubmitting(false);
+    }
+  }
+
+  async function toggleReportingRound(roundKey: number, isEnabled: boolean) {
+    if (!token || !isSuperAdmin) return;
+
+    try {
+      setSavingRoundKey(roundKey);
+      setErrorMessage(null);
+      const response = await fetch(apiUrl(`/v1/super/reporting-rounds/${roundKey}`), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ is_enabled: isEnabled }),
+      });
+
+      if (!response.ok) throw new Error('Unable to update reporting access right now.');
+
+      await mutateReportingRounds();
+      await mutateMatches();
+      if (activeMatchId) {
+        await mutateActiveMatch();
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to update reporting access right now.');
+    } finally {
+      setSavingRoundKey(null);
     }
   }
 
@@ -328,7 +402,8 @@ function AdminContent() {
     (panel === 't1' && activeMatch.possession === 1) ||
     (panel === 't2' && activeMatch.possession === 2)
   );
-  const saveEnabled = !!activeMatch && panel !== 'log' && !isSubmitting && (
+  const activeMatchReportingLocked = !!activeMatch && !isSuperAdmin && !activeMatch.reporting_enabled;
+  const saveEnabled = !!activeMatch && panel !== 'log' && !isSubmitting && !activeMatchReportingLocked && (
     pendingSwitchOnly ||
     (isOffenseView && pendingTurnover) ||
     (isOffenseView && pendingTurnoverId !== null) ||
@@ -383,12 +458,20 @@ function AdminContent() {
             </button>
             <button
               onClick={() => setConfirmAction('end')}
-              disabled={isSubmitting}
+              disabled={isSubmitting || activeMatchReportingLocked}
               className="rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500 disabled:opacity-60"
             >
               End Match
             </button>
           </div>
+
+          {activeMatchReportingLocked && (
+            <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-400/10 px-4 py-3">
+              <Text className="text-sm text-amber-800 dark:text-amber-200">
+                {getReportingLabel(activeMatch.match_type)} reporting is locked. Pairings stay visible, but only the super admin can enable editing for this round.
+              </Text>
+            </div>
+          )}
 
           {/* Score header */}
           <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
@@ -476,7 +559,7 @@ function AdminContent() {
               <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
                 <button
                   onClick={() => setConfirmAction('undo')}
-                  disabled={isSubmitting || activeMatch.events.length === 0}
+                  disabled={isSubmitting || activeMatch.events.length === 0 || activeMatchReportingLocked}
                   className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
                 >
                   <RotateCcw className="h-4 w-4" /> Undo
@@ -513,6 +596,7 @@ function AdminContent() {
                     <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
                     <button
                       onClick={() => handlePlayerTap(player.id, 'scorer')}
+                      disabled={activeMatchReportingLocked}
                       className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
                         isScorer ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-green-100 dark:hover:bg-green-900/30'
                       }`}
@@ -521,6 +605,7 @@ function AdminContent() {
                     </button>
                     <button
                       onClick={() => handlePlayerTap(player.id, 'assister')}
+                      disabled={activeMatchReportingLocked}
                       className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
                         isAssister ? 'bg-sky-500 text-white ring-2 ring-sky-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-sky-100 dark:hover:bg-sky-900/30'
                       }`}
@@ -529,6 +614,7 @@ function AdminContent() {
                     </button>
                     <button
                       onClick={() => handlePlayerTap(player.id, 'turnover')}
+                      disabled={activeMatchReportingLocked}
                       className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
                         isTurnover ? 'bg-amber-500 text-white ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-amber-100 dark:hover:bg-amber-900/30'
                       }`}
@@ -541,6 +627,7 @@ function AdminContent() {
               {/* No-player turnover */}
               <button
                 onClick={activateTurnover}
+                disabled={activeMatchReportingLocked}
                 className={`w-full grid grid-cols-[1fr_48px_48px_48px] items-center px-4 py-2.5 transition text-left border-b border-gray-100 dark:border-slate-800 ${
                   pendingTurnover ? 'bg-amber-100 dark:bg-amber-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
                 }`}
@@ -554,6 +641,7 @@ function AdminContent() {
               {/* Switch possession */}
               <button
                 onClick={toggleSwitchOnly}
+                disabled={activeMatchReportingLocked}
                 className={`w-full flex items-center justify-between px-4 py-3 transition ${
                   pendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
                 }`}
@@ -571,7 +659,7 @@ function AdminContent() {
               <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
                 <button
                   onClick={() => setConfirmAction('undo')}
-                  disabled={isSubmitting || activeMatch.events.length === 0}
+                  disabled={isSubmitting || activeMatch.events.length === 0 || activeMatchReportingLocked}
                   className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
                 >
                   <RotateCcw className="h-4 w-4" /> Undo
@@ -604,6 +692,7 @@ function AdminContent() {
                     <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
                     <button
                       onClick={() => handlePlayerTap(player.id, 'block')}
+                      disabled={activeMatchReportingLocked}
                       className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
                         isBlock ? 'bg-violet-500 text-white ring-2 ring-violet-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-violet-100 dark:hover:bg-violet-900/30'
                       }`}
@@ -616,6 +705,7 @@ function AdminContent() {
               {/* Switch possession */}
               <button
                 onClick={toggleSwitchOnly}
+                disabled={activeMatchReportingLocked}
                 className={`w-full flex items-center justify-between px-4 py-3 transition ${
                   pendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
                 }`}
@@ -634,6 +724,7 @@ function AdminContent() {
   if (choosingPossession !== null) {
     const match = matches.find(m => m.id === choosingPossession);
     if (match) {
+      const reportingLocked = !isSuperAdmin && !match.reporting_enabled;
       return (
         <div className="min-h-screen px-4 py-4 md:px-0">
           <div className="mx-auto max-w-lg">
@@ -655,19 +746,28 @@ function AdminContent() {
               </button>
               <div className="text-lg font-semibold text-gray-900 dark:text-white">{match.t1_name} vs {match.t2_name}</div>
               <div className="text-sm text-gray-500 dark:text-slate-400 mt-1">{formatTime(match.time)} &bull; {match.field_name || 'Field pending'}</div>
+              <div className="mt-2 text-xs font-semibold uppercase tracking-[0.16em] text-gray-500 dark:text-slate-400">{getReportingLabel(match.match_type)}</div>
+
+              {reportingLocked && (
+                <div className="mt-4 rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-400/10 px-4 py-3">
+                  <Text className="text-sm text-amber-800 dark:text-amber-200">
+                    {getReportingLabel(match.match_type)} reporting is still locked by the super admin.
+                  </Text>
+                </div>
+              )}
 
               <div className="mt-6 text-sm font-medium text-gray-700 dark:text-slate-300">Who starts on offense?</div>
               <div className="mt-3 grid grid-cols-2 gap-3">
                 <button
                   onClick={() => requestStartReporting(match.id, 1)}
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || reportingLocked}
                   className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10 disabled:opacity-60"
                 >
                   {match.t1_name}
                 </button>
                 <button
                   onClick={() => requestStartReporting(match.id, 2)}
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || reportingLocked}
                   className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10 disabled:opacity-60"
                 >
                   {match.t2_name}
@@ -686,21 +786,46 @@ function AdminContent() {
   }
 
   // MATCH LIST VIEW
-  const reporterHeading = isPoc ? 'Team Reporting' : 'Match Reporting';
+  const reporterHeading = adminView === 'allow-reporting'
+    ? 'Allow Reporting'
+    : isPoc ? 'Team Reporting' : 'Start Reporting';
+  
 
   return (
     <div className="min-h-screen px-4 py-4 md:px-0">
       <div className="mx-auto max-w-3xl">
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
+          {isSuperAdmin && (
+            <div className="mb-4 grid grid-cols-2 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-950 p-1">
+              <button
+                onClick={() => setAdminView('reporting')}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  adminView === 'reporting'
+                    ? 'bg-amber-400 text-gray-900'
+                    : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-900'
+                }`}
+              >
+                Matches
+              </button>
+              <button
+                onClick={() => setAdminView('allow-reporting')}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  adminView === 'allow-reporting'
+                    ? 'bg-amber-400 text-gray-900'
+                    : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-900'
+                }`}
+              >
+                Permission
+              </button>
+            </div>
+          )}
+
           <div className="mb-4 flex items-center justify-between">
             <div>
-              <Text as="h1" className="text-xl font-semibold text-gray-900 dark:text-white">{reporterHeading}</Text>
-              <Text className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">
-                {isPoc ? 'Your team matches' : 'Upcoming and live matches'}
-              </Text>
+              <Text as="h1" className="text-l font-semibold text-gray-900 dark:text-white">{reporterHeading}</Text>
             </div>
             <div className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 dark:bg-slate-800 px-3 py-1 text-xs font-semibold tracking-wider text-gray-500 dark:text-slate-400 uppercase">
-              <Shield className="h-3 w-3" /> Volunteer
+              <Shield className="h-3 w-3" /> {isSuperAdmin ? 'Super' : 'Volunteer'}
             </div>
           </div>
 
@@ -710,12 +835,48 @@ function AdminContent() {
             </div>
           )}
 
-          <div className="space-y-2">
+          {adminView === 'allow-reporting' && isSuperAdmin ? (
+            <div className="space-y-3">
+              {reportingRoundsLoading && reportingRounds.length === 0 && (
+                <Text className="text-sm text-gray-400 dark:text-slate-500">Loading round settings...</Text>
+              )}
+              {reportingRounds.map(round => {
+                const saving = savingRoundKey === round.round_key;
+                return (
+                  <div
+                    key={round.round_key}
+                    className="flex items-center justify-between rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-3"
+                  >
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">{round.label}</div>
+                      <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                        {round.is_enabled ? 'Admins and POCs can report this round.' : 'Pairings stay visible, but reporting is locked.'}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => toggleReportingRound(round.round_key, !round.is_enabled)}
+                      disabled={saving}
+                      className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold transition disabled:opacity-60 ${
+                        round.is_enabled
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                          : 'bg-gray-200 text-gray-600 dark:bg-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {round.is_enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                      {round.is_enabled ? 'Enabled' : 'Locked'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2">
             {matches.length === 0 && <Text className="text-sm text-gray-400 dark:text-slate-500">No matches available right now.</Text>}
             {matches.map(match => {
               const status = getMatchStatus(match);
               const isLive = status === 'live';
               const isUpcoming = status === 'upcoming';
+              const canEditMatch = isSuperAdmin || match.reporting_enabled;
 
               return (
                 <div
@@ -726,6 +887,7 @@ function AdminContent() {
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">{match.t1_name} vs {match.t2_name}</div>
                       <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{formatTime(match.time)} &bull; {match.field_name || 'Field pending'}</div>
+                      <div className="mt-1 text-[10px] font-bold uppercase tracking-[0.16em] text-gray-500 dark:text-slate-500">{getReportingLabel(match.match_type)}</div>
                     </div>
                     <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wider uppercase ${
                       isLive ? 'bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-300'
@@ -737,6 +899,12 @@ function AdminContent() {
                     </span>
                   </div>
 
+                  {!canEditMatch && status !== 'ended' && (
+                    <div className="mt-3 rounded-lg border border-amber-300 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-400/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+                      {getReportingLabel(match.match_type)} reporting is locked until the super admin enables it.
+                    </div>
+                  )}
+
                   <div className="mt-3 flex gap-2">
                     {isLive && (
                       <button
@@ -744,9 +912,13 @@ function AdminContent() {
                           setActiveMatchId(match.id);
                           setPanel(match.possession === 1 ? 't1' : 't2');
                         }}
-                        className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-gray-900 transition hover:bg-amber-300"
+                        className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                          canEditMatch
+                            ? 'bg-amber-400 text-gray-900 hover:bg-amber-300'
+                            : 'border border-gray-200 dark:border-slate-600 text-gray-700 dark:text-slate-200 hover:bg-gray-100 dark:hover:bg-slate-700'
+                        }`}
                       >
-                        Resume Reporting
+                        {canEditMatch ? 'Resume Reporting' : 'View Match'}
                       </button>
                     )}
                     {isUpcoming && (
@@ -758,9 +930,10 @@ function AdminContent() {
                             setChoosingPossession(match.id);
                           }
                         }}
-                        className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-gray-900 transition hover:bg-amber-300"
+                        disabled={!canEditMatch}
+                        className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-gray-900 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500 dark:disabled:bg-slate-700 dark:disabled:text-slate-400"
                       >
-                        Start Reporting
+                        {canEditMatch ? 'Start Reporting' : 'Reporting Locked'}
                       </button>
                     )}
                     {status === 'ended' && (
@@ -775,7 +948,8 @@ function AdminContent() {
                 </div>
               );
             })}
-          </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

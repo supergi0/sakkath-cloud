@@ -1,37 +1,95 @@
 use sqlx::SqlitePool;
 
+fn hash_password(password: &str) -> Result<String, sqlx::Error> {
+    crate::helpers::auth::hash_password(password)
+        .map_err(|err| sqlx::Error::Configuration(format!("Failed to hash password: {err}").into()))
+}
+
 pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let pw_hash = "fc5e038d38a57032085441e7fe7010b0"; // MD5 of "helloworld"
+    let pw_hash = hash_password("helloworld")?;
 
     // -----------------------------------------------------------------------
     // TEAMS: 22 Open (IDs 1-22) + 10 Women (IDs 23-32) = 32 total
     // -----------------------------------------------------------------------
     let open_team_names = [
-        "Bangalore Bolts", "Chennai Challengers", "Mumbai Mavericks", "Delhi Dragons",
-        "Hyderabad Hawks", "Kolkata Knights", "Pune Panthers", "Ahmedabad Aces",
-        "Jaipur Jaguars", "Lucknow Lions", "Kochi Kings", "Goa Gladiators",
-        "Chandigarh Chargers", "Indore Infernos", "Nagpur Ninjas", "Vizag Vikings",
-        "Coimbatore Cosmos", "Mysore Mambas", "Surat Strikers", "Bhopal Blazers",
-        "Patna Pioneers", "Vadodara Vipers",
+        "Bangalore Bolts",
+        "Chennai Challengers",
+        "Mumbai Mavericks",
+        "Delhi Dragons",
+        "Hyderabad Hawks",
+        "Kolkata Knights",
+        "Pune Panthers",
+        "Ahmedabad Aces",
+        "Jaipur Jaguars",
+        "Lucknow Lions",
+        "Kochi Kings",
+        "Goa Gladiators",
+        "Chandigarh Chargers",
+        "Indore Infernos",
+        "Nagpur Ninjas",
+        "Vizag Vikings",
+        "Coimbatore Cosmos",
+        "Mysore Mambas",
+        "Surat Strikers",
+        "Bhopal Blazers",
+        "Patna Pioneers",
+        "Vadodara Vipers",
     ];
     let open_locations = [
-        "Bangalore", "Chennai", "Mumbai", "Delhi", "Hyderabad", "Kolkata",
-        "Pune", "Ahmedabad", "Jaipur", "Lucknow", "Kochi", "Goa",
-        "Chandigarh", "Indore", "Nagpur", "Vizag", "Coimbatore", "Mysore",
-        "Surat", "Bhopal", "Patna", "Vadodara",
+        "Bangalore",
+        "Chennai",
+        "Mumbai",
+        "Delhi",
+        "Hyderabad",
+        "Kolkata",
+        "Pune",
+        "Ahmedabad",
+        "Jaipur",
+        "Lucknow",
+        "Kochi",
+        "Goa",
+        "Chandigarh",
+        "Indore",
+        "Nagpur",
+        "Vizag",
+        "Coimbatore",
+        "Mysore",
+        "Surat",
+        "Bhopal",
+        "Patna",
+        "Vadodara",
     ];
     let women_team_names = [
-        "Bangalore Blaze", "Chennai Chargers", "Mumbai Meteors", "Delhi Divas",
-        "Hyderabad Hurricanes", "Kolkata Queens", "Pune Pythons", "Ahmedabad Angels",
-        "Jaipur Jewels", "Lucknow Legends",
+        "Bangalore Blaze",
+        "Chennai Chargers",
+        "Mumbai Meteors",
+        "Delhi Divas",
+        "Hyderabad Hurricanes",
+        "Kolkata Queens",
+        "Pune Pythons",
+        "Ahmedabad Angels",
+        "Jaipur Jewels",
+        "Lucknow Legends",
     ];
     let women_locations = [
-        "Bangalore", "Chennai", "Mumbai", "Delhi", "Hyderabad",
-        "Kolkata", "Pune", "Ahmedabad", "Jaipur", "Lucknow",
+        "Bangalore",
+        "Chennai",
+        "Mumbai",
+        "Delhi",
+        "Hyderabad",
+        "Kolkata",
+        "Pune",
+        "Ahmedabad",
+        "Jaipur",
+        "Lucknow",
     ];
 
     // Insert Open teams
-    for (i, (name, loc)) in open_team_names.iter().zip(open_locations.iter()).enumerate() {
+    for (i, (name, loc)) in open_team_names
+        .iter()
+        .zip(open_locations.iter())
+        .enumerate()
+    {
         let rank = i + 1;
         sqlx::query(
             "INSERT INTO teams (name, admin_id, division, location, init_rank) VALUES (?, NULL, 0, ?, ?)"
@@ -39,7 +97,11 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     // Insert Women teams
-    for (i, (name, loc)) in women_team_names.iter().zip(women_locations.iter()).enumerate() {
+    for (i, (name, loc)) in women_team_names
+        .iter()
+        .zip(women_locations.iter())
+        .enumerate()
+    {
         let rank = i + 1;
         sqlx::query(
             "INSERT INTO teams (name, admin_id, division, location, init_rank) VALUES (?, NULL, 1, ?, ?)"
@@ -50,12 +112,18 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // PLAYERS: 16 per team, looping through name lists
     // Open team IDs: 1-22, Women team IDs: 23-32
     // -----------------------------------------------------------------------
-    let open_first = ["Raj", "Amit", "Vikram", "Rohan", "Arjun", "Sanjay", "Karthik", "Nikhil",
-                      "Aditya", "Pranav", "Rahul", "Vivek", "Suresh", "Ganesh", "Mohan", "Ravi"];
-    let women_first = ["Priya", "Sneha", "Ananya", "Kavya", "Divya", "Meera", "Riya", "Neha",
-                       "Pooja", "Shruti", "Swati", "Nisha", "Aditi", "Isha", "Tara", "Kiara"];
-    let last_names = ["Kumar", "Patel", "Sharma", "Singh", "Reddy", "Rao", "Das", "Gupta",
-                      "Jain", "Mehta", "Bose", "Nair", "Iyer", "Pillai", "Chauhan", "Shah"];
+    let open_first = [
+        "Raj", "Amit", "Vikram", "Rohan", "Arjun", "Sanjay", "Karthik", "Nikhil", "Aditya",
+        "Pranav", "Rahul", "Vivek", "Suresh", "Ganesh", "Mohan", "Ravi",
+    ];
+    let women_first = [
+        "Priya", "Sneha", "Ananya", "Kavya", "Divya", "Meera", "Riya", "Neha", "Pooja", "Shruti",
+        "Swati", "Nisha", "Aditi", "Isha", "Tara", "Kiara",
+    ];
+    let last_names = [
+        "Kumar", "Patel", "Sharma", "Singh", "Reddy", "Rao", "Das", "Gupta", "Jain", "Mehta",
+        "Bose", "Nair", "Iyer", "Pillai", "Chauhan", "Shah",
+    ];
 
     let mut player_id: usize = 1;
     let mut batch: Vec<String> = Vec::new();
@@ -64,7 +132,7 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ($b:expr, $p:expr) => {
             if !$b.is_empty() {
                 let q = format!(
-                    "INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES {}",
+                    "INSERT INTO users (name, common_name, email, phone, dob, team_id, role, password_hash) VALUES {}",
                     $b.join(",")
                 );
                 sqlx::query(&q).execute($p).await?;
@@ -79,13 +147,25 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             let first = open_first[slot % 16];
             let last = last_names[(team_id + slot) % 16];
             let name = format!("{} {}", first, last);
-            let dob = if slot % 2 == 0 { "1995-03-15" } else { "1997-07-22" };
+            let dob = if slot % 2 == 0 {
+                "1995-03-15"
+            } else {
+                "1997-07-22"
+            };
             batch.push(format!(
-                "('{}', 'p{}@example.com', '+919876{:06}', '{}', {}, 2, '{}')",
-                name, player_id, player_id % 1000000, dob, team_id, pw_hash
+                "('{}', '{}', 'p{}@example.com', '+919876{:06}', '{}', {}, 2, '{}')",
+                name,
+                first,
+                player_id,
+                player_id % 1000000,
+                dob,
+                team_id,
+                pw_hash
             ));
             player_id += 1;
-            if batch.len() >= 50 { flush_batch!(batch, pool); }
+            if batch.len() >= 50 {
+                flush_batch!(batch, pool);
+            }
         }
     }
 
@@ -96,13 +176,25 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             let first = women_first[slot % 16];
             let last = last_names[(team_id + slot) % 16];
             let name = format!("{} {}", first, last);
-            let dob = if slot % 2 == 0 { "1996-05-10" } else { "1998-11-25" };
+            let dob = if slot % 2 == 0 {
+                "1996-05-10"
+            } else {
+                "1998-11-25"
+            };
             batch.push(format!(
-                "('{}', 'p{}@example.com', '+919876{:06}', '{}', {}, 2, '{}')",
-                name, player_id, player_id % 1000000, dob, team_id, pw_hash
+                "('{}', '{}', 'p{}@example.com', '+919876{:06}', '{}', {}, 2, '{}')",
+                name,
+                first,
+                player_id,
+                player_id % 1000000,
+                dob,
+                team_id,
+                pw_hash
             ));
             player_id += 1;
-            if batch.len() >= 50 { flush_batch!(batch, pool); }
+            if batch.len() >= 50 {
+                flush_batch!(batch, pool);
+            }
         }
     }
 
@@ -113,21 +205,24 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // ADMIN / POC USERS
     // -----------------------------------------------------------------------
     sqlx::query(
-        r#"INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES
-        ('Super Admin', 'super@sakkath.com', '+919000000000', '1985-01-01', NULL, 0, ?),
-        ('Admin One',   'admin1@sakkath.com', '+919000000001', '1988-05-15', NULL, 1, ?),
-        ('Admin Two',   'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#
-    ).bind(pw_hash).bind(pw_hash).bind(pw_hash).execute(pool).await?;
+        r#"INSERT INTO users (name, common_name, email, phone, dob, team_id, role, password_hash) VALUES
+        ('Super Admin', 'Super Admin', 'super@sakkath.com', '+919000000000', '1985-01-01', NULL, 0, ?),
+        ('Admin One', 'Admin One', 'admin1@sakkath.com', '+919000000001', '1988-05-15', NULL, 1, ?),
+        ('Admin Two', 'Admin Two', 'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#
+    ).bind(&pw_hash).bind(&pw_hash).bind(&pw_hash).execute(pool).await?;
 
     // POC per team (32 teams)
     let mut poc_batch: Vec<String> = Vec::new();
     for team_id in 1usize..=32 {
         poc_batch.push(format!(
-            "('POC Team {tid}', 'poc{tid}@sakkath.com', '+91900{tid:07}', '1992-03-10', {tid}, 3, '{pw}')",
+            "('POC Team {tid}', 'POC Team {tid}', 'poc{tid}@sakkath.com', '+91900{tid:07}', '1992-03-10', {tid}, 3, '{pw}')",
             tid = team_id, pw = pw_hash
         ));
     }
-    let poc_q = format!("INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES {}", poc_batch.join(","));
+    let poc_q = format!(
+        "INSERT INTO users (name, common_name, email, phone, dob, team_id, role, password_hash) VALUES {}",
+        poc_batch.join(",")
+    );
     sqlx::query(&poc_q).execute(pool).await?;
 
     // -----------------------------------------------------------------------
@@ -178,10 +273,7 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     ).execute(pool).await?;
 
     // Open R1 - not started (10v21, 11v22)
-    let open_upcoming: &[(i64, i64, i64)] = &[
-        (10, 21, 2),
-        (11, 22, 3),
-    ];
+    let open_upcoming: &[(i64, i64, i64)] = &[(10, 21, 2), (11, 22, 3)];
     for &(t1, t2, field) in open_upcoming {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (?, ?, ?, '2026-03-15 13:00:00', 0, 0, NULL, 1)"
@@ -189,11 +281,8 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     // Women R1 - completed matches
-    let women_completed: &[(i64, i64, i64, i64, i64)] = &[
-        (23, 28, 4, 15, 8),
-        (24, 29, 1, 13, 11),
-        (25, 30, 2, 15, 10),
-    ];
+    let women_completed: &[(i64, i64, i64, i64, i64)] =
+        &[(23, 28, 4, 15, 8), (24, 29, 1, 13, 11), (25, 30, 2, 15, 10)];
     for &(t1, t2, field, s1, s2) in women_completed {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, t1_score, t2_score, possession, type) VALUES (?, ?, ?, '2026-03-15 09:00:00', ?, ?, 3, 1)"
@@ -224,8 +313,10 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         (1, 2,  1, 1, '2026-03-15 09:18:00'),
         (2, 17, 2, 0, '2026-03-15 09:06:00'),
         (2, 18, 2, 1, '2026-03-15 09:06:00'),
-        (2, 17, 2, 0, '2026-03-15 09:14:00')"#
-    ).execute(pool).await?;
+        (2, 17, 2, 0, '2026-03-15 09:14:00')"#,
+    )
+    .execute(pool)
+    .await?;
 
     // -----------------------------------------------------------------------
     // ANNOUNCEMENTS
@@ -237,7 +328,9 @@ pub async fn populate_mock_data(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ('Round 1 Underway', 'Round 1 is in progress. 11 of 16 matches completed. Live matches on Field 1 and 3!', 1, '2026-03-20 23:59:59')"#
     ).execute(pool).await?;
 
-    tracing::info!("Seeded: 22 open teams, 10 women teams, 512 players, 16 R1 matches (11 done, 2 live, 3 upcoming)");
+    tracing::info!(
+        "Seeded: 22 open teams, 10 women teams, 512 players, 16 R1 matches (11 done, 2 live, 3 upcoming)"
+    );
 
     Ok(())
 }

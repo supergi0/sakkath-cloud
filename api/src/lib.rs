@@ -19,5 +19,7 @@ pub struct AppState {
 }
 
 pub fn build_api_only_app(app_state: AppState) -> Router {
-    Router::new().nest("/v1", routes::api_routes()).with_state(app_state)
+    Router::new()
+        .nest("/v1", routes::api_routes())
+        .with_state(app_state)
 }

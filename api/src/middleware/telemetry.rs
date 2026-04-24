@@ -1,9 +1,4 @@
-use axum::{
-    body::Body,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, http::Request, middleware::Next, response::Response};
 
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
@@ -27,6 +22,11 @@ pub async fn telemetry_middleware(request: Request<Body>, next: Next) -> Respons
     let ip_address = extract_client_ip(request.headers());
 
     let response = next.run(request).await;
-    crate::telemetry::record_request(method, path, ip_address, i64::from(response.status().as_u16()));
+    crate::telemetry::record_request(
+        method,
+        path,
+        ip_address,
+        i64::from(response.status().as_u16()),
+    );
     response
 }

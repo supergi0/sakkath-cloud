@@ -43,7 +43,9 @@ impl RunConfig {
         }
 
         let seed = 0x5A_CC_A7_u64 ^ itr.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let log_dir = Self::repo_root().join("logs").join(format!("test_tournament_itr{itr}"));
+        let log_dir = Self::repo_root()
+            .join("logs")
+            .join(format!("test_tournament_itr{itr}"));
 
         Ok(Self { itr, seed, log_dir })
     }
@@ -60,9 +62,9 @@ impl RunConfig {
     }
 
     pub(crate) fn scenario_seed(&self, scenario: &str) -> u64 {
-        scenario
-            .bytes()
-            .fold(self.seed, |seed, byte| seed.rotate_left(5) ^ u64::from(byte))
+        scenario.bytes().fold(self.seed, |seed, byte| {
+            seed.rotate_left(5) ^ u64::from(byte)
+        })
     }
 }
 

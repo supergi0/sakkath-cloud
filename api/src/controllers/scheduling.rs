@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::HeaderMap,
-    Json,
 };
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
@@ -192,7 +192,12 @@ struct FieldSlot {
     name: String,
 }
 
-pub async fn auto_advance_division_if_ready(db: &sqlx::SqlitePool, division: i64) -> Option<String> {
+type MoveMatchRecord = (Option<String>, Option<i64>, Option<i64>, i64, i64);
+
+pub async fn auto_advance_division_if_ready(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Option<String> {
     let total_rounds = if division == 0 {
         crate::OPEN_ROUNDS
     } else {
@@ -213,9 +218,10 @@ pub async fn auto_advance_division_if_ready(db: &sqlx::SqlitePool, division: i64
 
         let (total, completed) = stats;
 
-        if total == 0 {
-            if round == 1 || {
-                let prev: (i64, i64) = sqlx::query_as(
+        if total == 0
+            && (round == 1
+                || {
+                    let prev: (i64, i64) = sqlx::query_as(
                     r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
                        FROM matches m JOIN teams t ON m.t1_id = t.id
                        WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
@@ -225,13 +231,19 @@ pub async fn auto_advance_division_if_ready(db: &sqlx::SqlitePool, division: i64
                 .fetch_one(db)
                 .await
                 .unwrap_or((0, 0));
-                prev.0 > 0 && prev.0 == prev.1
-            } {
-                if generate_next_round_internal(db, division, round).await.is_ok() {
-                    return Some(format!("generated_round_{round}"));
-                }
-                return None;
+                    prev.0 > 0 && prev.0 == prev.1
+                })
+        {
+            if generate_next_round_internal(db, division, round)
+                .await
+                .is_ok()
+            {
+                return Some(format!("generated_round_{round}"));
             }
+            return None;
+        }
+
+        if total == 0 {
             return None;
         }
 
@@ -240,7 +252,10 @@ pub async fn auto_advance_division_if_ready(db: &sqlx::SqlitePool, division: i64
         }
     }
 
-    if create_playoffs_if_needed(db, division).await.unwrap_or(false) {
+    if create_playoffs_if_needed(db, division)
+        .await
+        .unwrap_or(false)
+    {
         return Some("generated_playoff_1".to_string());
     }
 
@@ -263,10 +278,10 @@ pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
         .await
         .unwrap_or((0,));
 
-        if match_count.0 == 0 {
-            if let Err(err) = generate_r1_from_seeding(db, division).await {
-                tracing::error!("Failed to generate R1 for division {}: {}", division, err);
-            }
+        if match_count.0 == 0
+            && let Err(err) = generate_r1_from_seeding(db, division).await
+        {
+            tracing::error!("Failed to generate R1 for division {}: {}", division, err);
         }
     }
 }
@@ -437,12 +452,15 @@ pub async fn get_schedule_matches(
         .to_ascii_lowercase();
     let should_cache = status_key == "upcoming" || status_key == "done";
 
-    if should_cache {
-        if let Some(cached) =
-            cache::get_schedule::<Vec<ScheduleMatch>>(division, params.round, Some(status_key.as_str())).await
-        {
-            return Json(cached);
-        }
+    if should_cache
+        && let Some(cached) = cache::get_schedule::<Vec<ScheduleMatch>>(
+            division,
+            params.round,
+            Some(status_key.as_str()),
+        )
+        .await
+    {
+        return Json(cached);
     }
 
     let mut query = String::from(
@@ -506,7 +524,9 @@ pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<Sch
     })
 }
 
-pub async fn get_schedule_teams(State(state): State<crate::AppState>) -> Json<ScheduleTeamsResponse> {
+pub async fn get_schedule_teams(
+    State(state): State<crate::AppState>,
+) -> Json<ScheduleTeamsResponse> {
     let teams = sqlx::query_as::<_, ScheduleGridTeam>(
         r#"SELECT id, name, abbreviation, division, small_logo
            FROM teams
@@ -555,7 +575,10 @@ pub async fn update_schedule_row(
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
 
-    for sibling in rows.iter().filter(|candidate| candidate.day_key == row.day_key && candidate.key != row.key) {
+    for sibling in rows
+        .iter()
+        .filter(|candidate| candidate.day_key == row.day_key && candidate.key != row.key)
+    {
         if new_start_at < sibling.end_at && new_end_at > sibling.start_at {
             return Err(axum::http::StatusCode::CONFLICT);
         }
@@ -578,7 +601,10 @@ pub async fn update_schedule_row(
     let query = format!(
         "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND type = ? AND time = ? AND field_id IN ({placeholders})"
     );
-    let mut update_query = sqlx::query(&query).bind(&new_time).bind(row.match_type).bind(&old_time);
+    let mut update_query = sqlx::query(&query)
+        .bind(&new_time)
+        .bind(row.match_type)
+        .bind(&old_time);
     for field_id in field_ids {
         update_query = update_query.bind(field_id);
     }
@@ -608,14 +634,15 @@ pub async fn move_schedule_match(
         .ok_or(axum::http::StatusCode::NOT_FOUND)?;
 
     let fields = fetch_field_slots(&state.db).await;
-    let field_index = usize::try_from(payload.field_index).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+    let field_index =
+        usize::try_from(payload.field_index).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
     let target_field = fields
         .iter()
         .find(|field| field.label == format!("G{field_index}"))
         .cloned()
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
 
-    let moving_match: Option<(Option<String>, Option<i64>, Option<i64>, i64, i64)> = sqlx::query_as(
+    let moving_match: Option<MoveMatchRecord> = sqlx::query_as(
         r#"SELECT m.time, m.field_id, m.possession, m.type, t.division
            FROM matches m
            JOIN teams t ON t.id = m.t1_id
@@ -665,7 +692,10 @@ pub async fn move_schedule_match(
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some((occupant_id, occupant_possession, occupant_type, occupant_division)) = occupant {
-        if occupant_possession.is_some() || occupant_type != match_type || occupant_division != division {
+        if occupant_possession.is_some()
+            || occupant_type != match_type
+            || occupant_division != division
+        {
             return Err(axum::http::StatusCode::CONFLICT);
         }
 
@@ -680,13 +710,15 @@ pub async fn move_schedule_match(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
-    sqlx::query("UPDATE matches SET time = ?, field_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(&target_time)
-        .bind(target_field.id)
-        .bind(match_id)
-        .execute(&state.db)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query(
+        "UPDATE matches SET time = ?, field_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(&target_time)
+    .bind(target_field.id)
+    .bind(match_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     cache::invalidate_all().await;
 
@@ -695,8 +727,11 @@ pub async fn move_schedule_match(
 
 pub async fn generate_next_round(
     State(state): State<crate::AppState>,
+    headers: HeaderMap,
     Path(division): Path<i64>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    verify_admin(&state, &headers).await?;
+
     let total_rounds = if division == 0 {
         crate::OPEN_ROUNDS
     } else {
@@ -790,8 +825,16 @@ pub async fn generate_next_round(
 
 pub async fn check_and_populate_gates(
     State(state): State<crate::AppState>,
+    headers: HeaderMap,
     Path(division): Path<i64>,
 ) -> Json<serde_json::Value> {
+    if verify_admin(&state, &headers).await.is_err() {
+        return Json(serde_json::json!({
+            "action": "forbidden",
+            "next_gate": "unauthorized"
+        }));
+    }
+
     let total_rounds = if division == 0 {
         crate::OPEN_ROUNDS
     } else {
@@ -811,9 +854,10 @@ pub async fn check_and_populate_gates(
         .unwrap_or((0, 0));
 
         let (total, completed) = stats;
-        if total == 0 {
-            if round == 1 || {
-                let prev: (i64, i64) = sqlx::query_as(
+        if total == 0
+            && (round == 1
+                || {
+                    let prev: (i64, i64) = sqlx::query_as(
                     r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
                        FROM matches m JOIN teams t ON m.t1_id = t.id
                        WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
@@ -823,18 +867,18 @@ pub async fn check_and_populate_gates(
                 .fetch_one(&state.db)
                 .await
                 .unwrap_or((0, 0));
-                prev.0 > 0 && prev.0 == prev.1
-            } {
-                let _ = generate_next_round_internal(&state.db, division, round).await;
-                return Json(serde_json::json!({
-                    "action": format!("generated_round_{round}"),
-                    "next_gate": if round < total_rounds {
-                        format!("round_{}_completion", round)
-                    } else {
-                        "playoff_1_generation".to_string()
-                    }
-                }));
-            }
+                    prev.0 > 0 && prev.0 == prev.1
+                })
+        {
+            let _ = generate_next_round_internal(&state.db, division, round).await;
+            return Json(serde_json::json!({
+                "action": format!("generated_round_{round}"),
+                "next_gate": if round < total_rounds {
+                    format!("round_{}_completion", round)
+                } else {
+                    "playoff_1_generation".to_string()
+                }
+            }));
         }
 
         if total > 0 && completed < total {
@@ -872,6 +916,26 @@ async fn generate_next_round_internal(
     }
 
     insert_pairings_into_slots(db, division, round, &pairings).await
+}
+
+async fn verify_admin(
+    state: &crate::AppState,
+    headers: &HeaderMap,
+) -> Result<(), axum::http::StatusCode> {
+    let email = extract_email(headers)?;
+
+    let user: Option<(i64,)> =
+        sqlx::query_as("SELECT role FROM users WHERE email = ? AND deleted_at IS NULL")
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    match user.map(|row| row.0) {
+        Some(0 | 1) => Ok(()),
+        Some(_) => Err(axum::http::StatusCode::FORBIDDEN),
+        None => Err(axum::http::StatusCode::UNAUTHORIZED),
+    }
 }
 
 pub async fn get_early_fixtures(
@@ -923,7 +987,11 @@ pub async fn get_early_fixtures(
         }
     }
 
-    for team in standings.iter().skip(2).take(standings.len().saturating_sub(4)) {
+    for team in standings
+        .iter()
+        .skip(2)
+        .take(standings.len().saturating_sub(4))
+    {
         teams_waiting.push(team.team_id);
     }
 
@@ -933,7 +1001,10 @@ pub async fn get_early_fixtures(
     }))
 }
 
-async fn create_playoffs_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result<bool, sqlx::Error> {
+async fn create_playoffs_if_needed(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<bool, sqlx::Error> {
     let existing_playoffs: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL",
     )
@@ -990,7 +1061,10 @@ async fn fetch_completed_playoff_results(
         .collect())
 }
 
-async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result<bool, sqlx::Error> {
+async fn create_finals_if_needed(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<bool, sqlx::Error> {
     let finals_existing: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1002 AND m.deleted_at IS NULL",
     )
@@ -1018,7 +1092,8 @@ async fn create_finals_if_needed(db: &sqlx::SqlitePool, division: i64) -> Result
 
     let sorted = sorting::get_sorted_standings(db, division).await;
     let playoff_results = fetch_completed_playoff_results(db, division).await?;
-    let final_pairings = rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
+    let final_pairings =
+        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
     if final_pairings.is_empty() {
         return Ok(false);
     }
@@ -1035,14 +1110,11 @@ async fn insert_pairings_into_slots(
 ) -> Result<(), sqlx::Error> {
     let slots = get_slot_assignments(db, division, match_type).await?;
     if pairings.len() > slots.len() {
-        return Err(sqlx::Error::Protocol(
-            format!(
-                "not enough fixed schedule slots for division {division} type {match_type}: {} pairings for {} slots",
-                pairings.len(),
-                slots.len()
-            )
-            .into(),
-        ));
+        return Err(sqlx::Error::Protocol(format!(
+            "not enough fixed schedule slots for division {division} type {match_type}: {} pairings for {} slots",
+            pairings.len(),
+            slots.len()
+        )));
     }
 
     for (pairing, (field_id, start_time)) in pairings.iter().zip(slots.iter()) {
@@ -1082,7 +1154,10 @@ async fn get_slot_assignments(
                 .iter()
                 .find(|field| field.label == format!("G{}", slot.field_index))
                 .ok_or_else(|| sqlx::Error::Protocol("missing field mapping for slot".into()))?;
-            slots.push((field.id, row.start_at.format("%Y-%m-%d %H:%M:%S").to_string()));
+            slots.push((
+                field.id,
+                row.start_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            ));
         }
     }
     Ok(slots)
@@ -1122,9 +1197,15 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     rows
 }
 
-fn build_swiss_rows(day_key: &'static str, day_label: &'static str, date: NaiveDate, round: i64) -> Vec<RowTemplate> {
+fn build_swiss_rows(
+    day_key: &'static str,
+    day_label: &'static str,
+    date: NaiveDate,
+    round: i64,
+) -> Vec<RowTemplate> {
     let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
-    let round_offset = Duration::minutes(round_offset(round) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
+    let round_offset =
+        Duration::minutes(round_offset(round) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
 
     let mut rows = Vec::new();
     for row_index in 0..4 {
@@ -1150,12 +1231,19 @@ fn build_swiss_rows(day_key: &'static str, day_label: &'static str, date: NaiveD
     rows
 }
 
-fn build_playoff_rows(day_key: &'static str, day_label: &'static str, date: NaiveDate) -> Vec<RowTemplate> {
+fn build_playoff_rows(
+    day_key: &'static str,
+    day_label: &'static str,
+    date: NaiveDate,
+) -> Vec<RowTemplate> {
     let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
     let mut rows = Vec::new();
 
     for row_index in 0..4 {
-        let start_at = base + Duration::minutes((row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
+        let start_at = base
+            + Duration::minutes(
+                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
+            );
         let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
         rows.push(RowTemplate {
             key: format!("{day_key}-p1-{}", row_suffix(row_index)),
@@ -1173,10 +1261,13 @@ fn build_playoff_rows(day_key: &'static str, day_label: &'static str, date: Naiv
         });
     }
 
-    let playoff_two_base = base + Duration::minutes(4 * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
+    let playoff_two_base =
+        base + Duration::minutes(4 * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
     for row_index in 0..4 {
         let start_at = playoff_two_base
-            + Duration::minutes((row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
+            + Duration::minutes(
+                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
+            );
         let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
         rows.push(RowTemplate {
             key: format!("{day_key}-p2-{}", row_suffix(row_index)),
@@ -1367,14 +1458,18 @@ async fn build_schedule_rank_snapshots(
             if row.match_type == 1002 {
                 needed_final_snapshots.insert(slot.division);
             } else {
-                needed_snapshots.insert((slot.division, standings_round_for_match_type(slot.division, row.match_type)));
+                needed_snapshots.insert((
+                    slot.division,
+                    standings_round_for_match_type(slot.division, row.match_type),
+                ));
             }
         }
     }
 
     let mut snapshots = HashMap::new();
     for (division, standings_round) in needed_snapshots {
-        let standings = sorting::get_sorted_standings_through_round(db, division, standings_round).await;
+        let standings =
+            sorting::get_sorted_standings_through_round(db, division, standings_round).await;
         let ranks = standings
             .into_iter()
             .enumerate()
@@ -1400,12 +1495,11 @@ async fn build_schedule_rank_snapshots(
 }
 
 async fn fetch_field_slots(db: &sqlx::SqlitePool) -> Vec<FieldSlot> {
-    let field_rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, name FROM fields ORDER BY id ASC LIMIT 4",
-    )
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    let field_rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM fields ORDER BY id ASC LIMIT 4")
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
 
     let mut fields = Vec::new();
     for index in 0..FIELD_COUNT {
@@ -1422,7 +1516,7 @@ async fn fetch_field_slots(db: &sqlx::SqlitePool) -> Vec<FieldSlot> {
 
 async fn fetch_grid_matches(db: &sqlx::SqlitePool) -> Vec<ScheduleGridMatchRecord> {
     sqlx::query_as::<_, ScheduleGridMatchRecord>(
-                r#"SELECT m.id, m.t1_id, m.t2_id, t1.division as division,
+        r#"SELECT m.id, m.t1_id, m.t2_id, t1.division as division,
                              m.t1_score, m.t2_score,
                              m.field_id, COALESCE(m.time, '') as time,
                m.possession, m.stream_url, m.type as match_type
@@ -1444,7 +1538,8 @@ fn materialize_grid(
     rank_snapshots: &HashMap<(i64, i64), HashMap<i64, i64>>,
 ) -> Vec<ScheduleGridRow> {
     let mut exact_matches = HashMap::new();
-    let mut fallback_matches: HashMap<(i64, i64), VecDeque<ScheduleGridMatchRecord>> = HashMap::new();
+    let mut fallback_matches: HashMap<(i64, i64), VecDeque<ScheduleGridMatchRecord>> =
+        HashMap::new();
 
     for record in matches {
         if let Some(field_id) = record.field_id {
@@ -1464,12 +1559,18 @@ fn materialize_grid(
             let field = fields
                 .iter()
                 .find(|candidate| candidate.label == format!("G{field_index}"));
-            let slot_template = row.slots.iter().find(|slot| slot.field_index == field_index);
+            let slot_template = row
+                .slots
+                .iter()
+                .find(|slot| slot.field_index == field_index);
             let rank_snapshot_key = slot_template.map(|slot| {
                 if row.match_type == 1002 {
                     (slot.division, 1002)
                 } else {
-                    (slot.division, standings_round_for_match_type(slot.division, row.match_type))
+                    (
+                        slot.division,
+                        standings_round_for_match_type(slot.division, row.match_type),
+                    )
                 }
             });
 
@@ -1503,7 +1604,9 @@ fn materialize_grid(
             cells.push(ScheduleGridCell {
                 field_index: field_index as i64,
                 field_label: format!("G{field_index}"),
-                field_name: field.map(|item| item.name.clone()).unwrap_or_else(|| format!("G{field_index}")),
+                field_name: field
+                    .map(|item| item.name.clone())
+                    .unwrap_or_else(|| format!("G{field_index}")),
                 slot_code: slot_template.map(|slot| slot.slot_code.clone()),
                 division: slot_template.map(|slot| slot.division),
                 match_type: slot_template.map(|_| row.match_type),
@@ -1525,7 +1628,9 @@ fn materialize_grid(
                         _ => None,
                     }
                 }),
-                stream_url: matched.as_ref().and_then(|record| record.stream_url.clone()),
+                stream_url: matched
+                    .as_ref()
+                    .and_then(|record| record.stream_url.clone()),
                 possession: matched.as_ref().and_then(|record| record.possession),
                 status,
                 clickable,
@@ -1597,19 +1702,22 @@ async fn verify_super(
     headers: &HeaderMap,
 ) -> Result<(), axum::http::StatusCode> {
     let email = extract_email(headers)?;
-    let user: Option<(i64,)> = sqlx::query_as(
-        "SELECT role FROM users WHERE email = ? AND deleted_at IS NULL",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user: Option<(i64,)> =
+        sqlx::query_as("SELECT role FROM users WHERE email = ? AND deleted_at IS NULL")
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if user.ok_or(axum::http::StatusCode::FORBIDDEN)?.0 != 0 {
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
 
     Ok(())
+}
+
+fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> {
+    crate::helpers::auth::extract_email(headers)
 }
 
 #[cfg(test)]
@@ -1634,8 +1742,14 @@ mod tests {
                 }
             }
 
-            assert_eq!(open_slots, 11, "round {round} should have 11 open swiss slots");
-            assert_eq!(women_slots, 5, "round {round} should have 5 women swiss slots");
+            assert_eq!(
+                open_slots, 11,
+                "round {round} should have 11 open swiss slots"
+            );
+            assert_eq!(
+                women_slots, 5,
+                "round {round} should have 5 women swiss slots"
+            );
         }
     }
 
@@ -1685,29 +1799,13 @@ mod tests {
                 .flat_map(|row| row.slots.iter().map(|slot| slot.division))
                 .collect();
 
-            assert_eq!(slot_divisions.len(), 16, "round {round} should expose 16 total swiss slots");
+            assert_eq!(
+                slot_divisions.len(),
+                16,
+                "round {round} should expose 16 total swiss slots"
+            );
             assert!(slot_divisions[..11].iter().all(|division| *division == 0));
             assert!(slot_divisions[11..].iter().all(|division| *division == 1));
         }
     }
-
-}
-
-fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> {
-    let auth_header = headers.get("Authorization").and_then(|header| header.to_str().ok());
-    let token = match auth_header {
-        Some(value) if value.starts_with("Bearer ") => value.trim_start_matches("Bearer "),
-        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
-    };
-
-    let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "default-secret-change-in-production".to_string());
-    let token_data = jsonwebtoken::decode::<crate::controllers::user::Claims>(
-        token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_ref()),
-        &jsonwebtoken::Validation::default(),
-    )
-    .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
-
-    Ok(token_data.claims.email)
 }

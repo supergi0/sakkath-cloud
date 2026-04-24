@@ -1,14 +1,14 @@
 'use client';
 
 import Image from 'next/image';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ExternalLink, GripVertical, Shield, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { ChevronDown, ExternalLink, GripVertical, Shield, X, Clock } from 'lucide-react';
 
 import { useAuth } from '../auth-provider';
 import { Text } from '../components/Text';
 import { Toast } from '../components/Toast';
 import { apiUrl } from '../lib/api';
-import { getTeamAbbreviation } from '../lib/team-name';
+
 
 type CellStatus = 'empty' | 'upcoming' | 'live' | 'done';
 
@@ -276,6 +276,19 @@ export default function SchedulePage() {
   const [selectedCell, setSelectedCell] = useState<{ row: ScheduleGridRow; cell: ScheduleGridCell } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [statusLabelCellKey, setStatusLabelCellKey] = useState<string | null>(null);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [showTimings, setShowTimings] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  const toggleTimings = useCallback(() => {
+    const nextState = !showTimings;
+    setShowTimings(nextState);
+    if (scrollContainerRef.current) {
+      setTimeout(() => {
+        scrollContainerRef.current?.scrollTo({ left: 0, behavior: 'smooth' });
+      }, 50); // slight delay to allow the layout reflow to begin
+    }
+  }, [showTimings]);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -447,9 +460,9 @@ export default function SchedulePage() {
     const hasMatch = cell.match_id !== null;
     const interactive = Boolean(cell.slot_code);
     const draggable = Boolean(
-      isSuperAdmin && hasMatch && cell.movable && cell.division !== null && cell.match_type !== null,
+      isSuperAdmin && isEditMode && hasMatch && cell.movable && cell.division !== null && cell.match_type !== null,
     );
-    const droppable = isSuperAdmin && canDropIntoCell(cell);
+    const droppable = isSuperAdmin && isEditMode && canDropIntoCell(cell);
     const stageLabel = getStageLabel(cell);
     const seedLabel = getSeedLabel(cell);
     const cellKey = `${row.key}-${cell.field_index}`;
@@ -457,8 +470,7 @@ export default function SchedulePage() {
     const t2Id = cell.data?.[1] ?? null;
     const t1Team = t1Id !== null ? teamsById[t1Id] : undefined;
     const t2Team = t2Id !== null ? teamsById[t2Id] : undefined;
-    const t1Short = t1Team ? getTeamAbbreviation(t1Team.name, t1Team.abbreviation) : '';
-    const t2Short = t2Team ? getTeamAbbreviation(t2Team.name, t2Team.abbreviation) : '';
+
     const t1Score = cell.data?.[3] ?? 0;
     const t2Score = cell.data?.[4] ?? 0;
 
@@ -475,7 +487,7 @@ export default function SchedulePage() {
     return (
       <td
         key={`${row.key}-${cell.field_index}`}
-        className="w-[92px] border-r border-t border-gray-200 p-0 align-top dark:border-slate-700 sm:w-[104px]"
+        className="border-t border-gray-200 p-0.5 align-top leading-tight dark:border-slate-700 sm:p-1"
         onDragOver={(event) => {
           if (droppable) {
             event.preventDefault();
@@ -514,37 +526,17 @@ export default function SchedulePage() {
               setSelectedCell({ row, cell });
             }
           }}
-          className={`flex h-full min-h-[88px] flex-col justify-between rounded-none border-0 px-1 py-1.5 transition sm:px-1.5 ${className} ${
+          className={`flex h-full min-h-[76px] flex-col justify-between rounded-md border px-1 py-1 transition sm:min-h-[84px] sm:px-1.5 sm:py-1.5 ${className} ${
             interactive ? 'cursor-pointer hover:shadow-sm' : ''
           } ${droppable ? 'ring-2 ring-sky-500/60' : ''}`}
         >
           {cell.slot_code ? (
-            <div className="flex items-start justify-between gap-2">
+            <div className="flex items-start justify-between gap-1 overflow-hidden">
               <div className="min-w-0">
-                <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] sm:text-[11px]">{stageLabel}</p>
+                <p className="truncate text-[9px] font-bold uppercase tracking-wider sm:text-[10px]">{stageLabel}</p>
               </div>
-              <div className="relative flex shrink-0 items-center gap-1.5">
+              <div className="relative flex shrink-0 items-center justify-end">
                 {draggable ? <GripVertical className="h-4 w-4 shrink-0 text-gray-400 dark:text-slate-500" /> : null}
-                {hasMatch ? (
-                  <>
-                    <button
-                      type="button"
-                      aria-label={`Show ${getStatusLabel(cell.status)} status`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setStatusLabelCellKey((current) => (current === cellKey ? null : cellKey));
-                      }}
-                      className="flex h-4 w-4 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70"
-                    >
-                      <span className={`h-2.5 w-2.5 rounded-full ${getStatusDotClass(cell.status)}`} />
-                    </button>
-                    {statusLabelCellKey === cellKey ? (
-                      <span className="absolute right-0 top-full z-10 mt-1 whitespace-nowrap rounded-md bg-slate-950 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-white shadow-lg dark:bg-slate-100 dark:text-slate-950">
-                        {getStatusLabel(cell.status)}
-                      </span>
-                    ) : null}
-                  </>
-                ) : null}
               </div>
             </div>
           ) : null}
@@ -552,26 +544,44 @@ export default function SchedulePage() {
           {hasMatch ? (
             <div className="mt-1.5 space-y-1.5">
               <div className="space-y-1.5">
-                <div className="flex min-w-0 items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <div className="flex shrink items-center gap-1 overflow-hidden">
                     <InlineTeamLogo name={t1Team?.name ?? null} logo={t1Team?.small_logo ?? null} />
-                    <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t1Short}</p>
                   </div>
-                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{t1Score}</span>
+                  <span className="shrink-0 text-[12px] font-bold leading-none tabular-nums sm:text-[13px]">{t1Score}</span>
                 </div>
-                <div className="flex min-w-0 items-center justify-between gap-1.5">
-                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <div className="flex shrink items-center gap-1 overflow-hidden">
                     <InlineTeamLogo name={t2Team?.name ?? null} logo={t2Team?.small_logo ?? null} />
-                    <p className="min-w-0 flex-1 truncate text-[14px] font-semibold leading-tight sm:text-[15px]">{t2Short}</p>
                   </div>
-                  <span className="shrink-0 text-[14px] font-semibold leading-none tabular-nums sm:text-[15px]">{t2Score}</span>
+                  <span className="shrink-0 text-[12px] font-bold leading-none tabular-nums sm:text-[13px]">{t2Score}</span>
                 </div>
               </div>
-              <div className="space-y-0.5 text-[10px] uppercase tracking-[0.12em]">
-                {seedLabel ? (
-                  <p className="text-[11px] font-semibold tracking-[0.1em] text-gray-500 dark:text-slate-400 sm:text-[12px]">{seedLabel}</p>
-                ) : null}
-                {movingMatchId === cell.match_id ? <p className="text-[9px]">Saving</p> : null}
+              <div className="flex items-end justify-between gap-1">
+                <div className="min-w-0 text-[9px] uppercase tracking-wider overflow-hidden">
+                  {seedLabel ? (
+                    <p className="truncate font-semibold text-gray-500 dark:text-slate-400 sm:text-[10px]">{seedLabel}</p>
+                  ) : null}
+                  {movingMatchId === cell.match_id ? <p className="text-[9px]">Saving</p> : null}
+                </div>
+                <div className="relative flex shrink-0 items-center">
+                  <button
+                    type="button"
+                    aria-label={`Show ${getStatusLabel(cell.status)} status`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setStatusLabelCellKey((current) => (current === cellKey ? null : cellKey));
+                    }}
+                    className="flex h-4 w-4 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70"
+                  >
+                    <span className={`h-2.5 w-2.5 rounded-full ${getStatusDotClass(cell.status)}`} />
+                  </button>
+                  {statusLabelCellKey === cellKey ? (
+                    <span className="absolute bottom-full right-0 z-10 mb-1 whitespace-nowrap rounded-md bg-slate-950 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-white shadow-lg dark:bg-slate-100 dark:text-slate-950">
+                      {getStatusLabel(cell.status)}
+                    </span>
+                  ) : null}
+                </div>
               </div>
             </div>
           ) : cell.slot_code ? (
@@ -607,10 +617,40 @@ export default function SchedulePage() {
     <div className="bg-gray-100 dark:bg-slate-950">
       <div className="sticky top-14 z-30 bg-white shadow-sm dark:bg-slate-900 md:static md:shadow-none">
         <div className="px-4 py-4 sm:mx-auto sm:max-w-7xl sm:px-4">
-          <div className="flex items-center justify-between gap-3">
-            <Text as="h1" variant="primary" className="text-xl">
-              Schedule
-            </Text>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <Text as="h1" variant="primary" className="text-xl">
+                Schedule
+              </Text>
+              <button
+                type="button"
+                onClick={toggleTimings}
+                className="mt-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-sky-600 transition hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300 sm:text-xs"
+              >
+                <Clock className="h-3.5 w-3.5" />
+                <span className="flex items-center">
+                  {showTimings ? (
+                    <>
+                      Hide Timings
+                      <span className="ml-1.5 flex tracking-[-0.1em]">
+                        <span className="animate-[pulse-seq_2.5s_infinite_0.8s] opacity-30">&lt;</span>
+                        <span className="animate-[pulse-seq_2.5s_infinite_0.4s] opacity-30">&lt;</span>
+                        <span className="animate-[pulse-seq_2.5s_infinite_0s] opacity-30">&lt;</span>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      Show Timings
+                      <span className="ml-1.5 flex tracking-[-0.1em]">
+                        <span className="animate-[pulse-seq_2.5s_infinite_0s] opacity-30">&gt;</span>
+                        <span className="animate-[pulse-seq_2.5s_infinite_0.4s] opacity-30">&gt;</span>
+                        <span className="animate-[pulse-seq_2.5s_infinite_0.8s] opacity-30">&gt;</span>
+                      </span>
+                    </>
+                  )}
+                </span>
+              </button>
+            </div>
             <div className="flex items-center gap-2">
               <div className="relative w-[148px] shrink-0 sm:w-[160px]">
                 <select
@@ -627,10 +667,18 @@ export default function SchedulePage() {
                 <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
               </div>
               {isSuperAdmin ? (
-                <div className="inline-flex items-center gap-2 rounded bg-sky-50 px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
+                <button
+                  type="button"
+                  onClick={() => setIsEditMode(!isEditMode)}
+                  className={`inline-flex items-center gap-2 rounded px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] transition ${
+                    isEditMode
+                      ? 'bg-sky-200 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200'
+                      : 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-950/40 dark:text-sky-300 dark:hover:bg-sky-900/60'
+                  }`}
+                >
                   <Shield className="h-4 w-4" />
-                  Super
-                </div>
+                  {isEditMode ? 'Editing' : 'Super'}
+                </button>
               ) : null}
             </div>
           </div>
@@ -638,16 +686,30 @@ export default function SchedulePage() {
       </div>
 
       <div className="pb-2 sm:mx-auto sm:max-w-7xl sm:px-4 sm:py-4">
-        <div className="overflow-x-auto border-y border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900 sm:rounded-sm sm:border">
-          <table className="w-full min-w-[452px] border-separate border-spacing-0 text-xs sm:min-w-[510px] sm:text-sm">
+        <div ref={scrollContainerRef} className="overflow-x-auto border-y border-gray-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900 sm:rounded-sm sm:border">
+          <table
+            className="border-separate border-spacing-0 text-xs sm:text-sm"
+            style={{ tableLayout: 'fixed', width: showTimings ? 'calc(100% + 88px)' : '100%' }}
+          >
             <thead>
               <tr className="bg-white dark:bg-slate-900">
-                <th className="sticky left-0 z-20 w-[84px] border-r border-gray-200 bg-white px-2 py-3 text-left font-medium text-gray-500 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-400 sm:w-[96px]">
-                  Time
+                <th
+                  className="sticky left-0 z-20 bg-white p-0 text-left font-medium text-gray-500 dark:bg-slate-900 dark:text-gray-400"
+                  style={{
+                    width: showTimings ? 88 : 0,
+                    minWidth: showTimings ? 88 : 0,
+                    overflow: 'hidden',
+                    opacity: showTimings ? 1 : 0,
+                    borderRight: showTimings ? '1px solid rgb(229 231 235)' : 'none',
+                    transition: 'width 0.5s ease, min-width 0.5s ease, opacity 0.5s ease',
+                  }}
+                >
+                  <div style={{ width: 88, padding: '10px 6px' }}>Time</div>
                 </th>
                 {[1, 2, 3, 4].map((fieldIndex) => (
-                  <th key={fieldIndex} className="border-r border-gray-200 px-2 py-3 text-left font-medium text-gray-500 dark:border-slate-700 dark:text-gray-400">
-                    G{fieldIndex}
+                  <th key={fieldIndex} className="border-gray-200 px-1 py-1.5 text-center font-medium text-gray-500 dark:border-slate-700 dark:text-gray-400 sm:px-2 sm:py-2">
+                    <span className="hidden sm:inline">Ground {fieldIndex}</span>
+                    <span className="sm:hidden">G{fieldIndex}</span>
                   </th>
                 ))}
               </tr>
@@ -662,36 +724,47 @@ export default function SchedulePage() {
 
                 return (
                   <tr key={row.key} className="align-top">
-                    <td className="sticky left-0 z-10 min-w-[84px] border-r border-t border-gray-200 bg-white p-0 align-middle dark:border-slate-700 dark:bg-slate-900 sm:w-[96px]">
-                      <div className={`min-h-[88px] px-2 py-3 ${isSuperAdmin ? 'flex h-full items-start justify-between gap-2' : 'flex h-full flex-col justify-center'}`}>
-                        <div className="space-y-0.5">
-                          <Text variant="primary" className="whitespace-nowrap text-sm font-medium leading-tight text-gray-500 dark:text-gray-400 sm:text-[15px]">
+                    <td
+                      className="sticky left-0 z-10 border-t border-gray-200 bg-white p-0 align-middle dark:border-slate-700 dark:bg-slate-900"
+                      style={{
+                        width: showTimings ? 88 : 0,
+                        minWidth: showTimings ? 88 : 0,
+                        overflow: 'hidden',
+                        opacity: showTimings ? 1 : 0,
+                        pointerEvents: showTimings ? 'auto' : 'none',
+                        borderRight: showTimings ? '1px solid rgb(229 231 235)' : 'none',
+                        transition: 'width 0.5s ease, min-width 0.5s ease, opacity 0.5s ease',
+                      }}
+                    >
+                      <div style={{ width: 88 }} className="min-h-[80px] p-1.5 sm:p-2">
+                        <div className={`flex h-full flex-col ${isSuperAdmin && isEditMode ? 'items-start justify-between gap-1' : 'justify-center'} space-y-0.5`}>
+                          <Text variant="primary" className="whitespace-nowrap text-xs font-semibold leading-tight text-gray-500 dark:text-gray-400 sm:text-sm">
                             {getRowTitle(row.label)}
                           </Text>
-                          <div className="space-y-0 text-sm leading-tight text-gray-500 dark:text-gray-400 sm:text-[15px]">
+                          <div className={`${isSuperAdmin && isEditMode ? 'hidden' : 'space-y-0 text-[11px] leading-tight text-gray-500 dark:text-gray-400 sm:text-xs'}`}>
                             <p>St {formatCompactTime(row.start_time)}</p>
                             <p>Ed {formatCompactTime(row.end_time)}</p>
                           </div>
                         </div>
-                        {isSuperAdmin ? (
-                          <div className="space-y-1.5">
+                        {isSuperAdmin && isEditMode ? (
+                          <div className="mt-1 space-y-1">
                             <input
                               type="time"
                               value={draft.start_time}
                               onChange={(event) => updateDraft(row.key, 'start_time', event.target.value)}
-                              className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                              className="w-full rounded border border-gray-300 bg-white px-1 py-0.5 text-[10px] text-gray-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
                             />
                             <input
                               type="time"
                               value={draft.end_time}
                               onChange={(event) => updateDraft(row.key, 'end_time', event.target.value)}
-                              className="w-full rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                              className="w-full rounded border border-gray-300 bg-white px-1 py-0.5 text-[10px] text-gray-900 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
                             />
                             <button
                               type="button"
                               disabled={!changed || savingRow === row.key}
                               onClick={() => saveRow(row.key).catch(() => undefined)}
-                              className="w-full rounded bg-sky-600 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white disabled:cursor-not-allowed disabled:bg-gray-300 dark:disabled:bg-slate-700"
+                              className="mt-1 w-full rounded bg-sky-600 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-white disabled:cursor-not-allowed disabled:bg-gray-300 dark:disabled:bg-slate-700"
                             >
                               {savingRow === row.key ? 'Saving' : 'Save'}
                             </button>

@@ -5,7 +5,6 @@ use rand::{RngCore, SeedableRng, rngs::StdRng};
 pub(crate) enum OutcomeKind {
     T1Win,
     T2Win,
-    Draw,
 }
 
 impl OutcomeKind {
@@ -13,7 +12,6 @@ impl OutcomeKind {
         match self {
             Self::T1Win => "t1 win",
             Self::T2Win => "t2 win",
-            Self::Draw => "draw",
         }
     }
 }

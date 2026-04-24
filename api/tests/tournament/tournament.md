@@ -45,6 +45,8 @@ The same run also prints round pairings, match outcomes, standings snapshots, an
 - `reporting.rs`: CLI logging plus markdown report generation
 - `scenarios/`: the actual scenario runners
 
+The harness copies `sakkath.db` and its WAL file into a temp directory for each run. It intentionally does not copy SQLite shared-memory state.
+
 ## Scenario Coverage
 
 ### `match-flow`

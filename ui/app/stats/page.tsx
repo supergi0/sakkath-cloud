@@ -8,6 +8,7 @@ import { apiUrl } from "../lib/api";
 interface PlayerStat {
   id: number;
   name: string;
+  common_name: string;
   team_id: number;
   team_name: string;
   division: number;
@@ -46,6 +47,68 @@ export default function Stats() {
   const [page, setPage] = useState(1);
   const [tableStickyTop, setTableStickyTop] = useState(112);
   const headerRef = useRef<HTMLDivElement | null>(null);
+  const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
+
+  const togglePlayerName = (playerId: number) => {
+    setShowingCommonNames((current) => ({
+      ...current,
+      [playerId]: !current[playerId],
+    }));
+  };
+
+  const truncateName = (name: string, maxLen: number = 18) => {
+    if (!name) return '';
+    if (name.length <= maxLen) return name;
+    const parts = name.trim().split(/\s+/);
+    if (parts.length <= 1) return name.substring(0, maxLen - 3) + '...';
+    
+    let current = [...parts];
+    for (let i = current.length - 1; i > 0; i--) {
+      current[i] = current[i][0] + '.';
+      const joined = current.join(' ');
+      if (joined.length <= maxLen) return joined;
+    }
+    
+    const joined = current.join(' ');
+    if (joined.length > maxLen) {
+      return joined.substring(0, maxLen - 3) + '...';
+    }
+    return joined;
+  };
+
+  const renderPlayerName = (player: PlayerStat) => {
+    const commonName = player.common_name?.trim();
+    const hasAlternateName = Boolean(commonName && commonName !== player.name);
+    const displayName = truncateName(player.name);
+
+    if (!hasAlternateName) {
+      return <Text variant="primary" className="font-medium block truncate w-full">{displayName}</Text>;
+    }
+
+    const showingCommonName = Boolean(showingCommonNames[player.id]);
+    const displayCommon = truncateName(commonName);
+
+    return (
+      <div className="relative inline-block pointer-events-none align-middle w-full">
+        <span className="relative block h-[1.5rem] w-full overflow-hidden">
+          <span
+            className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${
+              showingCommonName ? '-translate-y-full scale-95 opacity-0' : 'translate-y-0 scale-100 opacity-100'
+            }`}
+          >
+            {displayName}
+          </span>
+          <span
+            className={`absolute inset-0 block truncate font-medium text-blue-700 transition-all duration-300 dark:text-cyan-300 pointer-events-none ${
+              showingCommonName ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-full scale-95 opacity-0'
+            }`}
+          >
+            {displayCommon}
+          </span>
+        </span>
+      </div>
+    );
+  };
 
   useEffect(() => {
     const savedPreferences = localStorage.getItem(STATS_PREFS_KEY);
@@ -215,12 +278,11 @@ export default function Stats() {
           <table className="w-full min-w-[720px] text-xs sm:min-w-[800px] sm:text-sm">
             <thead className="sticky top-0 z-20 bg-white dark:bg-slate-900 shadow-[0_2px_4px_rgba(0,0,0,0.05)] dark:shadow-[0_2px_4px_rgba(0,0,0,0.2)]">
               <tr className="border-b border-gray-200 dark:border-slate-700">
-                  <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30" />
-                  <SortHeader field="team" label="Team" className="text-left" />
+                  <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30 w-[140px] max-w-[140px]" />
                   <SortHeader field="goals" label="Gls" />
                   <SortHeader field="assists" label="Ast" />
                   <SortHeader field="blocks" label="Blk" />
-                  <SortHeader field="turnovers" label="TO" />
+                  <SortHeader field="turnovers" label="Tvr" />
                   <SortHeader field="matches" label="M" />
                   <SortHeader field="gpm" label="G/M" />
                   <SortHeader field="apm" label="A/M" />
@@ -234,13 +296,14 @@ export default function Stats() {
                   return (
                     <tr 
                       key={player.id} 
-                      className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700"
+                      onClick={() => togglePlayerName(player.id)}
+                      className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700 cursor-pointer"
                     >
-                      <td className="sticky left-0 z-10 bg-white px-2 py-2.5 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] dark:bg-slate-900 dark:shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]">
-                        <Text variant="primary" className="font-medium truncate max-w-[150px] block">{player.name}</Text>
-                      </td>
-                      <td className="px-2 py-2.5">
-                        <Text variant="secondary" className="truncate max-w-[120px] block">{player.team_name}</Text>
+                      <td className="sticky left-0 z-10 bg-white px-2 py-1.5 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] dark:bg-slate-900 dark:shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)] w-[140px] max-w-[140px] truncate">
+                        <div className="flex flex-col justify-center pointer-events-none">
+                          {renderPlayerName(player)}
+                          <Text variant="secondary" className="text-[10px] leading-tight truncate">{truncateName(player.team_name, 20)}</Text>
+                        </div>
                       </td>
                       <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.goals}</Text>

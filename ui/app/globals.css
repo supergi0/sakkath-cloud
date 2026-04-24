@@ -14,3 +14,19 @@ body {
 * {
   scrollbar-width: thin;
 }
+
+@theme {
+  --animate-pulse-seq-1: pulse-seq 1.5s infinite 0s;
+  --animate-pulse-seq-2: pulse-seq 1.5s infinite 0.2s;
+  --animate-pulse-seq-3: pulse-seq 1.5s infinite 0.4s;
+  
+  --animate-pulse-seq-rev-1: pulse-seq 1.5s infinite 0.4s;
+  --animate-pulse-seq-rev-2: pulse-seq 1.5s infinite 0.2s;
+  --animate-pulse-seq-rev-3: pulse-seq 1.5s infinite 0s;
+
+  @keyframes pulse-seq {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+}
+

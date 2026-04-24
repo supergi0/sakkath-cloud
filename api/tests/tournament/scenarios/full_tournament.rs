@@ -29,6 +29,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     for round in 1..=6 {
         for division in [0, 1] {
             let round_matches = load_round_matches(&harness, &mut tracker, division, round).await?;
+            enable_reporting_round(&harness, staff.super_admin.as_str(), round).await?;
 
             if round > 1 {
                 let expected = tracker.expected_swiss_round(division);
@@ -52,7 +53,8 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
 
             for schedule_match in &round_matches {
                 let note = if schedule_match.possession.unwrap_or(0) < 3 {
-                    let outcome = simulation.swiss_outcome(round, division, schedule_match, &tracker);
+                    let outcome =
+                        simulation.swiss_outcome(round, division, schedule_match, &tracker);
                     finish_match_to_outcome(
                         &harness,
                         &mut tracker,
@@ -66,7 +68,8 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
                     "pre-existing completed match snapshot".to_string()
                 };
 
-                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false).await?;
+                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                    .await?;
                 reporter.record_match_result(
                     "full-tournament",
                     division,
@@ -86,7 +89,8 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
             )?;
 
             if round < 6 {
-                let next_round = ensure_swiss_round_exists(&harness, &staff, division, round + 1).await?;
+                let next_round =
+                    ensure_swiss_round_exists(&harness, &staff, division, round + 1).await?;
                 for schedule_match in &next_round {
                     tracker.register_schedule_match(division, schedule_match);
                 }
@@ -99,6 +103,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
 
     for division in [0, 1] {
         let playoff_round_one = load_round_matches(&harness, &mut tracker, division, 1001).await?;
+        enable_reporting_round(&harness, staff.super_admin.as_str(), 1001).await?;
         let expected_round_one = tracker.expected_playoff_round_one(division);
         assert_playoff_pairings(&playoff_round_one, &expected_round_one);
         assert_playoff_grid_seed_labels(&harness, &playoff_round_one, &expected_round_one).await?;
@@ -114,20 +119,15 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
             let note = if schedule_match.possession.unwrap_or(0) < 3 {
                 let expected_match = find_expected_match(&expected_round_one, schedule_match);
                 let outcome = simulation.playoff_round_one_outcome(expected_match);
-                finish_match_to_outcome(
-                    &harness,
-                    &mut tracker,
-                    &staff,
-                    schedule_match.id,
-                    outcome,
-                )
-                .await?;
+                finish_match_to_outcome(&harness, &mut tracker, &staff, schedule_match.id, outcome)
+                    .await?;
                 format!("seeded {}", outcome.label())
             } else {
                 "pre-existing completed match snapshot".to_string()
             };
 
-            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false).await?;
+            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                .await?;
             reporter.record_match_result(
                 "full-tournament",
                 division,
@@ -139,6 +139,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         }
 
         let playoff_round_two = load_round_matches(&harness, &mut tracker, division, 1002).await?;
+        enable_reporting_round(&harness, staff.super_admin.as_str(), 1002).await?;
         let expected_round_two = tracker.expected_playoff_round_two(division);
         assert_playoff_pairings(&playoff_round_two, &expected_round_two);
         assert_playoff_grid_seed_labels(&harness, &playoff_round_two, &expected_round_two).await?;
@@ -154,27 +155,30 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         if final_swiss_order.len() >= 2 {
             let bottom_one = final_swiss_order[final_swiss_order.len() - 2].team_id;
             let bottom_two = final_swiss_order[final_swiss_order.len() - 1].team_id;
-            assert!(tracker.match_ids_for_team_and_type(bottom_one, 1002).is_empty());
-            assert!(tracker.match_ids_for_team_and_type(bottom_two, 1002).is_empty());
+            assert!(
+                tracker
+                    .match_ids_for_team_and_type(bottom_one, 1002)
+                    .is_empty()
+            );
+            assert!(
+                tracker
+                    .match_ids_for_team_and_type(bottom_two, 1002)
+                    .is_empty()
+            );
         }
 
         for schedule_match in &playoff_round_two {
             let note = if schedule_match.possession.unwrap_or(0) < 3 {
                 let outcome = simulation.playoff_round_two_outcome(&tracker, schedule_match);
-                finish_match_to_outcome(
-                    &harness,
-                    &mut tracker,
-                    &staff,
-                    schedule_match.id,
-                    outcome,
-                )
-                .await?;
+                finish_match_to_outcome(&harness, &mut tracker, &staff, schedule_match.id, outcome)
+                    .await?;
                 format!("seeded {}", outcome.label())
             } else {
                 "pre-existing completed match snapshot".to_string()
             };
 
-            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false).await?;
+            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                .await?;
             reporter.record_match_result(
                 "full-tournament",
                 division,
@@ -204,6 +208,18 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     Ok(())
 }
 
+async fn enable_reporting_round(
+    harness: &Harness,
+    super_token: &str,
+    round_key: i64,
+) -> TestResult {
+    let response = harness
+        .update_reporting_round_setting(super_token, round_key, true)
+        .await?;
+    assert!(response.is_enabled);
+    Ok(())
+}
+
 fn find_expected_match<'a>(
     expected: &'a [ExpectedPlayoffMatch],
     schedule_match: &crate::tournament::model::ScheduleMatchResponse,
@@ -211,7 +227,8 @@ fn find_expected_match<'a>(
     expected
         .iter()
         .find(|expected_match| {
-            expected_match.team_a == schedule_match.t1_id && expected_match.team_b == schedule_match.t2_id
+            expected_match.team_a == schedule_match.t1_id
+                && expected_match.team_b == schedule_match.t2_id
         })
         .expect("playoff round match should match the expected bracket")
 }

@@ -1,6 +1,7 @@
 use super::harness::{Harness, STAFF_PASSWORD, TestResult};
 use super::model::{
-    MatchDetailResponse, MatchPlayerResponse, MutationResponse, ScheduleMatchResponse, TournamentTracker,
+    MatchDetailResponse, MatchPlayerResponse, MutationResponse, ScheduleMatchResponse,
+    TournamentTracker,
 };
 use super::simulation::OutcomeKind;
 use axum::http::Method;
@@ -53,7 +54,9 @@ pub(crate) async fn load_round_matches(
     division: i64,
     round: i64,
 ) -> TestResult<Vec<ScheduleMatchResponse>> {
-    let matches = harness.get_schedule_matches(division, Some(round), None).await?;
+    let matches = harness
+        .get_schedule_matches(division, Some(round), None)
+        .await?;
     for schedule_match in &matches {
         tracker.register_schedule_match(division, schedule_match);
     }
@@ -66,7 +69,9 @@ pub(crate) async fn ensure_swiss_round_exists(
     division: i64,
     round: i64,
 ) -> TestResult<Vec<ScheduleMatchResponse>> {
-    let existing = harness.get_schedule_matches(division, Some(round), None).await?;
+    let existing = harness
+        .get_schedule_matches(division, Some(round), None)
+        .await?;
     if !existing.is_empty() {
         return Ok(existing);
     }
@@ -79,10 +84,18 @@ pub(crate) async fn ensure_swiss_round_exists(
             None,
         )
         .await?;
-    assert!(response.success, "round {round} for division {division} should generate");
+    assert!(
+        response.success,
+        "round {round} for division {division} should generate"
+    );
 
-    let generated = harness.get_schedule_matches(division, Some(round), None).await?;
-    assert!(!generated.is_empty(), "generated swiss round should now be visible");
+    let generated = harness
+        .get_schedule_matches(division, Some(round), None)
+        .await?;
+    assert!(
+        !generated.is_empty(),
+        "generated swiss round should now be visible"
+    );
     Ok(generated)
 }
 
@@ -108,8 +121,12 @@ pub(crate) async fn record_event(
     tracker.apply_manual_event(match_id, player_id, event_type);
     tracker.set_match_state(
         match_id,
-        response.t1_score.expect("event response should include t1 score"),
-        response.t2_score.expect("event response should include t2 score"),
+        response
+            .t1_score
+            .expect("event response should include t1 score"),
+        response
+            .t2_score
+            .expect("event response should include t2 score"),
         response.possession,
     );
     Ok(response)
@@ -142,7 +159,11 @@ pub(crate) async fn finish_match_to_outcome(
     let mut possession = detail.possession;
 
     if possession.is_none() && !scoring_sequence.is_empty() {
-        let desired_possession = if scoring_sequence[0] == detail.t1_id { 1 } else { 2 };
+        let desired_possession = if scoring_sequence[0] == detail.t1_id {
+            1
+        } else {
+            2
+        };
         let response = harness
             .mutation(
                 Method::POST,
@@ -350,7 +371,10 @@ pub(crate) async fn submit_spirit_payload(
     Ok(())
 }
 
-pub(crate) fn players_for_team(detail: &MatchDetailResponse, team_id: i64) -> Vec<MatchPlayerResponse> {
+pub(crate) fn players_for_team(
+    detail: &MatchDetailResponse,
+    team_id: i64,
+) -> Vec<MatchPlayerResponse> {
     let mut players: Vec<_> = detail
         .players
         .iter()
@@ -363,16 +387,6 @@ pub(crate) fn players_for_team(detail: &MatchDetailResponse, team_id: i64) -> Ve
 
 fn resolve_target_scores(current_t1: i64, current_t2: i64, outcome: OutcomeKind) -> (i64, i64) {
     match outcome {
-        OutcomeKind::Draw => {
-            if current_t1 == current_t2 && current_t1 > 0 {
-                (current_t1, current_t2)
-            } else if current_t1 == 0 && current_t2 == 0 {
-                (1, 1)
-            } else {
-                let target = current_t1.max(current_t2);
-                (target, target)
-            }
-        }
         OutcomeKind::T1Win => {
             if current_t1 == 0 && current_t2 == 0 {
                 (2, 1)
@@ -448,9 +462,13 @@ fn build_spirit_payload(
     let fair_mindedness = 1 + ((seed / 3 + 2) % 4);
     let positive_attitude = 1 + ((seed / 4 + 3) % 4);
     let communication = 1 + ((seed / 5 + 4) % 4);
-    let total = rules_knowledge + fouls_contact + fair_mindedness + positive_attitude + communication;
+    let total =
+        rules_knowledge + fouls_contact + fair_mindedness + positive_attitude + communication;
     let mvp_player_id = players.first().map(|player| player.id);
-    let msp_player_id = players.get(1).or_else(|| players.first()).map(|player| player.id);
+    let msp_player_id = players
+        .get(1)
+        .or_else(|| players.first())
+        .map(|player| player.id);
 
     (
         serde_json::json!({

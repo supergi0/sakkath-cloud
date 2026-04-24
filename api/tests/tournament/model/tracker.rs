@@ -1,9 +1,11 @@
 use super::api_types::{
-    MatchDetailResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse, TeamResponse,
+    MatchDetailResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse,
+    TeamResponse,
 };
 use super::pairings::{
     ExpectedPlayoffMatch, ExpectedSwissRound, SortMetrics, build_playoff_round_one,
-    build_playoff_round_two, build_scoring_groups, generate_round_pairings, naive_pairings, sort_metrics,
+    build_playoff_round_two, build_scoring_groups, generate_round_pairings, naive_pairings,
+    sort_metrics,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -82,19 +84,22 @@ impl TournamentTracker {
         division: i64,
         schedule_match: &ScheduleMatchResponse,
     ) {
-        let state = self.matches.entry(schedule_match.id).or_insert_with(|| MatchState {
-            id: schedule_match.id,
-            division,
-            match_type: schedule_match.match_type,
-            t1_id: schedule_match.t1_id,
-            t2_id: schedule_match.t2_id,
-            t1_score: schedule_match.t1_score,
-            t2_score: schedule_match.t2_score,
-            possession: schedule_match.possession,
-            applied_event_ids: HashSet::new(),
-            spirit_rows: HashMap::new(),
-            score_confirmations: HashMap::new(),
-        });
+        let state = self
+            .matches
+            .entry(schedule_match.id)
+            .or_insert_with(|| MatchState {
+                id: schedule_match.id,
+                division,
+                match_type: schedule_match.match_type,
+                t1_id: schedule_match.t1_id,
+                t2_id: schedule_match.t2_id,
+                t1_score: schedule_match.t1_score,
+                t2_score: schedule_match.t2_score,
+                possession: schedule_match.possession,
+                applied_event_ids: HashSet::new(),
+                spirit_rows: HashMap::new(),
+                score_confirmations: HashMap::new(),
+            });
 
         state.match_type = schedule_match.match_type;
         state.t1_score = schedule_match.t1_score;
@@ -216,7 +221,9 @@ impl TournamentTracker {
         t2_score: i64,
     ) {
         if let Some(state) = self.matches.get_mut(&match_id) {
-            state.score_confirmations.insert(team_id, (t1_score, t2_score));
+            state
+                .score_confirmations
+                .insert(team_id, (t1_score, t2_score));
         }
     }
 
@@ -299,7 +306,9 @@ impl TournamentTracker {
             let mut per_round = BTreeMap::new();
 
             for state in self.matches.values().filter(|state| {
-                state.division == division && state.match_type < 1000 && state.possession.unwrap_or(0) >= 3
+                state.division == division
+                    && state.match_type < 1000
+                    && state.possession.unwrap_or(0) >= 3
             }) {
                 let (scored, conceded, opponent) = if state.t1_id == team_id {
                     (state.t1_score, state.t2_score, state.t2_id)
@@ -335,7 +344,11 @@ impl TournamentTracker {
 
             metrics.push(SortMetrics {
                 team_id,
-                init_rank: self.teams.get(&team_id).map(|team| team.init_rank).unwrap_or(i64::MAX),
+                init_rank: self
+                    .teams
+                    .get(&team_id)
+                    .map(|team| team.init_rank)
+                    .unwrap_or(i64::MAX),
                 wins,
                 losses,
                 draws,
@@ -377,7 +390,6 @@ impl TournamentTracker {
 
         ExpectedSwissRound {
             pairings,
-            naive_pairings,
             naive_had_rematch,
         }
     }

@@ -21,7 +21,6 @@ pub(crate) struct SortMetrics {
 #[derive(Debug, Clone)]
 pub(crate) struct ExpectedSwissRound {
     pub(crate) pairings: Vec<(i64, i64)>,
-    pub(crate) naive_pairings: Vec<(i64, i64)>,
     pub(crate) naive_had_rematch: bool,
 }
 
@@ -58,7 +57,10 @@ pub(crate) fn build_scoring_groups(sorted: &[SortMetrics]) -> Vec<Vec<i64>> {
     groups.push(current_group);
 
     fix_odd_groups(&mut groups);
-    groups.into_iter().filter(|group| !group.is_empty()).collect()
+    groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 pub(crate) fn naive_pairings(groups: &[Vec<i64>]) -> Vec<(i64, i64)> {
@@ -168,15 +170,23 @@ pub(crate) fn build_playoff_round_two(
         apply_seed_swap(right, tracker, &mut seed_holders);
 
         expected.push(ExpectedPlayoffMatch {
-            team_a: *seed_holders.get(&left.seed_a).expect("missing seed one holder"),
+            team_a: *seed_holders
+                .get(&left.seed_a)
+                .expect("missing seed one holder"),
             seed_a: left.seed_a,
-            team_b: *seed_holders.get(&right.seed_a).expect("missing seed two holder"),
+            team_b: *seed_holders
+                .get(&right.seed_a)
+                .expect("missing seed two holder"),
             seed_b: right.seed_a,
         });
         expected.push(ExpectedPlayoffMatch {
-            team_a: *seed_holders.get(&right.seed_b).expect("missing seed three holder"),
+            team_a: *seed_holders
+                .get(&right.seed_b)
+                .expect("missing seed three holder"),
             seed_a: right.seed_b,
-            team_b: *seed_holders.get(&left.seed_b).expect("missing seed four holder"),
+            team_b: *seed_holders
+                .get(&left.seed_b)
+                .expect("missing seed four holder"),
             seed_b: left.seed_b,
         });
 
@@ -219,9 +229,20 @@ fn tied_team_count(points: i64, teams: &[SortMetrics]) -> usize {
 }
 
 fn c3_buchholz(left: &SortMetrics, right: &SortMetrics, all: &[SortMetrics]) -> Ordering {
-    let wins_map: HashMap<i64, i64> = all.iter().map(|metrics| (metrics.team_id, metrics.wins)).collect();
-    let left_buchholz: i64 = left.opponents.iter().filter_map(|team_id| wins_map.get(team_id)).sum();
-    let right_buchholz: i64 = right.opponents.iter().filter_map(|team_id| wins_map.get(team_id)).sum();
+    let wins_map: HashMap<i64, i64> = all
+        .iter()
+        .map(|metrics| (metrics.team_id, metrics.wins))
+        .collect();
+    let left_buchholz: i64 = left
+        .opponents
+        .iter()
+        .filter_map(|team_id| wins_map.get(team_id))
+        .sum();
+    let right_buchholz: i64 = right
+        .opponents
+        .iter()
+        .filter_map(|team_id| wins_map.get(team_id))
+        .sum();
     right_buchholz.cmp(&left_buchholz)
 }
 
@@ -254,15 +275,27 @@ fn c6_momentum(left: &SortMetrics, right: &SortMetrics) -> Ordering {
 }
 
 fn c7_seed(left: &SortMetrics, right: &SortMetrics) -> Ordering {
-    let left_rank = if left.init_rank > 0 { left.init_rank } else { i64::MAX };
-    let right_rank = if right.init_rank > 0 { right.init_rank } else { i64::MAX };
-    left_rank.cmp(&right_rank).then_with(|| left.team_id.cmp(&right.team_id))
+    let left_rank = if left.init_rank > 0 {
+        left.init_rank
+    } else {
+        i64::MAX
+    };
+    let right_rank = if right.init_rank > 0 {
+        right.init_rank
+    } else {
+        i64::MAX
+    };
+    left_rank
+        .cmp(&right_rank)
+        .then_with(|| left.team_id.cmp(&right.team_id))
 }
 
 fn fix_odd_groups(groups: &mut [Vec<i64>]) {
     for index in 0..groups.len() {
-        if groups[index].len() % 2 != 0 && index + 1 < groups.len() {
-            let overflow = groups[index].pop().expect("odd group should have a trailing team");
+        if !groups[index].len().is_multiple_of(2) && index + 1 < groups.len() {
+            let overflow = groups[index]
+                .pop()
+                .expect("odd group should have a trailing team");
             groups[index + 1].insert(0, overflow);
         }
     }
@@ -282,7 +315,14 @@ fn pair_scoring_group(
     let mut used_bottom = HashSet::new();
     let mut pairings = Vec::new();
 
-    if backtrack_pairs(top_half, bottom_half, 0, history, &mut used_bottom, &mut pairings) {
+    if backtrack_pairs(
+        top_half,
+        bottom_half,
+        0,
+        history,
+        &mut used_bottom,
+        &mut pairings,
+    ) {
         Some(pairings)
     } else {
         None
@@ -325,7 +365,14 @@ fn backtrack_pairs(
         used_bottom.insert(candidate_index);
         pairings.push((team, opponent));
 
-        if backtrack_pairs(top_half, bottom_half, index + 1, history, used_bottom, pairings) {
+        if backtrack_pairs(
+            top_half,
+            bottom_half,
+            index + 1,
+            history,
+            used_bottom,
+            pairings,
+        ) {
             return true;
         }
 
@@ -353,19 +400,20 @@ fn try_rebalance_and_pair(
         groups[failed_index][failed_last_index] = next_first_team;
         groups[failed_index + 1][0] = last_team;
 
-        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history) {
-            if let Some(next_pairs) = pair_scoring_group(&groups[failed_index + 1], history) {
-                group_pairings[failed_index] = Some(failed_pairs);
-                group_pairings[failed_index + 1] = Some(next_pairs);
-                return true;
-            }
+        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history)
+            && let Some(next_pairs) = pair_scoring_group(&groups[failed_index + 1], history)
+        {
+            group_pairings[failed_index] = Some(failed_pairs);
+            group_pairings[failed_index + 1] = Some(next_pairs);
+            return true;
         }
 
         groups[failed_index + 1][0] = next_first_team;
         groups[failed_index][failed_last_index] = last_team;
     }
 
-    if failed_index > 0 && !groups[failed_index].is_empty() && !groups[failed_index - 1].is_empty() {
+    if failed_index > 0 && !groups[failed_index].is_empty() && !groups[failed_index - 1].is_empty()
+    {
         let previous_last_index = groups[failed_index - 1].len() - 1;
         let first_team = groups[failed_index][0];
         let previous_last_team = groups[failed_index - 1][previous_last_index];
@@ -373,12 +421,12 @@ fn try_rebalance_and_pair(
         groups[failed_index][0] = previous_last_team;
         groups[failed_index - 1][previous_last_index] = first_team;
 
-        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history) {
-            if let Some(previous_pairs) = pair_scoring_group(&groups[failed_index - 1], history) {
-                group_pairings[failed_index] = Some(failed_pairs);
-                group_pairings[failed_index - 1] = Some(previous_pairs);
-                return true;
-            }
+        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history)
+            && let Some(previous_pairs) = pair_scoring_group(&groups[failed_index - 1], history)
+        {
+            group_pairings[failed_index] = Some(failed_pairs);
+            group_pairings[failed_index - 1] = Some(previous_pairs);
+            return true;
         }
 
         groups[failed_index - 1][previous_last_index] = previous_last_team;

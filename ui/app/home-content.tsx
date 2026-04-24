@@ -253,7 +253,7 @@ export function HomeContent() {
                     onClick={() => setSortBy(selection)}
                     className={`rounded px-3 py-2 text-sm transition-colors ${sortBy === selection ? 'bg-blue-900 text-white' : 'bg-gray-200 text-gray-600 dark:bg-slate-700 dark:text-gray-300'}`}
                   >
-                    {selection.charAt(0).toUpperCase() + selection.slice(1)}
+                    {selection === 'game' ? 'Current' : selection === 'initial' ? 'Initial' : 'Spirit'}
                   </button>
                 ))}
               </div>
@@ -285,7 +285,7 @@ export function HomeContent() {
                   onClick={() => setSortBy(selection)}
                   className={`flex-1 rounded px-3 py-2 text-sm transition-colors ${sortBy === selection ? 'bg-blue-900 text-white' : 'bg-gray-200 text-gray-600 dark:bg-slate-700 dark:text-gray-300'}`}
                 >
-                  {selection === 'game' ? 'Game' : selection === 'initial' ? 'Initial' : 'Spirit'}
+                  {selection === 'game' ? 'Current' : selection === 'initial' ? 'Initial' : 'Spirit'}
                 </button>
               ))}
             </div>
@@ -309,7 +309,7 @@ export function HomeContent() {
               ref={headerScrollRef}
               className="mt-3 -mb-3 -mx-4 px-4 pt-2 overflow-hidden border-t border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900"
             >
-              <div className="w-full min-w-[470px] flex text-sm font-medium text-gray-500 dark:text-gray-400">
+              <div className="w-full min-w-[368px] flex text-sm font-medium text-gray-500 dark:text-gray-400">
                 <div className="w-6 min-w-[24px] px-1 pb-1 text-left shrink-0">#</div>
                 <div className="w-[160px] min-w-[160px] px-1 pr-2 pb-1 text-left shrink-0">Team</div>
                 <div className="w-8 min-w-[32px] px-0.5 pb-1 text-center shrink-0">P</div>
@@ -323,7 +323,7 @@ export function HomeContent() {
           </div>
 
           <div className="overflow-x-auto" ref={tableScrollRef} onScroll={handleTableScroll}>
-            <table className="w-full min-w-[470px] text-sm sm:min-w-[620px]">
+            <table className="w-full min-w-[368px] text-sm sm:min-w-[620px]">
               <thead className="hidden bg-white dark:bg-slate-900 sm:table-header-group">
                 <tr className="border-b border-gray-200 dark:border-slate-700">
                   <th className="w-6 min-w-[24px] px-1 py-3 text-left font-medium text-gray-500 dark:text-gray-400 sm:w-auto sm:min-w-0 sm:px-2">#</th>

@@ -7,17 +7,32 @@ use std::path::{Path, PathBuf};
 const CSV_DATA_ROWS_TO_SKIP: usize = 2;
 const EXPECTED_OPEN_TEAMS: usize = 22;
 const EXPECTED_WOMEN_TEAMS: usize = 10;
-const STANDARD_MEMBER_START: usize = 19;
+const RANKING_COLUMN: usize = 4;
+const CITY_COLUMN: usize = 5;
+const STATE_COLUMN: usize = 6;
+const ADMIN_NAME_COLUMN: usize = 16;
+const CONTACT_EMAIL_COLUMN: usize = 17;
+const ADMIN_PHONE_PRIMARY_COLUMN: usize = 18;
+const ADMIN_PHONE_FALLBACK_COLUMN: usize = 19;
+const FORM_EMAIL_COLUMN: usize = 1;
+const STANDARD_MEMBER_START: usize = 20;
 const STANDARD_MEMBER_FIELDS: usize = 5;
 const STANDARD_MEMBER_SLOTS: usize = 19;
-const EXTRA_MEMBER_START: usize = STANDARD_MEMBER_START + (STANDARD_MEMBER_FIELDS * STANDARD_MEMBER_SLOTS);
+const EXTRA_MEMBER_START: usize =
+    STANDARD_MEMBER_START + (STANDARD_MEMBER_FIELDS * STANDARD_MEMBER_SLOTS);
 const EXTRA_MEMBER_FIELDS: usize = 6;
 const EXTRA_MEMBER_SLOTS: usize = 3;
 const DEFAULT_STAFF_PASSWORD: &str = "helloworld";
 
+fn hash_password(password: &str) -> Result<String, sqlx::Error> {
+    crate::helpers::auth::hash_password(password)
+        .map_err(|err| sqlx::Error::Configuration(format!("Failed to hash password: {err}").into()))
+}
+
 struct ImportedTeamRow {
     division: i64,
     team_name: String,
+    init_rank: i64,
     location: Option<String>,
     admin_name: String,
     admin_email: String,
@@ -26,7 +41,8 @@ struct ImportedTeamRow {
 }
 
 struct ImportedMember {
-    name: String,
+    full_name: String,
+    common_name: Option<String>,
     dob: Option<String>,
 }
 
@@ -56,15 +72,16 @@ pub fn resolve_teams_csv_path(requested_path: Option<&str>) -> Result<PathBuf, s
     ))
 }
 
-pub async fn populate_from_teams_csv(pool: &SqlitePool, requested_path: Option<&str>) -> Result<(), sqlx::Error> {
+pub async fn populate_from_teams_csv(
+    pool: &SqlitePool,
+    requested_path: Option<&str>,
+) -> Result<(), sqlx::Error> {
     let csv_path = resolve_teams_csv_path(requested_path)?;
     let rows = load_team_rows(&csv_path)?;
 
     let mut tx = pool.begin().await?;
     seed_default_staff_and_fields(&mut tx).await?;
 
-    let mut open_rank = 1i64;
-    let mut women_rank = 1i64;
     let mut seen_admin_emails = HashSet::new();
 
     for row in rows {
@@ -74,23 +91,13 @@ pub async fn populate_from_teams_csv(pool: &SqlitePool, requested_path: Option<&
             ));
         }
 
-        let rank = if row.division == 0 {
-            let current = open_rank;
-            open_rank += 1;
-            current
-        } else {
-            let current = women_rank;
-            women_rank += 1;
-            current
-        };
-
         let team_result = sqlx::query(
             "INSERT INTO teams (name, admin_id, division, location, init_rank) VALUES (?, NULL, ?, ?, ?)"
         )
         .bind(&row.team_name)
         .bind(row.division)
         .bind(&row.location)
-        .bind(rank)
+        .bind(row.init_rank)
         .execute(&mut *tx)
         .await?;
 
@@ -98,15 +105,16 @@ pub async fn populate_from_teams_csv(pool: &SqlitePool, requested_path: Option<&
         let mut member_ids_by_name = HashMap::new();
 
         for member in row.members {
-            let member_key = normalize_key(&member.name);
+            let member_key = normalize_key(&member.full_name);
             if member_key.is_empty() || member_ids_by_name.contains_key(&member_key) {
                 continue;
             }
 
             let member_result = sqlx::query(
-                "INSERT INTO users (name, dob, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, 2, 0, 0)"
+                "INSERT INTO users (name, common_name, dob, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, 2, 0, 0)"
             )
-            .bind(&member.name)
+            .bind(&member.full_name)
+            .bind(&member.common_name)
             .bind(&member.dob)
             .bind(team_id)
             .execute(&mut *tx)
@@ -116,12 +124,14 @@ pub async fn populate_from_teams_csv(pool: &SqlitePool, requested_path: Option<&
         }
 
         let admin_key = normalize_key(&row.admin_name);
-        let admin_password_hash = format!("{:x}", md5::compute(&row.admin_email));
+        let admin_password_hash = hash_password(&row.admin_email)?;
 
         let admin_id = if let Some(existing_member_id) = member_ids_by_name.get(&admin_key) {
             sqlx::query(
-                "UPDATE users SET email = ?, phone = ?, role = 3, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+                "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, role = 3, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
             )
+            .bind(&row.admin_name)
+            .bind(&row.admin_name)
             .bind(&row.admin_email)
             .bind(&row.admin_phone)
             .bind(&admin_password_hash)
@@ -132,8 +142,9 @@ pub async fn populate_from_teams_csv(pool: &SqlitePool, requested_path: Option<&
             *existing_member_id
         } else {
             let admin_result = sqlx::query(
-                "INSERT INTO users (name, email, phone, team_id, role, password_hash) VALUES (?, ?, ?, ?, 3, ?)"
+                "INSERT INTO users (name, common_name, email, phone, team_id, role, password_hash) VALUES (?, ?, ?, ?, ?, 3, ?)"
             )
+            .bind(&row.admin_name)
             .bind(&row.admin_name)
             .bind(&row.admin_email)
             .bind(&row.admin_phone)
@@ -161,12 +172,15 @@ fn load_team_rows(csv_path: &Path) -> Result<Vec<ImportedTeamRow>, sqlx::Error> 
         .has_headers(false)
         .flexible(true)
         .from_path(csv_path)
-        .map_err(|err| sqlx::Error::Configuration(format!("Failed to open teams CSV: {err}").into()))?;
+        .map_err(|err| {
+            sqlx::Error::Configuration(format!("Failed to open teams CSV: {err}").into())
+        })?;
 
     let mut records = Vec::new();
     for record in reader.records() {
-        let record = record
-            .map_err(|err| sqlx::Error::Configuration(format!("Failed to parse teams CSV: {err}").into()))?;
+        let record = record.map_err(|err| {
+            sqlx::Error::Configuration(format!("Failed to parse teams CSV: {err}").into())
+        })?;
         if is_team_record(&record) {
             records.push(record);
         }
@@ -174,23 +188,39 @@ fn load_team_rows(csv_path: &Path) -> Result<Vec<ImportedTeamRow>, sqlx::Error> 
 
     let rows = records
         .into_iter()
-        .skip(CSV_DATA_ROWS_TO_SKIP)
         .map(|record| build_team_row(&record))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let open_count = rows.iter().filter(|row| row.division == 0).count();
-    let women_count = rows.iter().filter(|row| row.division == 1).count();
-
-    if open_count != EXPECTED_OPEN_TEAMS || women_count != EXPECTED_WOMEN_TEAMS {
-        return Err(sqlx::Error::Configuration(
-            format!(
-                "teams.csv import expected 23 Open and 10 Women teams after skipping the first 2 actual team submissions, got {open_count} Open and {women_count} Women"
-            )
-            .into(),
-        ));
+    if matches_expected_team_counts(&rows) {
+        return Ok(rows);
     }
 
-    Ok(rows)
+    let skipped_rows = rows
+        .into_iter()
+        .skip(CSV_DATA_ROWS_TO_SKIP)
+        .collect::<Vec<_>>();
+    if matches_expected_team_counts(&skipped_rows) {
+        return Ok(skipped_rows);
+    }
+
+    let (open_count, women_count) = count_divisions(&skipped_rows);
+    Err(sqlx::Error::Configuration(
+        format!(
+            "teams.csv import expected {EXPECTED_OPEN_TEAMS} Open and {EXPECTED_WOMEN_TEAMS} Women teams, got {open_count} Open and {women_count} Women after checking current and legacy skip-first-{CSV_DATA_ROWS_TO_SKIP} layouts"
+        )
+        .into(),
+    ))
+}
+
+fn matches_expected_team_counts(rows: &[ImportedTeamRow]) -> bool {
+    let (open_count, women_count) = count_divisions(rows);
+    open_count == EXPECTED_OPEN_TEAMS && women_count == EXPECTED_WOMEN_TEAMS
+}
+
+fn count_divisions(rows: &[ImportedTeamRow]) -> (usize, usize) {
+    let open_count = rows.iter().filter(|row| row.division == 0).count();
+    let women_count = rows.iter().filter(|row| row.division == 1).count();
+    (open_count, women_count)
 }
 
 fn build_team_row(record: &StringRecord) -> Result<ImportedTeamRow, sqlx::Error> {
@@ -200,29 +230,53 @@ fn build_team_row(record: &StringRecord) -> Result<ImportedTeamRow, sqlx::Error>
         Some(other) => {
             return Err(sqlx::Error::Configuration(
                 format!("Unsupported division in teams.csv: {other}").into(),
-            ))
+            ));
         }
-        None => return Err(sqlx::Error::Configuration("Missing division in teams.csv".into())),
+        None => {
+            return Err(sqlx::Error::Configuration(
+                "Missing division in teams.csv".into(),
+            ));
+        }
     };
 
     let team_name = normalize_display_text(record.get(3))
         .ok_or_else(|| sqlx::Error::Configuration("Missing team name in teams.csv".into()))?;
-    let admin_email = normalize_email(record.get(1))
-        .ok_or_else(|| sqlx::Error::Configuration(format!("Missing form email for team {team_name}").into()))?;
+    let init_rank = parse_init_rank(record.get(RANKING_COLUMN), &team_name)?;
+    let admin_email = normalize_email(record.get(FORM_EMAIL_COLUMN))
+        .or_else(|| normalize_email(record.get(CONTACT_EMAIL_COLUMN)))
+        .ok_or_else(|| {
+            sqlx::Error::Configuration(format!("Missing form email for team {team_name}").into())
+        })?;
     let members = extract_members(record);
-    let admin_name = normalize_person_name(record.get(15))
+    let admin_name = normalize_person_name(record.get(ADMIN_NAME_COLUMN))
         .filter(|value| !looks_like_phone(value) && !looks_like_email(value))
-        .or_else(|| members.first().map(|member| member.name.clone()))
+        .or_else(|| members.first().map(|member| member.full_name.clone()))
         .unwrap_or_else(|| fallback_name_from_email(&admin_email));
 
     Ok(ImportedTeamRow {
         division,
         team_name,
-        location: combine_location(record.get(4), record.get(5)),
+        init_rank,
+        location: combine_location(record.get(CITY_COLUMN), record.get(STATE_COLUMN)),
         admin_name,
         admin_email,
-        admin_phone: normalize_phone(record.get(17)).or_else(|| normalize_phone(record.get(18))),
+        admin_phone: normalize_phone(record.get(ADMIN_PHONE_PRIMARY_COLUMN))
+            .or_else(|| normalize_phone(record.get(ADMIN_PHONE_FALLBACK_COLUMN))),
         members,
+    })
+}
+
+fn parse_init_rank(value: Option<&str>, team_name: &str) -> Result<i64, sqlx::Error> {
+    let value = normalize_display_text(value).ok_or_else(|| {
+        sqlx::Error::Configuration(
+            format!("Missing ranking for team {team_name} in teams.csv").into(),
+        )
+    })?;
+
+    value.parse::<i64>().map_err(|err| {
+        sqlx::Error::Configuration(
+            format!("Invalid ranking '{value}' for team {team_name} in teams.csv: {err}").into(),
+        )
     })
 }
 
@@ -262,34 +316,39 @@ fn push_member(
     common_name: Option<&str>,
     dob: Option<&str>,
 ) {
-    let display_name = normalize_person_name(common_name)
-        .filter(|value| value != "-")
-        .or_else(|| normalize_person_name(full_name));
+    let normalized_common_name = normalize_person_name(common_name).filter(|value| value != "-");
+    let full_name = normalize_person_name(full_name).or_else(|| normalized_common_name.clone());
 
-    let Some(name) = display_name else {
+    let Some(full_name) = full_name else {
         return;
     };
 
-    let key = normalize_key(&name);
+    let common_name =
+        normalized_common_name.filter(|value| normalize_key(value) != normalize_key(&full_name));
+
+    let key = normalize_key(&full_name);
     if key.is_empty() || seen_names.contains(&key) {
         return;
     }
 
     seen_names.insert(key);
     members.push(ImportedMember {
-        name,
+        full_name,
+        common_name,
         dob: normalize_date(dob),
     });
 }
 
-async fn seed_default_staff_and_fields(tx: &mut Transaction<'_, Sqlite>) -> Result<(), sqlx::Error> {
-    let password_hash = format!("{:x}", md5::compute(DEFAULT_STAFF_PASSWORD));
+async fn seed_default_staff_and_fields(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<(), sqlx::Error> {
+    let password_hash = hash_password(DEFAULT_STAFF_PASSWORD)?;
 
     sqlx::query(
-        r#"INSERT INTO users (name, email, phone, dob, team_id, role, password_hash) VALUES
-        ('Super Admin', 'super@sakkath.com', '+919000000000', '1985-01-01', NULL, 0, ?),
-        ('Admin One', 'admin1@sakkath.com', '+919000000001', '1988-05-15', NULL, 1, ?),
-        ('Admin Two', 'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#,
+        r#"INSERT INTO users (name, common_name, email, phone, dob, team_id, role, password_hash) VALUES
+        ('Super Admin', 'Super Admin', 'super@sakkath.com', '+919000000000', '1985-01-01', NULL, 0, ?),
+        ('Admin One', 'Admin One', 'admin1@sakkath.com', '+919000000001', '1988-05-15', NULL, 1, ?),
+        ('Admin Two', 'Admin Two', 'admin2@sakkath.com', '+919000000002', '1990-10-20', NULL, 1, ?)"#,
     )
     .bind(&password_hash)
     .bind(&password_hash)
@@ -391,8 +450,7 @@ fn fallback_name_from_email(email: &str) -> String {
         .split('@')
         .next()
         .unwrap_or("team-admin")
-        .replace('.', " ")
-        .replace('_', " ")
+        .replace(['.', '_'], " ")
 }
 
 fn normalize_key(value: &str) -> String {

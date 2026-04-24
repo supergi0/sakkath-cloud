@@ -36,15 +36,46 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     ] {
         let visible = harness.get_upcoming_matches(token).await?;
         assert!(
-            visible.iter().any(|match_row| match_row.id == target_match.id),
+            visible
+                .iter()
+                .any(|match_row| match_row.id == target_match.id),
             "match {} should be visible to reporter token {}",
             target_match.id,
             token
         );
     }
 
+    let round_settings = harness
+        .get_reporting_round_settings(staff.admin_one.as_str())
+        .await?;
+    assert_eq!(round_settings.len(), 8);
+    let round_one_setting = round_settings
+        .iter()
+        .find(|setting| setting.round_key == 1)
+        .expect("round 1 setting should exist");
+    assert_eq!(round_one_setting.label, "Round 1");
+    assert!(!round_one_setting.is_enabled);
+
+    harness
+        .expect_status(
+            Method::POST,
+            &format!("/v1/admin/matches/{}/start", target_match.id),
+            Some(staff.admin_one.as_str()),
+            Some(serde_json::json!({ "possession": 1 })),
+            StatusCode::FORBIDDEN,
+        )
+        .await?;
+
+    let enabled_round = harness
+        .update_reporting_round_setting(staff.super_admin.as_str(), 1, true)
+        .await?;
+    assert!(enabled_round.is_enabled);
+    assert_eq!(enabled_round.label, "Round 1");
+
     let detail = harness.get_match_detail(target_match.id).await?;
     assert_eq!(detail.possession, None);
+    assert_eq!(detail.match_type, 1);
+    assert!(detail.reporting_enabled);
 
     let t1_players = players_for_team(&detail, detail.t1_id);
     let t2_players = players_for_team(&detail, detail.t2_id);
@@ -58,7 +89,12 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         )
         .await?;
     assert!(response.success);
-    tracker.set_match_state(target_match.id, detail.t1_score, detail.t2_score, response.possession);
+    tracker.set_match_state(
+        target_match.id,
+        detail.t1_score,
+        detail.t2_score,
+        response.possession,
+    );
 
     record_event(
         &harness,
@@ -145,11 +181,19 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     let opponent_for_team_one = harness
         .get_opponent_players(team_one_poc.as_str(), target_match.id)
         .await?;
-    assert!(opponent_for_team_one.iter().all(|player| player.team_id == target_match.t2_id));
+    assert!(
+        opponent_for_team_one
+            .iter()
+            .all(|player| player.team_id == target_match.t2_id)
+    );
     let opponent_for_team_two = harness
         .get_opponent_players(team_two_poc.as_str(), target_match.id)
         .await?;
-    assert!(opponent_for_team_two.iter().all(|player| player.team_id == target_match.t1_id));
+    assert!(
+        opponent_for_team_two
+            .iter()
+            .all(|player| player.team_id == target_match.t1_id)
+    );
 
     submit_spirit_payload(
         &harness,

@@ -4,9 +4,6 @@ use axum::{
     response::Response,
     body::Body,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
-use std::env;
-use crate::controllers::user::Claims;
 
 // Logger middleware - logs POST requests (except login and verify) with user email
 pub async fn logger_middleware(
@@ -26,24 +23,5 @@ pub async fn logger_middleware(
 }
 
 fn extract_email_from_headers(headers: &axum::http::HeaderMap) -> String {
-    let auth_header = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok());
-    
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => h.trim_start_matches("Bearer "),
-        _ => return "anonymous".to_string(),
-    };
-    
-    let secret = env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "default-secret-change-in-production".to_string());
-    
-    match decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_ref()),
-        &Validation::default(),
-    ) {
-        Ok(token_data) => token_data.claims.email,
-        Err(_) => "anonymous".to_string(),
-    }
+    crate::helpers::auth::extract_email(headers).unwrap_or_else(|_| "anonymous".to_string())
 }

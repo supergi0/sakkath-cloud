@@ -33,3 +33,4 @@ sshkey
 sshkey.pub
 
 backups/
+logs/

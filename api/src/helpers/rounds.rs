@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use crate::helpers::sorting::TeamSortData;
+use std::collections::{HashMap, HashSet};
 
 // A single match pairing
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,9 @@ pub struct ScoringGroup {
 // trailing team of an odd group is pushed downward to make adjacent groups even.
 // If a group has odd count, push its last team down to the next group.
 pub fn build_scoring_groups(sorted_teams: &[TeamSortData]) -> Vec<ScoringGroup> {
-    if sorted_teams.is_empty() { return Vec::new(); }
+    if sorted_teams.is_empty() {
+        return Vec::new();
+    }
 
     // Group by swiss points so draws sit between wins and losses.
     let mut groups: Vec<ScoringGroup> = Vec::new();
@@ -36,13 +38,19 @@ pub fn build_scoring_groups(sorted_teams: &[TeamSortData]) -> Vec<ScoringGroup> 
 
     for t in sorted_teams {
         if t.points != current_points {
-            groups.push(ScoringGroup { points: current_points, team_ids: current_ids });
+            groups.push(ScoringGroup {
+                points: current_points,
+                team_ids: current_ids,
+            });
             current_points = t.points;
             current_ids = Vec::new();
         }
         current_ids.push(t.team_id);
     }
-    groups.push(ScoringGroup { points: current_points, team_ids: current_ids });
+    groups.push(ScoringGroup {
+        points: current_points,
+        team_ids: current_ids,
+    });
 
     // Fix odd-sized groups by pushing last team to next group
     fix_odd_groups(&mut groups);
@@ -53,14 +61,12 @@ pub fn build_scoring_groups(sorted_teams: &[TeamSortData]) -> Vec<ScoringGroup> 
 }
 
 // Push last team of odd group to next group until all are even
-fn fix_odd_groups(groups: &mut Vec<ScoringGroup>) {
+fn fix_odd_groups(groups: &mut [ScoringGroup]) {
     let len = groups.len();
     for i in 0..len {
-        if groups[i].team_ids.len() % 2 != 0 {
-            if i + 1 < len {
-                let overflow = groups[i].team_ids.pop().unwrap();
-                groups[i + 1].team_ids.insert(0, overflow);
-            }
+        if !groups[i].team_ids.len().is_multiple_of(2) && i + 1 < len {
+            let overflow = groups[i].team_ids.pop().unwrap();
+            groups[i + 1].team_ids.insert(0, overflow);
             // last group with odd: total teams is even so this shouldn't happen
         }
     }
@@ -75,7 +81,9 @@ pub fn pair_scoring_group(
     history: &HashMap<i64, HashSet<i64>>,
 ) -> Option<Vec<Pairing>> {
     let n = team_ids.len();
-    if n < 2 { return Some(Vec::new()); }
+    if n < 2 {
+        return Some(Vec::new());
+    }
 
     let half = n / 2;
     let top: Vec<i64> = team_ids[..half].to_vec();
@@ -117,10 +125,14 @@ fn backtrack_pair(
     }
 
     for &bi in &candidates {
-        if used.contains(&bi) { continue; }
+        if used.contains(&bi) {
+            continue;
+        }
         let opp = bottom[bi];
         let is_rematch = played.map(|h| h.contains(&opp)).unwrap_or(false);
-        if is_rematch { continue; }
+        if is_rematch {
+            continue;
+        }
 
         used.insert(bi);
         pairings.push(Pairing { t1: t, t2: opp });
@@ -172,10 +184,8 @@ pub fn generate_round_pairings(
         group_pairings[fi] = Some(forced);
     }
 
-    for gp in group_pairings {
-        if let Some(pairs) = gp {
-            all_pairings.extend(pairs);
-        }
+    for pairs in group_pairings.into_iter().flatten() {
+        all_pairings.extend(pairs);
     }
 
     all_pairings
@@ -183,8 +193,8 @@ pub fn generate_round_pairings(
 
 // Try swapping last team of failed group with first of next, or first of failed with last of prev
 fn try_rebalance_and_pair(
-    groups: &mut Vec<ScoringGroup>,
-    group_pairings: &mut Vec<Option<Vec<Pairing>>>,
+    groups: &mut [ScoringGroup],
+    group_pairings: &mut [Option<Vec<Pairing>>],
     failed_idx: usize,
     history: &HashMap<i64, HashSet<i64>>,
 ) -> bool {
@@ -200,13 +210,13 @@ fn try_rebalance_and_pair(
         groups[failed_idx].team_ids[pos] = first_next;
         groups[failed_idx + 1].team_ids[0] = last;
 
-        if let Some(p) = pair_scoring_group(&groups[failed_idx].team_ids, history) {
+        if let Some(p) = pair_scoring_group(&groups[failed_idx].team_ids, history)
+            && let Some(p2) = pair_scoring_group(&groups[failed_idx + 1].team_ids, history)
+        {
             // Re-pair the affected neighbor too
-            if let Some(p2) = pair_scoring_group(&groups[failed_idx + 1].team_ids, history) {
-                group_pairings[failed_idx] = Some(p);
-                group_pairings[failed_idx + 1] = Some(p2);
-                return true;
-            }
+            group_pairings[failed_idx] = Some(p);
+            group_pairings[failed_idx + 1] = Some(p2);
+            return true;
         }
 
         // Undo swap
@@ -223,12 +233,12 @@ fn try_rebalance_and_pair(
         groups[failed_idx].team_ids[0] = prev_last;
         groups[failed_idx - 1].team_ids[prev_last_idx] = first;
 
-        if let Some(p) = pair_scoring_group(&groups[failed_idx].team_ids, history) {
-            if let Some(p2) = pair_scoring_group(&groups[failed_idx - 1].team_ids, history) {
-                group_pairings[failed_idx] = Some(p);
-                group_pairings[failed_idx - 1] = Some(p2);
-                return true;
-            }
+        if let Some(p) = pair_scoring_group(&groups[failed_idx].team_ids, history)
+            && let Some(p2) = pair_scoring_group(&groups[failed_idx - 1].team_ids, history)
+        {
+            group_pairings[failed_idx] = Some(p);
+            group_pairings[failed_idx - 1] = Some(p2);
+            return true;
         }
 
         // Undo
@@ -244,7 +254,10 @@ fn force_pair(team_ids: &[i64]) -> Vec<Pairing> {
     let mut pairs = Vec::new();
     let mut i = 0;
     while i + 1 < team_ids.len() {
-        pairs.push(Pairing { t1: team_ids[i], t2: team_ids[i + 1] });
+        pairs.push(Pairing {
+            t1: team_ids[i],
+            t2: team_ids[i + 1],
+        });
         i += 2;
     }
     pairs
@@ -258,7 +271,9 @@ pub fn generate_playoff_pairings(
     bracket_size: usize,
     offset: usize,
 ) -> Vec<PlayoffRound> {
-    if offset + bracket_size > sorted_teams.len() { return Vec::new(); }
+    if offset + bracket_size > sorted_teams.len() {
+        return Vec::new();
+    }
     let slice = &sorted_teams[offset..offset + bracket_size];
     let ids: Vec<i64> = slice.iter().map(|t| t.team_id).collect();
 
@@ -266,7 +281,10 @@ pub fn generate_playoff_pairings(
         2 => {
             vec![PlayoffRound {
                 name: "playoffs".to_string(),
-                matches: vec![Pairing { t1: ids[0], t2: ids[1] }],
+                matches: vec![Pairing {
+                    t1: ids[0],
+                    t2: ids[1],
+                }],
             }]
         }
         4 => {
@@ -274,15 +292,27 @@ pub fn generate_playoff_pairings(
                 PlayoffRound {
                     name: "playoffs".to_string(),
                     matches: vec![
-                        Pairing { t1: ids[0], t2: ids[3] },
-                        Pairing { t1: ids[1], t2: ids[2] },
+                        Pairing {
+                            t1: ids[0],
+                            t2: ids[3],
+                        },
+                        Pairing {
+                            t1: ids[1],
+                            t2: ids[2],
+                        },
                     ],
                 },
                 PlayoffRound {
                     name: "finals".to_string(),
                     matches: vec![
-                        Pairing { t1: ids[0], t2: ids[1] },
-                        Pairing { t1: ids[2], t2: ids[3] },
+                        Pairing {
+                            t1: ids[0],
+                            t2: ids[1],
+                        },
+                        Pairing {
+                            t1: ids[2],
+                            t2: ids[3],
+                        },
                     ],
                 },
             ]
@@ -307,10 +337,16 @@ fn apply_seed_swap_for_result(
         return;
     }
 
-    let Some(higher_index) = bracket_seed_order.iter().position(|team_id| *team_id == higher_seed_team) else {
+    let Some(higher_index) = bracket_seed_order
+        .iter()
+        .position(|team_id| *team_id == higher_seed_team)
+    else {
         return;
     };
-    let Some(lower_index) = bracket_seed_order.iter().position(|team_id| *team_id == lower_seed_team) else {
+    let Some(lower_index) = bracket_seed_order
+        .iter()
+        .position(|team_id| *team_id == lower_seed_team)
+    else {
         return;
     };
 
@@ -364,7 +400,11 @@ pub fn build_seed_order_after_playoffs(
         }
 
         if remaining >= 2 {
-            seed_order.extend(sorted_teams[offset..offset + 2].iter().map(|team| team.team_id));
+            seed_order.extend(
+                sorted_teams[offset..offset + 2]
+                    .iter()
+                    .map(|team| team.team_id),
+            );
             offset += 2;
             continue;
         }
@@ -447,12 +487,19 @@ pub fn build_playoff_brackets(sorted_teams: &[TeamSortData]) -> Vec<PlayoffRound
 }
 
 // Get match history map from DB matches
-pub async fn fetch_match_history(db: &sqlx::SqlitePool, division: i64) -> HashMap<i64, HashSet<i64>> {
+pub async fn fetch_match_history(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> HashMap<i64, HashSet<i64>> {
     let matches: Vec<(i64, i64)> = sqlx::query_as(
         r#"SELECT m.t1_id, m.t2_id FROM matches m
            JOIN teams t ON m.t1_id = t.id
-           WHERE t.division = ? AND m.type < 1000 AND m.deleted_at IS NULL"#
-    ).bind(division).fetch_all(db).await.unwrap_or_default();
+           WHERE t.division = ? AND m.type < 1000 AND m.deleted_at IS NULL"#,
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     let mut history: HashMap<i64, HashSet<i64>> = HashMap::new();
     for (t1, t2) in matches {
@@ -555,35 +602,73 @@ mod tests {
 
     #[test]
     fn build_playoff_brackets_handles_twenty_two_teams() {
-        let teams: Vec<TeamSortData> = (1..=22).map(|team_id| team(team_id, 0, 0, team_id)).collect();
+        let teams: Vec<TeamSortData> = (1..=22)
+            .map(|team_id| team(team_id, 0, 0, team_id))
+            .collect();
 
         let rounds = build_playoff_brackets(&teams);
-        let playoff_round = rounds.iter().find(|round| round.name == "playoffs").expect("playoff round");
-        let final_round = rounds.iter().find(|round| round.name == "finals").expect("final round");
+        let playoff_round = rounds
+            .iter()
+            .find(|round| round.name == "playoffs")
+            .expect("playoff round");
+        let final_round = rounds
+            .iter()
+            .find(|round| round.name == "finals")
+            .expect("final round");
 
         assert_eq!(playoff_round.matches.len(), 11);
         assert_eq!(final_round.matches.len(), 10);
-        assert!(playoff_round.matches.iter().any(|pair| pair.t1 == 21 && pair.t2 == 22));
-        assert!(!final_round.matches.iter().any(|pair| [21, 22].contains(&pair.t1) || [21, 22].contains(&pair.t2)));
+        assert!(
+            playoff_round
+                .matches
+                .iter()
+                .any(|pair| pair.t1 == 21 && pair.t2 == 22)
+        );
+        assert!(
+            !final_round
+                .matches
+                .iter()
+                .any(|pair| [21, 22].contains(&pair.t1) || [21, 22].contains(&pair.t2))
+        );
     }
 
     #[test]
     fn build_playoff_brackets_handles_ten_teams() {
-        let teams: Vec<TeamSortData> = (1..=10).map(|team_id| team(team_id, 0, 0, team_id)).collect();
+        let teams: Vec<TeamSortData> = (1..=10)
+            .map(|team_id| team(team_id, 0, 0, team_id))
+            .collect();
 
         let rounds = build_playoff_brackets(&teams);
-        let playoff_round = rounds.iter().find(|round| round.name == "playoffs").expect("playoff round");
-        let final_round = rounds.iter().find(|round| round.name == "finals").expect("final round");
+        let playoff_round = rounds
+            .iter()
+            .find(|round| round.name == "playoffs")
+            .expect("playoff round");
+        let final_round = rounds
+            .iter()
+            .find(|round| round.name == "finals")
+            .expect("final round");
 
         assert_eq!(playoff_round.matches.len(), 5);
         assert_eq!(final_round.matches.len(), 4);
-        assert!(playoff_round.matches.iter().any(|pair| pair.t1 == 9 && pair.t2 == 10));
-        assert!(!final_round.matches.iter().any(|pair| [9, 10].contains(&pair.t1) || [9, 10].contains(&pair.t2)));
+        assert!(
+            playoff_round
+                .matches
+                .iter()
+                .any(|pair| pair.t1 == 9 && pair.t2 == 10)
+        );
+        assert!(
+            !final_round
+                .matches
+                .iter()
+                .any(|pair| [9, 10].contains(&pair.t1) || [9, 10].contains(&pair.t2))
+        );
     }
 
     #[test]
     fn build_final_pairings_swaps_seed_labels_after_upset() {
-        let teams: Vec<TeamSortData> = (1..=4).map(|team_id| team(team_id, 0, 0, team_id)).collect();
+        let teams: Vec<TeamSortData> = (1..=4)
+            .map(|team_id| team(team_id, 0, 0, team_id))
+            .collect();
         let playoff_results = vec![
             PlayedMatchResult {
                 t1: 1,
@@ -601,10 +686,7 @@ mod tests {
 
         assert_eq!(
             finals,
-            vec![
-                Pairing { t1: 4, t2: 2 },
-                Pairing { t1: 3, t2: 1 },
-            ]
+            vec![Pairing { t1: 4, t2: 2 }, Pairing { t1: 3, t2: 1 },]
         );
     }
 }

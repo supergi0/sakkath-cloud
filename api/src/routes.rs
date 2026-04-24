@@ -1,19 +1,11 @@
 use axum::{
-    Router,
-    middleware,
-    routing::{get, post, put, delete},
+    Router, middleware,
+    routing::{delete, get, post, put},
 };
 
-use crate::controllers::{
-    user,
-    team,
-    announcements,
-    matches,
-    health,
-    scheduling,
-};
-use crate::middleware::auth::auth_middleware;
 use crate::AppState;
+use crate::controllers::{announcements, health, matches, scheduling, team, user};
+use crate::middleware::auth::auth_middleware;
 
 // Public routes without authentication
 fn routes_without_auth() -> Router<AppState> {
@@ -26,14 +18,16 @@ fn routes_without_auth() -> Router<AppState> {
 
 // Protected routes requiring authentication
 fn routes_with_auth() -> Router<AppState> {
-    Router::new()
-        .route("/auth/role", get(user::get_role))
+    Router::new().route("/auth/role", get(user::get_role))
 }
 
 // POC routes (protected)
 fn poc_routes() -> Router<AppState> {
     Router::new()
-        .route("/poc/team", get(team::get_poc_team).put(team::update_poc_team))
+        .route(
+            "/poc/team",
+            get(team::get_poc_team).put(team::update_poc_team),
+        )
         .route("/poc/team/logo", put(team::update_poc_team_logo))
         .route("/poc/players", get(team::get_poc_players))
         .route("/poc/players", post(team::add_poc_player))
@@ -41,19 +35,35 @@ fn poc_routes() -> Router<AppState> {
         .route("/poc/players/:id", delete(team::delete_poc_player))
         .route("/poc/matches", get(matches::get_poc_matches))
         .route("/poc/matches/:id/spirit", put(matches::submit_spirit_score))
-        .route("/poc/matches/:id/spirit-wfdf", put(matches::submit_wfdf_spirit))
-        .route("/poc/matches/:id/confirm-score", post(matches::confirm_score))
-        .route("/poc/matches/:id/opponent-players", get(matches::get_opponent_players))
+        .route(
+            "/poc/matches/:id/spirit-wfdf",
+            put(matches::submit_wfdf_spirit),
+        )
+        .route(
+            "/poc/matches/:id/confirm-score",
+            post(matches::confirm_score),
+        )
+        .route(
+            "/poc/matches/:id/opponent-players",
+            get(matches::get_opponent_players),
+        )
 }
 
 // Volunteer/Admin routes (protected)
 fn volunteer_routes() -> Router<AppState> {
     Router::new()
         .route("/admin/matches", get(matches::get_upcoming_matches))
+        .route(
+            "/admin/reporting-rounds",
+            get(matches::get_reporting_round_settings),
+        )
         .route("/admin/matches/:id/start", post(matches::start_match))
         .route("/admin/matches/:id/end", post(matches::end_match))
         .route("/admin/matches/:id/event", post(matches::record_event))
-    .route("/admin/matches/:id/switch-possession", post(matches::switch_possession))
+        .route(
+            "/admin/matches/:id/switch-possession",
+            post(matches::switch_possession),
+        )
         .route("/admin/matches/:id/undo", post(matches::undo_event))
 }
 
@@ -70,16 +80,28 @@ fn team_routes() -> Router<AppState> {
 
 // Announcement routes (public)
 fn announcement_routes() -> Router<AppState> {
-    Router::new()
-        .route("/announcements", get(announcements::get_announcements))
+    Router::new().route("/announcements", get(announcements::get_announcements))
 }
 
 // Super admin routes (protected, SUPER only)
 fn super_routes() -> Router<AppState> {
     Router::new()
-        .route("/super/announcements", post(announcements::create_announcement))
-        .route("/super/announcements/:id", put(announcements::update_announcement))
-        .route("/super/announcements/:id", delete(announcements::delete_announcement))
+        .route(
+            "/super/announcements",
+            post(announcements::create_announcement),
+        )
+        .route(
+            "/super/announcements/:id",
+            put(announcements::update_announcement),
+        )
+        .route(
+            "/super/announcements/:id",
+            delete(announcements::delete_announcement),
+        )
+        .route(
+            "/super/reporting-rounds/:round_key",
+            put(matches::update_reporting_round_setting),
+        )
 }
 
 // Match routes (public)
@@ -89,7 +111,10 @@ fn match_routes() -> Router<AppState> {
         .route("/matches/:id", get(matches::get_match_detail))
         .route("/matches/:id/events", get(matches::get_match_events))
         .route("/matches/:id/spirits", get(matches::get_match_spirits))
-        .route("/matches/:id/score-confirmations", get(matches::get_score_confirmations))
+        .route(
+            "/matches/:id/score-confirmations",
+            get(matches::get_score_confirmations),
+        )
 }
 
 // Schedule routes (public)
@@ -99,16 +124,31 @@ fn schedule_routes() -> Router<AppState> {
         .route("/schedule/teams", get(scheduling::get_schedule_teams))
         .route("/schedule/grid", get(scheduling::get_schedule_grid))
         .route("/schedule/matches", get(scheduling::get_schedule_matches))
-        .route("/schedule/early-fixtures", get(scheduling::get_early_fixtures))
+        .route(
+            "/schedule/early-fixtures",
+            get(scheduling::get_early_fixtures),
+        )
 }
 
 // Schedule admin routes (protected)
 fn schedule_admin_routes() -> Router<AppState> {
     Router::new()
-        .route("/admin/schedule/:division/generate", post(scheduling::generate_next_round))
-        .route("/admin/schedule/:division/check-gates", post(scheduling::check_and_populate_gates))
-    .route("/super/schedule/rows/:row_key", put(scheduling::update_schedule_row))
-    .route("/super/schedule/matches/:id/slot", put(scheduling::move_schedule_match))
+        .route(
+            "/admin/schedule/:division/generate",
+            post(scheduling::generate_next_round),
+        )
+        .route(
+            "/admin/schedule/:division/check-gates",
+            post(scheduling::check_and_populate_gates),
+        )
+        .route(
+            "/super/schedule/rows/:row_key",
+            put(scheduling::update_schedule_row),
+        )
+        .route(
+            "/super/schedule/matches/:id/slot",
+            put(scheduling::move_schedule_match),
+        )
 }
 
 // Combine all routes
@@ -126,7 +166,7 @@ pub fn api_routes() -> Router<AppState> {
             .merge(volunteer_routes())
             .merge(super_routes())
             .merge(schedule_admin_routes())
-            .layer(middleware::from_fn(auth_middleware))
+            .layer(middleware::from_fn(auth_middleware)),
     );
 
     router

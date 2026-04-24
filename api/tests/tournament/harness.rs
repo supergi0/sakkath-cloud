@@ -1,6 +1,7 @@
 use super::model::{
-    LoginResponse, MatchDetailResponse, PlayerStatResponse, ScheduleGridResponse, ScheduleMatchResponse,
-    ScoreConfirmRowResponse, SpiritScoreRowResponse, StandingRowResponse, StatsResponse, TeamMatchResponse,
+    LoginResponse, MatchDetailResponse, PlayerStatResponse, ReportingRoundSettingResponse,
+    ScheduleGridResponse, ScheduleMatchResponse, ScoreConfirmRowResponse,
+    SpiritScoreRowResponse, StandingRowResponse, StatsResponse, TeamMatchResponse,
     TeamResponse, TournamentTracker, UpcomingMatchResponse,
 };
 use api::{AppState, build_api_only_app, migration};
@@ -30,7 +31,7 @@ pub struct Credentials {
 
 pub struct Harness {
     app: axum::Router,
-    pub db: SqlitePool,
+    _db: SqlitePool,
     pub credentials: Credentials,
     temp_dir: PathBuf,
     tokens: HashMap<String, String>,
@@ -56,7 +57,7 @@ impl Harness {
 
         Ok(Self {
             app,
-            db,
+            _db: db,
             credentials,
             temp_dir,
             tokens: HashMap::new(),
@@ -86,10 +87,6 @@ impl Harness {
         }
 
         Ok(tracker)
-    }
-
-    pub fn token_for_cached(&self, email: &str) -> Option<&str> {
-        self.tokens.get(email).map(String::as_str)
     }
 
     pub async fn login(&mut self, email: &str, password: &str) -> TestResult<String> {
@@ -141,7 +138,10 @@ impl Harness {
         .await
     }
 
-    pub async fn get_match_spirits(&self, match_id: i64) -> TestResult<Vec<SpiritScoreRowResponse>> {
+    pub async fn get_match_spirits(
+        &self,
+        match_id: i64,
+    ) -> TestResult<Vec<SpiritScoreRowResponse>> {
         self.request_json(
             Method::GET,
             &format!("/v1/matches/{match_id}/spirits"),
@@ -152,7 +152,10 @@ impl Harness {
         .await
     }
 
-    pub async fn get_score_confirmations(&self, match_id: i64) -> TestResult<Vec<ScoreConfirmRowResponse>> {
+    pub async fn get_score_confirmations(
+        &self,
+        match_id: i64,
+    ) -> TestResult<Vec<ScoreConfirmRowResponse>> {
         self.request_json(
             Method::GET,
             &format!("/v1/matches/{match_id}/score-confirmations"),
@@ -208,9 +211,48 @@ impl Harness {
             .await
     }
 
-    pub async fn get_upcoming_matches(&self, token: &str) -> TestResult<Vec<UpcomingMatchResponse>> {
-        self.request_json(Method::GET, "/v1/admin/matches", Some(token), None, StatusCode::OK)
-            .await
+    pub async fn get_upcoming_matches(
+        &self,
+        token: &str,
+    ) -> TestResult<Vec<UpcomingMatchResponse>> {
+        self.request_json(
+            Method::GET,
+            "/v1/admin/matches",
+            Some(token),
+            None,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    pub async fn get_reporting_round_settings(
+        &self,
+        token: &str,
+    ) -> TestResult<Vec<ReportingRoundSettingResponse>> {
+        self.request_json(
+            Method::GET,
+            "/v1/admin/reporting-rounds",
+            Some(token),
+            None,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    pub async fn update_reporting_round_setting(
+        &self,
+        token: &str,
+        round_key: i64,
+        is_enabled: bool,
+    ) -> TestResult<ReportingRoundSettingResponse> {
+        self.request_json(
+            Method::PUT,
+            &format!("/v1/super/reporting-rounds/{round_key}"),
+            Some(token),
+            Some(serde_json::json!({ "is_enabled": is_enabled })),
+            StatusCode::OK,
+        )
+        .await
     }
 
     pub async fn get_opponent_players(
@@ -235,7 +277,8 @@ impl Harness {
         token: &str,
         body: Option<serde_json::Value>,
     ) -> TestResult<super::model::MutationResponse> {
-        self.request_json(method, path, Some(token), body, StatusCode::OK).await
+        self.request_json(method, path, Some(token), body, StatusCode::OK)
+            .await
     }
 
     pub async fn expect_status(
@@ -246,7 +289,8 @@ impl Harness {
         body: Option<serde_json::Value>,
         expected_status: StatusCode,
     ) -> TestResult<serde_json::Value> {
-        self.request_json(method, path, token, body, expected_status).await
+        self.request_json(method, path, token, body, expected_status)
+            .await
     }
 
     async fn request_json<T: serde::de::DeserializeOwned>(
@@ -325,8 +369,10 @@ fn copy_database_snapshot(temp_dir: &Path) -> TestResult<PathBuf> {
     let destination = temp_dir.join("sakkath.db");
 
     copy_optional_file(&source, &destination)?;
-    copy_optional_file(&with_suffix(&source, "-wal"), &with_suffix(&destination, "-wal"))?;
-    copy_optional_file(&with_suffix(&source, "-shm"), &with_suffix(&destination, "-shm"))?;
+    copy_optional_file(
+        &with_suffix(&source, "-wal"),
+        &with_suffix(&destination, "-wal"),
+    )?;
 
     Ok(destination)
 }
@@ -343,11 +389,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 async fn load_credentials(db: &SqlitePool) -> TestResult<Credentials> {
-    let super_email: (String,) = sqlx::query_as(
-        "SELECT email FROM users WHERE role = 0 AND deleted_at IS NULL LIMIT 1",
-    )
-    .fetch_one(db)
-    .await?;
+    let super_email: (String,) =
+        sqlx::query_as("SELECT email FROM users WHERE role = 0 AND deleted_at IS NULL LIMIT 1")
+            .fetch_one(db)
+            .await?;
 
     let admin_emails: Vec<String> = sqlx::query_as::<_, (String,)>(
         "SELECT email FROM users WHERE role = 1 AND deleted_at IS NULL ORDER BY email",

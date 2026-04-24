@@ -1,11 +1,11 @@
 use axum::{
-    extract::State,
-    http::{StatusCode, HeaderMap},
     Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
 };
+use chrono::{Duration, Utc};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
-use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
-use chrono::{Utc, Duration};
 use std::env;
 
 #[derive(Serialize, Deserialize)]
@@ -65,7 +65,10 @@ fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-async fn verify_turnstile(headers: &HeaderMap, captcha_token: Option<&str>) -> Result<(), StatusCode> {
+async fn verify_turnstile(
+    headers: &HeaderMap,
+    captcha_token: Option<&str>,
+) -> Result<(), StatusCode> {
     let secret = match env::var("TURNSTILE_SECRET_KEY") {
         Ok(secret) if !secret.trim().is_empty() => secret,
         _ => return Ok(()),
@@ -76,10 +79,7 @@ async fn verify_turnstile(headers: &HeaderMap, captcha_token: Option<&str>) -> R
         .filter(|token| !token.is_empty())
         .ok_or(StatusCode::FORBIDDEN)?;
 
-    let mut form_fields = vec![
-        ("secret", secret),
-        ("response", token.to_string()),
-    ];
+    let mut form_fields = vec![("secret", secret), ("response", token.to_string())];
 
     if let Some(remote_ip) = extract_client_ip(headers) {
         form_fields.push(("remoteip", remote_ip));
@@ -92,10 +92,8 @@ async fn verify_turnstile(headers: &HeaderMap, captcha_token: Option<&str>) -> R
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    let verify_response: TurnstileVerifyResponse = response
-        .json()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let verify_response: TurnstileVerifyResponse =
+        response.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
 
     if verify_response.success {
         Ok(())
@@ -111,37 +109,42 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, StatusCode> {
     verify_turnstile(&headers, payload.captcha_token.as_deref()).await?;
 
-    let password_hash = format!("{:x}", md5::compute(&payload.password));
-    
-    let user: Option<(i64, String, i64)> = sqlx::query_as(
-        "SELECT id, email, role FROM users WHERE email = ? AND password_hash = ? AND deleted_at IS NULL"
+    let user: Option<(i64, String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, email, role, password_hash FROM users WHERE email = ? AND deleted_at IS NULL",
     )
     .bind(&payload.email)
-    .bind(&password_hash)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    if let Some((user_id, email, role)) = user {
-        let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default-secret-change-in-production".to_string());
+
+    if let Some((user_id, email, role, password_hash)) = user {
+        let Some(password_hash) = password_hash else {
+            return Err(StatusCode::UNAUTHORIZED);
+        };
+
+        if !crate::helpers::auth::verify_password(&payload.password, &password_hash) {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+
+        let secret = crate::helpers::auth::jwt_secret()?;
         let expiration = Utc::now()
             .checked_add_signed(Duration::hours(24))
             .expect("valid timestamp")
             .timestamp() as usize;
-        
+
         let claims = Claims {
             user_id,
             email: email.clone(),
             exp: expiration,
         };
-        
+
         let token = encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(secret.as_ref()),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        
+
         Ok(Json(LoginResponse { token, role }))
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -152,31 +155,31 @@ pub async fn verify(
     State(state): State<crate::AppState>,
     Json(payload): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, StatusCode> {
-    let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default-secret-change-in-production".to_string());
-    
-    let token_data = decode::<Claims>(
-        &payload.token,
-        &DecodingKey::from_secret(secret.as_ref()),
-        &Validation::default(),
-    );
-    
-    match token_data {
-        Ok(data) => {
-            let user: Option<(i64,)> = sqlx::query_as(
-                "SELECT role FROM users WHERE email = ? AND deleted_at IS NULL"
-            )
-            .bind(&data.claims.email)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            
+    match crate::helpers::auth::decode_token_claims(&payload.token) {
+        Ok(claims) => {
+            let user: Option<(i64,)> =
+                sqlx::query_as("SELECT role FROM users WHERE email = ? AND deleted_at IS NULL")
+                    .bind(&claims.email)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
             if let Some((role,)) = user {
-                Ok(Json(VerifyResponse { valid: true, role: Some(role) }))
+                Ok(Json(VerifyResponse {
+                    valid: true,
+                    role: Some(role),
+                }))
             } else {
-                Ok(Json(VerifyResponse { valid: false, role: None }))
+                Ok(Json(VerifyResponse {
+                    valid: false,
+                    role: None,
+                }))
             }
         }
-        Err(_) => Ok(Json(VerifyResponse { valid: false, role: None })),
+        Err(_) => Ok(Json(VerifyResponse {
+            valid: false,
+            role: None,
+        })),
     }
 }
 
@@ -185,30 +188,14 @@ pub async fn get_role(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RoleResponse>, StatusCode> {
-    let auth_header = headers
-        .get("Authorization")
-        .and_then(|h| h.to_str().ok());
+    let claims = crate::helpers::auth::extract_claims(&headers)?;
 
-    let token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => h.trim_start_matches("Bearer "),
-        _ => return Err(StatusCode::UNAUTHORIZED),
-    };
-
-    let secret = env::var("JWT_SECRET").unwrap_or_else(|_| "default-secret-change-in-production".to_string());
-
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_ref()),
-        &Validation::default(),
-    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    let user: Option<(i64,)> = sqlx::query_as(
-        "SELECT role FROM users WHERE email = ? AND deleted_at IS NULL"
-    )
-    .bind(&token_data.claims.email)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user: Option<(i64,)> =
+        sqlx::query_as("SELECT role FROM users WHERE email = ? AND deleted_at IS NULL")
+            .bind(&claims.email)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some((role,)) = user {
         let role_name = match role {

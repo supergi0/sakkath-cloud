@@ -20,6 +20,7 @@ interface Team {
 interface Player {
   id: number;
   name: string;
+  common_name: string | null;
   email: string;
   phone: string | null;
   is_captain: boolean;
@@ -102,6 +103,22 @@ function roleFromPlayer(p: Partial<Player>): PlayerRole {
 
 function roleToFlags(role: PlayerRole) {
   return { is_captain: role === 'Captain', is_spirit_captain: role === 'Spirit Captain' };
+}
+
+function normalizeOptionalText(value?: string | null) {
+  const trimmed = value?.trim() ?? '';
+  return trimmed ? trimmed : null;
+}
+
+function consumesRosterMove(original: Player, draft: Partial<Player>, draftRole: PlayerRole) {
+  const nextName = draft.name?.trim() ?? '';
+  const nextFlags = roleToFlags(draftRole);
+
+  return original.name.trim() !== nextName
+    || normalizeOptionalText(original.email) !== normalizeOptionalText(draft.email)
+    || normalizeOptionalText(original.phone) !== normalizeOptionalText(draft.phone)
+    || original.is_captain !== nextFlags.is_captain
+    || original.is_spirit_captain !== nextFlags.is_spirit_captain;
 }
 
 function roleBadge(role: PlayerRole) {
@@ -211,7 +228,7 @@ export default function MyTeamPage() {
   const [editForm, setEditForm] = useState<Partial<Player>>({});
   const [editRole, setEditRole] = useState<PlayerRole>('Player');
   const [isAdding, setIsAdding] = useState(false);
-  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
   const [newRole, setNewRole] = useState<PlayerRole>('Player');
   const [isEditingLogo, setIsEditingLogo] = useState(false);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
@@ -227,6 +244,9 @@ export default function MyTeamPage() {
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const editingPlayer = editingId ? players.find(player => player.id === editingId) ?? null : null;
+  const rosterMovesExhausted = !!team && team.roster_moves_remaining <= 0;
+  const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
 
   useEffect(() => {
     if (isLoading) return;
@@ -308,7 +328,7 @@ export default function MyTeamPage() {
             setTeam({ ...team, roster_moves_remaining: data.roster_moves_remaining ?? team.roster_moves_remaining });
             setEditingId(null);
           } else if (res.status === 409) {
-            setFeedback({ type: 'error', message: 'No roster edit/remove slots remain for this team.' });
+            setFeedback({ type: 'error', message: 'Roster edit/remove slots are exhausted. Only common name edits stay free now.' });
           } else {
             setFeedback({ type: 'error', message: 'Unable to save this player right now.' });
           }
@@ -361,7 +381,7 @@ export default function MyTeamPage() {
           if (res.ok) {
             const data = await res.json();
             setPlayers([...players, { id: data.id, ...payload } as Player]);
-            setNewPlayer({ name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+            setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
             setNewRole('Player'); setIsAdding(false);
           } else if (res.status === 409) {
             setFeedback({ type: 'error', message: `This team already has the maximum ${MAX_TEAM_PLAYERS} players.` });
@@ -791,12 +811,15 @@ export default function MyTeamPage() {
           <p className="mb-3 text-xs text-gray-600 dark:text-slate-400">
             Emails and phone numbers are not mandatory, but please fill contact details for a few people so they are reachable in case of issues.
           </p>
+          <p className="mb-3 text-xs text-gray-600 dark:text-slate-400">
+            Common name updates are always free and remain available even after the roster edit/remove budget is exhausted.
+          </p>
 
           {isAdding && (
             <div className="mb-2 p-3 rounded-xl border border-cyan-200 dark:border-cyan-800 bg-cyan-50/50 dark:bg-cyan-900/10 space-y-2">
               <input type="text" placeholder="Name *" value={newPlayer.name || ''} onChange={e => setNewPlayer({ ...newPlayer, name: e.target.value })}
-                className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
-              <input type="email" placeholder="Email (optional)" value={newPlayer.email || ''} onChange={e => setNewPlayer({ ...newPlayer, email: e.target.value })}
+                className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />              <input type="text" placeholder="Common Name (optional)" value={newPlayer.common_name || ''} onChange={e => setNewPlayer({ ...newPlayer, common_name: e.target.value })}
+                className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />              <input type="email" placeholder="Email (optional)" value={newPlayer.email || ''} onChange={e => setNewPlayer({ ...newPlayer, email: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
               <input type="text" placeholder="Phone (optional)" value={newPlayer.phone || ''} onChange={e => setNewPlayer({ ...newPlayer, phone: e.target.value })}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
@@ -809,7 +832,7 @@ export default function MyTeamPage() {
                   className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold disabled:opacity-50 transition">
                   <Save className="w-3 h-3" /> Add
                 </button>
-                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false }); setNewRole('Player'); }}
+                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false }); setNewRole('Player'); }}
                   className="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 transition">
                   Cancel
                 </button>
@@ -825,17 +848,28 @@ export default function MyTeamPage() {
                   {editingId === player.id ? (
                     <div className="p-2.5 space-y-2">
                       <input type="text" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })}
+                        disabled={rosterMovesExhausted}
+                        className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
+                      <input type="text" placeholder="Common Name (optional)" value={editForm.common_name || ''} onChange={e => setEditForm({ ...editForm, common_name: e.target.value })}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="email" placeholder="Email (optional)" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
+                        disabled={rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="text" placeholder="Phone (optional)" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })}
+                        disabled={rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <select value={editRole} onChange={e => setEditRole(e.target.value as PlayerRole)}
+                        disabled={rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
                         {PLAYER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
+                      {rosterMovesExhausted && (
+                        <Text variant="secondary" className="text-[11px]">
+                          Roster edit/remove slots are exhausted. Only the common name field can be changed now.
+                        </Text>
+                      )}
                       <div className="flex gap-2">
-                        <button onClick={handleSave} className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition">
+                        <button onClick={handleSave} disabled={!editForm.name?.trim() || (rosterMovesExhausted && saveConsumesMove)} className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50">
                           <Save className="w-3 h-3" /> Save
                         </button>
                         <button onClick={() => setEditingId(null)} className="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-slate-300 transition">Cancel</button>
@@ -854,8 +888,7 @@ export default function MyTeamPage() {
                       <div className="flex gap-0.5 shrink-0">
                         <button
                           onClick={() => handleEdit(player)}
-                          disabled={team.roster_moves_remaining <= 0}
-                          className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition disabled:cursor-not-allowed disabled:opacity-40"
+                          className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition"
                         >
                           <Edit2 className="w-3.5 h-3.5 text-gray-500" />
                         </button>

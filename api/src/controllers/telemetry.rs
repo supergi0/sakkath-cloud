@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -140,9 +140,18 @@ pub async fn get_telemetry(State(state): State<crate::AppState>) -> Json<Telemet
                 memory_percent: hardware_average.2.unwrap_or(0.0),
             },
             latest: ResourcePoint {
-                cpu_percent: hardware_latest.as_ref().and_then(|row| row.0).unwrap_or(0.0),
-                memory_mb_used: hardware_latest.as_ref().and_then(|row| row.1).unwrap_or(0.0),
-                memory_percent: hardware_latest.as_ref().and_then(|row| row.2).unwrap_or(0.0),
+                cpu_percent: hardware_latest
+                    .as_ref()
+                    .and_then(|row| row.0)
+                    .unwrap_or(0.0),
+                memory_mb_used: hardware_latest
+                    .as_ref()
+                    .and_then(|row| row.1)
+                    .unwrap_or(0.0),
+                memory_percent: hardware_latest
+                    .as_ref()
+                    .and_then(|row| row.2)
+                    .unwrap_or(0.0),
             },
         },
         requests: RequestTelemetry {

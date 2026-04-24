@@ -1,8 +1,8 @@
+use crate::helpers::cache;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use crate::helpers::cache;
 
 // Core team data fetched once from DB, reused across all criteria
 #[derive(Clone, Serialize, Deserialize)]
@@ -26,12 +26,14 @@ pub struct TeamSortData {
     pub h2h: HashMap<i64, i8>,
 }
 
+type TeamIdentityRow = (i64, String, Option<String>, Option<String>, i64);
+
 async fn fetch_sort_data_with_round_limit(
     db: &SqlitePool,
     division: i64,
     max_round: Option<i64>,
 ) -> Vec<TeamSortData> {
-    let teams: Vec<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(
+    let teams: Vec<TeamIdentityRow> = sqlx::query_as(
         "SELECT id, name, abbreviation, small_logo, COALESCE(init_rank, 9999) FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC"
     ).bind(division).fetch_all(db).await.unwrap_or_default();
 
@@ -42,42 +44,65 @@ async fn fetch_sort_data_with_round_limit(
            JOIN teams t ON m.t1_id = t.id
            WHERE t.division = ? AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
              AND (? IS NULL OR m.type <= ?)
-           ORDER BY m.type ASC"#
-    ).bind(division).bind(max_round).bind(max_round).fetch_all(db).await.unwrap_or_default();
+           ORDER BY m.type ASC"#,
+    )
+    .bind(division)
+    .bind(max_round)
+    .bind(max_round)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     let mut data_map: HashMap<i64, TeamSortData> = HashMap::new();
     for (id, name, abbreviation, logo, rank) in &teams {
-        data_map.insert(*id, TeamSortData {
-            team_id: *id,
-            name: name.clone(),
-            abbreviation: abbreviation.clone(),
-            small_logo: logo.clone(),
-            init_rank: *rank,
-            wins: 0,
-            losses: 0,
-            draws: 0,
-            points: 0,
-            points_for: 0,
-            points_against: 0,
-            spirit_avg: 0.0,
-            round_results: Vec::new(),
-            opponents: Vec::new(),
-            h2h: HashMap::new(),
-        });
+        data_map.insert(
+            *id,
+            TeamSortData {
+                team_id: *id,
+                name: name.clone(),
+                abbreviation: abbreviation.clone(),
+                small_logo: logo.clone(),
+                init_rank: *rank,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                points: 0,
+                points_for: 0,
+                points_against: 0,
+                spirit_avg: 0.0,
+                round_results: Vec::new(),
+                opponents: Vec::new(),
+                h2h: HashMap::new(),
+            },
+        );
     }
 
     // Process matches into team data
     for (t1, t2, s1, s2, _round) in &matches {
-        let (t1_res, t2_res): (i8, i8) = if s1 > s2 { (1, -1) } else if s1 < s2 { (-1, 1) } else { (0, 0) };
+        let (t1_res, t2_res): (i8, i8) = if s1 > s2 {
+            (1, -1)
+        } else if s1 < s2 {
+            (-1, 1)
+        } else {
+            (0, 0)
+        };
 
         if let Some(d) = data_map.get_mut(t1) {
             d.points_for += s1;
             d.points_against += s2;
             d.opponents.push(*t2);
             match t1_res {
-                1 => { d.wins += 1; d.points += 2; }
-                0 => { d.draws += 1; d.points += 1; }
-                _ => { d.losses += 1; }
+                1 => {
+                    d.wins += 1;
+                    d.points += 2;
+                }
+                0 => {
+                    d.draws += 1;
+                    d.points += 1;
+                }
+                _ => {
+                    d.losses += 1;
+                }
             }
             d.round_results.push(t1_res);
             d.h2h.insert(*t2, t1_res);
@@ -87,9 +112,17 @@ async fn fetch_sort_data_with_round_limit(
             d.points_against += s1;
             d.opponents.push(*t1);
             match t2_res {
-                1 => { d.wins += 1; d.points += 2; }
-                0 => { d.draws += 1; d.points += 1; }
-                _ => { d.losses += 1; }
+                1 => {
+                    d.wins += 1;
+                    d.points += 2;
+                }
+                0 => {
+                    d.draws += 1;
+                    d.points += 1;
+                }
+                _ => {
+                    d.losses += 1;
+                }
             }
             d.round_results.push(t2_res);
             d.h2h.insert(*t1, t2_res);
@@ -131,7 +164,7 @@ pub fn c1_points(a: &TeamSortData, b: &TeamSortData) -> Ordering {
 // C2: Head-to-head. If a beat b, a ranks higher.
 pub fn c2_head_to_head(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     match a.h2h.get(&b.team_id) {
-        Some(1) => Ordering::Less,    // a beat b
+        Some(1) => Ordering::Less,     // a beat b
         Some(-1) => Ordering::Greater, // b beat a
         _ => Ordering::Equal,          // draw or never played
     }
@@ -181,36 +214,56 @@ pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
 
 // C7: Stable final fallback using seed, then team id
 pub fn c7_stable_seed(a: &TeamSortData, b: &TeamSortData) -> Ordering {
-    let a_rank = if a.init_rank > 0 { a.init_rank } else { i64::MAX };
-    let b_rank = if b.init_rank > 0 { b.init_rank } else { i64::MAX };
+    let a_rank = if a.init_rank > 0 {
+        a.init_rank
+    } else {
+        i64::MAX
+    };
+    let b_rank = if b.init_rank > 0 {
+        b.init_rank
+    } else {
+        i64::MAX
+    };
 
     a_rank.cmp(&b_rank).then_with(|| a.team_id.cmp(&b.team_id))
 }
 
 // Master sort: apply all criteria in order c1..c7
-pub fn sort_teams(teams: &mut Vec<TeamSortData>) {
-    let snapshot: Vec<TeamSortData> = teams.clone();
+pub fn sort_teams(teams: &mut [TeamSortData]) {
+    let snapshot: Vec<TeamSortData> = teams.to_vec();
 
     teams.sort_by(|a, b| {
         let mut ord = c1_points(a, b);
-        if ord != Ordering::Equal { return ord; }
+        if ord != Ordering::Equal {
+            return ord;
+        }
 
         if tied_team_count(a.points, &snapshot) == 2 {
             ord = c2_head_to_head(a, b);
-            if ord != Ordering::Equal { return ord; }
+            if ord != Ordering::Equal {
+                return ord;
+            }
         }
 
         ord = c3_buchholz(a, b, &snapshot);
-        if ord != Ordering::Equal { return ord; }
+        if ord != Ordering::Equal {
+            return ord;
+        }
 
         ord = c4_point_difference(a, b);
-        if ord != Ordering::Equal { return ord; }
+        if ord != Ordering::Equal {
+            return ord;
+        }
 
         ord = c5_points_scored(a, b);
-        if ord != Ordering::Equal { return ord; }
+        if ord != Ordering::Equal {
+            return ord;
+        }
 
         ord = c6_momentum_score(a, b);
-        if ord != Ordering::Equal { return ord; }
+        if ord != Ordering::Equal {
+            return ord;
+        }
 
         c7_stable_seed(a, b)
     });
@@ -250,8 +303,12 @@ pub async fn get_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<T
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
            WHERE t.division = ? AND m.possession IS NOT NULL AND m.possession < 3
-             AND m.deleted_at IS NULL AND m.type < 1000"#
-    ).bind(division).fetch_all(db).await.unwrap_or_default();
+             AND m.deleted_at IS NULL AND m.type < 1000"#,
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     // Build a lookup for quick access
     let mut team_map: HashMap<i64, usize> = HashMap::new();
@@ -261,24 +318,46 @@ pub async fn get_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<T
 
     // Layer live scores on top of completed data
     for (t1, t2, s1, s2) in &live {
-        let (t1_res, t2_res): (i8, i8) = if s1 > s2 { (1, -1) } else if s1 < s2 { (-1, 1) } else { (0, 0) };
+        let (t1_res, t2_res): (i8, i8) = if s1 > s2 {
+            (1, -1)
+        } else if s1 < s2 {
+            (-1, 1)
+        } else {
+            (0, 0)
+        };
 
         if let Some(&idx) = team_map.get(t1) {
             teams[idx].points_for += s1;
             teams[idx].points_against += s2;
             match t1_res {
-                1 => { teams[idx].wins += 1; teams[idx].points += 2; }
-                0 => { teams[idx].draws += 1; teams[idx].points += 1; }
-                _ => { teams[idx].losses += 1; }
+                1 => {
+                    teams[idx].wins += 1;
+                    teams[idx].points += 2;
+                }
+                0 => {
+                    teams[idx].draws += 1;
+                    teams[idx].points += 1;
+                }
+                _ => {
+                    teams[idx].losses += 1;
+                }
             }
         }
         if let Some(&idx) = team_map.get(t2) {
             teams[idx].points_for += s2;
             teams[idx].points_against += s1;
             match t2_res {
-                1 => { teams[idx].wins += 1; teams[idx].points += 2; }
-                0 => { teams[idx].draws += 1; teams[idx].points += 1; }
-                _ => { teams[idx].losses += 1; }
+                1 => {
+                    teams[idx].wins += 1;
+                    teams[idx].points += 2;
+                }
+                0 => {
+                    teams[idx].draws += 1;
+                    teams[idx].points += 1;
+                }
+                _ => {
+                    teams[idx].losses += 1;
+                }
             }
         }
     }
@@ -288,7 +367,10 @@ pub async fn get_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<T
 }
 
 // Cached intermediate standings with Redis-first lookup and DB fallback.
-pub async fn get_cached_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
+pub async fn get_cached_intermediate_standings(
+    db: &SqlitePool,
+    division: i64,
+) -> Vec<TeamSortData> {
     if let Some(cached) = cache::get_intermediate_standings::<Vec<TeamSortData>>(division).await {
         return cached;
     }

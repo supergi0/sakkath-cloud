@@ -16,21 +16,19 @@ const DEFAULT_TTL: u64 = 300; // 5 minutes
 pub async fn init_redis() -> bool {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     match redis::Client::open(url.as_str()) {
-        Ok(client) => {
-            match client.get_multiplexed_async_connection().await {
-                Ok(conn) => {
-                    let lock = REDIS_CLIENT.get_or_init(|| Mutex::new(None));
-                    *lock.lock().await = Some(conn);
-                    tracing::info!("Redis connected at {}", url);
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!("Redis unavailable ({}), running without cache", e);
-                    REDIS_CLIENT.get_or_init(|| Mutex::new(None));
-                    false
-                }
+        Ok(client) => match client.get_multiplexed_async_connection().await {
+            Ok(conn) => {
+                let lock = REDIS_CLIENT.get_or_init(|| Mutex::new(None));
+                *lock.lock().await = Some(conn);
+                tracing::info!("Redis connected at {}", url);
+                true
             }
-        }
+            Err(e) => {
+                tracing::warn!("Redis unavailable ({}), running without cache", e);
+                REDIS_CLIENT.get_or_init(|| Mutex::new(None));
+                false
+            }
+        },
         Err(e) => {
             tracing::warn!("Redis client error ({}), running without cache", e);
             REDIS_CLIENT.get_or_init(|| Mutex::new(None));
@@ -46,21 +44,25 @@ async fn get_conn() -> Option<redis::aio::MultiplexedConnection> {
 // Generic get: returns None if cache miss or redis down
 pub async fn get<T: DeserializeOwned>(key: &str) -> Option<T> {
     let mut conn = get_conn().await?;
-    let val: Option<String> = redis::cmd("GET").arg(key).query_async(&mut conn).await.ok()?;
+    let val: Option<String> = redis::cmd("GET")
+        .arg(key)
+        .query_async(&mut conn)
+        .await
+        .ok()?;
     val.and_then(|s| serde_json::from_str(&s).ok())
 }
 
 // Generic set with TTL
 pub async fn set<T: Serialize>(key: &str, value: &T, ttl_secs: u64) {
-    if let Some(mut conn) = get_conn().await {
-        if let Ok(json) = serde_json::to_string(value) {
-            let _: Result<(), _> = redis::cmd("SETEX")
-                .arg(key)
-                .arg(ttl_secs)
-                .arg(json)
-                .query_async(&mut conn)
-                .await;
-        }
+    if let Some(mut conn) = get_conn().await
+        && let Ok(json) = serde_json::to_string(value)
+    {
+        let _: Result<(), _> = redis::cmd("SETEX")
+            .arg(key)
+            .arg(ttl_secs)
+            .arg(json)
+            .query_async(&mut conn)
+            .await;
     }
 }
 
@@ -87,15 +89,15 @@ pub async fn del_pattern(pattern: &str) {
 
 // Push a JSON value onto a Redis list.
 pub async fn push_json_list<T: Serialize>(key: &str, value: &T) -> bool {
-    if let Some(mut conn) = get_conn().await {
-        if let Ok(json) = serde_json::to_string(value) {
-            let result: Result<i64, _> = redis::cmd("RPUSH")
-                .arg(key)
-                .arg(json)
-                .query_async(&mut conn)
-                .await;
-            return result.is_ok();
-        }
+    if let Some(mut conn) = get_conn().await
+        && let Ok(json) = serde_json::to_string(value)
+    {
+        let result: Result<i64, _> = redis::cmd("RPUSH")
+            .arg(key)
+            .arg(json)
+            .query_async(&mut conn)
+            .await;
+        return result.is_ok();
     }
 
     false
@@ -180,12 +182,21 @@ pub async fn set_intermediate_standings<T: Serialize>(division: i64, data: &T) {
 }
 
 // Get cached schedule
-pub async fn get_schedule<T: DeserializeOwned>(division: i64, round: Option<i64>, status: Option<&str>) -> Option<T> {
+pub async fn get_schedule<T: DeserializeOwned>(
+    division: i64,
+    round: Option<i64>,
+    status: Option<&str>,
+) -> Option<T> {
     get(&schedule_key(division, round, status)).await
 }
 
 // Set schedule cache
-pub async fn set_schedule<T: Serialize>(division: i64, round: Option<i64>, status: Option<&str>, data: &T) {
+pub async fn set_schedule<T: Serialize>(
+    division: i64,
+    round: Option<i64>,
+    status: Option<&str>,
+    data: &T,
+) {
     set(&schedule_key(division, round, status), data, DEFAULT_TTL).await;
 }
 

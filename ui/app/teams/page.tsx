@@ -26,7 +26,8 @@ interface Team {
 
 interface PlayerStat {
   id: number;
-  name: string;
+  full_name: string;
+  common_name?: string | null;
   goals: number;
   assists: number;
   blocks: number;
@@ -59,6 +60,27 @@ interface TeamsPreferences {
 
 const TEAMS_PREFS_KEY = 'sakkath:teams:preferences';
 
+function getInitialActiveTab(): TabType {
+  if (typeof window === 'undefined') {
+    return 'matches';
+  }
+
+  const savedPreferences = window.localStorage.getItem(TEAMS_PREFS_KEY);
+  if (!savedPreferences) {
+    return 'matches';
+  }
+
+  try {
+    const parsed: TeamsPreferences = JSON.parse(savedPreferences);
+    if (parsed.activeTab === 'matches' || parsed.activeTab === 'players' || parsed.activeTab === 'timeline') {
+      return parsed.activeTab;
+    }
+  } catch {
+  }
+
+  return 'matches';
+}
+
 function TeamContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -66,21 +88,9 @@ function TeamContent() {
   const [playerStats, setPlayerStats] = useState<PlayerStat[]>([]);
   const [matches, setMatches] = useState<TeamMatch[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<TabType>('matches');
+  const [activeTab, setActiveTab] = useState<TabType>(getInitialActiveTab);
+  const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
   const teamId = searchParams.get('team_id') || '1';
-
-  useEffect(() => {
-    const savedPreferences = localStorage.getItem(TEAMS_PREFS_KEY);
-    if (savedPreferences) {
-      try {
-        const parsed: TeamsPreferences = JSON.parse(savedPreferences);
-        if (parsed.activeTab === 'matches' || parsed.activeTab === 'players' || parsed.activeTab === 'timeline') {
-          setActiveTab(parsed.activeTab);
-        }
-      } catch {
-      }
-    }
-  }, []);
 
   useEffect(() => {
     const preferences: TeamsPreferences = { activeTab };
@@ -96,6 +106,7 @@ function TeamContent() {
       setTeam(teamData);
       setPlayerStats(playersData);
       setMatches(matchesData);
+      setShowingCommonNames({});
       setLoading(false);
     }).catch(() => setLoading(false));
   }, [teamId]);
@@ -126,6 +137,45 @@ function TeamContent() {
     if (type === 1001) return 'Playoff 1';
     if (type === 1002) return 'Playoff 2';
     return `Round ${type}`;
+  };
+
+  const togglePlayerName = (playerId: number) => {
+    setShowingCommonNames((current) => ({
+      ...current,
+      [playerId]: !current[playerId],
+    }));
+  };
+
+  const renderPlayerName = (player: PlayerStat) => {
+    const commonName = player.common_name?.trim();
+    const hasAlternateName = Boolean(commonName && commonName !== player.full_name);
+
+    if (!hasAlternateName) {
+      return <Text variant="primary" className="font-medium truncate max-w-[180px] pointer-events-none">{player.full_name}</Text>;
+    }
+
+    const showingCommonName = Boolean(showingCommonNames[player.id]);
+
+    return (
+      <div className="relative inline-block max-w-[220px] pointer-events-none">
+        <span className="relative block min-h-[1.5rem] w-full overflow-hidden">
+          <span
+            className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${
+              showingCommonName ? '-translate-y-full scale-95 opacity-0' : 'translate-y-0 scale-100 opacity-100'
+            }`}
+          >
+            {player.full_name}
+          </span>
+          <span
+            className={`absolute inset-0 block truncate font-medium text-blue-700 transition-all duration-300 dark:text-cyan-300 pointer-events-none ${
+              showingCommonName ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-full scale-95 opacity-0'
+            }`}
+          >
+            {commonName}
+          </span>
+        </span>
+      </div>
+    );
   };
 
   return (
@@ -361,10 +411,14 @@ function TeamContent() {
                 </thead>
                 <tbody>
                   {playerStats.map((player) => (
-                    <tr key={player.id} className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700">
+                    <tr 
+                      key={player.id} 
+                      onClick={() => togglePlayerName(player.id)}
+                      className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700 cursor-pointer"
+                    >
                       <td className="py-3 px-2">
                         <div className="flex items-center gap-2">
-                          <Text variant="primary" className="font-medium truncate max-w-[150px]">{player.name}</Text>
+                          {renderPlayerName(player)}
                           {player.is_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-yellow-500 text-white text-xs font-bold">C</span>}
                           {player.is_spirit_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-purple-500 text-white text-xs font-bold">SC</span>}
                         </div>
