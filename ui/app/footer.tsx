@@ -14,7 +14,7 @@ export function Footer() {
         </Link>
         <div className="flex items-center gap-6">
           <a
-            href="https://github.com/supergi0"
+            href="https://github.com/supergi0/sakkath-cloud"
             target="_blank"
             rel="noopener noreferrer"
             className="text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:hover:text-white transition-colors text-sm"
@@ -22,7 +22,7 @@ export function Footer() {
             Contribute to Website
           </a>
           <a
-            href="mailto:sakkath@gmail.com"
+            href="mailto:sakkathultimate@gmail.com"
             className="text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:hover:text-white transition-colors text-sm"
           >
             Contact Us
