@@ -31,3 +31,5 @@ sakkath.db-wal
 .env
 sshkey
 sshkey.pub
+
+backups/
