@@ -421,27 +421,46 @@ async fn rebuild_score_confirmations_with_current_foreign_keys(
     Ok(())
 }
 
-fn reporting_round_defaults() -> [(i64, &'static str); 8] {
+async fn normalize_field_names(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    for (legacy_name, replacement_name) in [
+        ("Field Alpha", "Ground 1"),
+        ("Field Bravo", "Ground 2"),
+        ("Field Charlie", "Ground 3"),
+        ("Field Delta", "Ground 4"),
+    ] {
+        sqlx::query("UPDATE fields SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?")
+            .bind(replacement_name)
+            .bind(legacy_name)
+            .execute(pool)
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn reporting_round_defaults() -> [(i64, &'static str, bool); 9] {
     [
-        (1, "Round 1"),
-        (2, "Round 2"),
-        (3, "Round 3"),
-        (4, "Round 4"),
-        (5, "Round 5"),
-        (6, "Round 6"),
-        (1001, "Playoffs"),
-        (1002, "Finals"),
+        (1, "Round 1", false),
+        (2, "Round 2", false),
+        (3, "Round 3", false),
+        (4, "Round 4", false),
+        (5, "Round 5", false),
+        (6, "Round 6", false),
+        (1001, "Playoffs", false),
+        (1002, "Finals", false),
+        (10001, "Allow Team Edits", true),
     ]
 }
 
 async fn seed_reporting_round_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    for (round_key, label) in reporting_round_defaults() {
+    for (round_key, label, is_enabled) in reporting_round_defaults() {
         sqlx::query(
             r#"INSERT OR IGNORE INTO reporting_round_settings (round_key, label, is_enabled)
-               VALUES (?, ?, 0)"#,
+               VALUES (?, ?, ?)"#,
         )
         .bind(round_key)
         .bind(label)
+        .bind(if is_enabled { 1 } else { 0 })
         .execute(pool)
         .await?;
     }
@@ -645,6 +664,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
     seed_reporting_round_settings(pool).await?;
+    normalize_field_names(pool).await?;
 
     sqlx::query(
         r#"
@@ -875,6 +895,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     seed_reporting_round_settings(pool).await?;
+    normalize_field_names(pool).await?;
 
     Ok(())
 }
