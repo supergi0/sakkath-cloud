@@ -69,17 +69,17 @@ pub struct ScheduleMatch {
     pub match_type: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridResponse {
     pub rows: Vec<ScheduleGridRow>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleTeamsResponse {
     pub teams: Vec<ScheduleGridTeam>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct ScheduleGridTeam {
     pub id: i64,
     pub name: String,
@@ -88,7 +88,7 @@ pub struct ScheduleGridTeam {
     pub small_logo: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridRow {
     pub key: String,
     pub day_key: String,
@@ -99,7 +99,7 @@ pub struct ScheduleGridRow {
     pub cells: Vec<ScheduleGridCell>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridCell {
     pub field_index: i64,
     pub field_label: String,
@@ -513,20 +513,27 @@ pub async fn get_schedule_matches(
 }
 
 pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<ScheduleGridResponse> {
+    if let Some(cached) = cache::get_schedule_grid_cache::<ScheduleGridResponse>().await {
+        return Json(cached);
+    }
     let overrides = load_row_overrides().await;
     let rows = build_schedule_rows(&overrides);
     let fields = fetch_field_slots(&state.db).await;
     let grid_matches = fetch_grid_matches(&state.db).await;
     let rank_snapshots = build_schedule_rank_snapshots(&state.db, &rows).await;
-
-    Json(ScheduleGridResponse {
+    let response = ScheduleGridResponse {
         rows: materialize_grid(rows, fields, grid_matches, &rank_snapshots),
-    })
+    };
+    cache::set_schedule_grid_cache(&response).await;
+    Json(response)
 }
 
 pub async fn get_schedule_teams(
     State(state): State<crate::AppState>,
 ) -> Json<ScheduleTeamsResponse> {
+    if let Some(cached) = cache::get_schedule_teams_cache::<ScheduleTeamsResponse>().await {
+        return Json(cached);
+    }
     let teams = sqlx::query_as::<_, ScheduleGridTeam>(
         r#"SELECT id, name, abbreviation, division, small_logo
            FROM teams
@@ -536,8 +543,9 @@ pub async fn get_schedule_teams(
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
-
-    Json(ScheduleTeamsResponse { teams })
+    let response = ScheduleTeamsResponse { teams };
+    cache::set_schedule_teams_cache(&response).await;
+    Json(response)
 }
 
 pub async fn update_schedule_row(
@@ -816,6 +824,8 @@ pub async fn generate_next_round(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    cache::invalidate_all().await;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "round": next_round,
@@ -871,6 +881,7 @@ pub async fn check_and_populate_gates(
                 })
         {
             let _ = generate_next_round_internal(&state.db, division, round).await;
+            cache::invalidate_all().await;
             return Json(serde_json::json!({
                 "action": format!("generated_round_{round}"),
                 "next_gate": if round < total_rounds {

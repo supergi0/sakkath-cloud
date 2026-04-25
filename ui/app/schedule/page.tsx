@@ -69,6 +69,11 @@ const DAY_LABELS: Record<(typeof DAY_ORDER)[number], string> = {
   sat: 'Saturday',
   sun: 'Sunday',
 };
+const SCHEDULE_DAY_STORAGE_KEY = 'schedule:selected-day';
+
+function isScheduleDay(value: string): value is (typeof DAY_ORDER)[number] {
+  return DAY_ORDER.includes(value as (typeof DAY_ORDER)[number]);
+}
 
 const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
   'O P1-01': '1 v 4',
@@ -312,7 +317,14 @@ export default function SchedulePage() {
   const [draggedMatch, setDraggedMatch] = useState<DragMatch | null>(null);
   const [toastMessage, setToastMessage] = useState('');
   const [toastOpen, setToastOpen] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<(typeof DAY_ORDER)[number]>('fri');
+  const [selectedDay, setSelectedDay] = useState<(typeof DAY_ORDER)[number]>(() => {
+    if (typeof window === 'undefined') {
+      return 'fri';
+    }
+
+    const savedDay = window.localStorage.getItem(SCHEDULE_DAY_STORAGE_KEY);
+    return savedDay && isScheduleDay(savedDay) ? savedDay : 'fri';
+  });
   const [selectedCell, setSelectedCell] = useState<{ row: ScheduleGridRow; cell: ScheduleGridCell } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [statusLabelCellKey, setStatusLabelCellKey] = useState<string | null>(null);
@@ -399,6 +411,10 @@ export default function SchedulePage() {
       clearInterval(interval);
     };
   }, [fetchGrid, fetchTeams]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SCHEDULE_DAY_STORAGE_KEY, selectedDay);
+  }, [selectedDay]);
 
   const rowsByDay = useMemo(() => {
     const grouped: Record<string, ScheduleGridRow[]> = { fri: [], sat: [], sun: [] };

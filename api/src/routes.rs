@@ -13,6 +13,7 @@ fn routes_without_auth() -> Router<AppState> {
         .route("/health", get(health::health_check))
         .route("/auth/login", post(user::login))
         .route("/auth/verify", post(user::verify))
+    .route("/stream/live-updates", get(matches::stream_live_updates))
         .route("/stats", get(matches::get_stats))
 }
 

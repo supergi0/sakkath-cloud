@@ -16,6 +16,7 @@ pub const WOMEN_ROUNDS: i64 = 6;
 pub struct AppState {
     pub db: SqlitePool,
     pub telemetry_enabled: bool,
+    pub live_updates: helpers::live_updates::LiveUpdates,
 }
 
 pub fn build_api_only_app(app_state: AppState) -> Router {

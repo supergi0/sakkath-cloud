@@ -53,6 +53,7 @@ impl Harness {
         let app = build_api_only_app(AppState {
             db: db.clone(),
             telemetry_enabled: false,
+            live_updates: api::helpers::live_updates::LiveUpdates::new(),
         });
 
         Ok(Self {

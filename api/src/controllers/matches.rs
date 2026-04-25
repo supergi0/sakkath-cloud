@@ -1,11 +1,15 @@
 use crate::helpers::cache;
 use crate::helpers::sorting;
 use axum::{
+    extract::Query,
     Json,
     extract::{Path, State},
+    response::sse::{Event, KeepAlive, Sse},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::{convert::Infallible, time::Duration};
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
 #[derive(Serialize, sqlx::FromRow)]
 pub struct Field {
@@ -59,6 +63,7 @@ pub struct MatchEvent {
 pub struct MatchPlayer {
     pub id: i64,
     pub name: String,
+    pub common_name: Option<String>,
     pub team_id: i64,
 }
 
@@ -135,6 +140,11 @@ pub struct UpdateReportingRoundSettingRequest {
     pub is_enabled: bool,
 }
 
+#[derive(Deserialize)]
+pub struct LiveUpdatesQuery {
+    pub match_id: Option<i64>,
+}
+
 struct VolunteerAccess {
     user_id: i64,
     role: i64,
@@ -185,6 +195,35 @@ pub async fn get_reporting_round_settings(
     ))
 }
 
+pub async fn stream_live_updates(
+    State(state): State<crate::AppState>,
+    Query(params): Query<LiveUpdatesQuery>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let receiver = state.live_updates.subscribe();
+    let stream_match_id = params.match_id;
+
+    let stream = BroadcastStream::new(receiver).filter_map(move |message| {
+        let update = message.ok()?;
+        if let Some(match_id) = stream_match_id
+            && !update.matches_match_id(match_id)
+        {
+            return None;
+        }
+
+        Event::default()
+            .event("update")
+            .json_data(&update)
+            .ok()
+            .map(Ok)
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
 pub async fn update_reporting_round_setting(
     State(state): State<crate::AppState>,
     headers: axum::http::HeaderMap,
@@ -217,6 +256,8 @@ pub async fn update_reporting_round_setting(
     .fetch_one(&state.db)
     .await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.live_updates.publish_reporting_rounds_updated();
 
     Ok(Json(map_reporting_round_setting(row)))
 }
@@ -400,7 +441,7 @@ pub async fn get_match_detail(
     };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
-        "SELECT id, name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
+        "SELECT id, name, common_name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
     ).bind(t1_id).bind(t2_id).fetch_all(&state.db).await.unwrap_or_default();
 
     let events = sqlx::query_as::<_, MatchEvent>(
@@ -532,6 +573,8 @@ pub async fn start_match(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    state.live_updates.publish_match_updated(match_id);
+
     Ok(Json(
         serde_json::json!({"success": true, "possession": possession}),
     ))
@@ -580,6 +623,7 @@ pub async fn end_match(
     sorting::refresh_intermediate_standings_cache(&state.db, division).await;
     cache::invalidate_division(division).await;
     cache::invalidate_player_stats().await;
+    state.live_updates.publish_match_updated(match_id);
 
     Ok(Json(
         serde_json::json!({"success": true, "auto_action": auto_action}),
@@ -702,6 +746,8 @@ pub async fn record_event(
         cache::invalidate_player_stats().await;
     }
 
+    state.live_updates.publish_match_updated(match_id);
+
     Ok(Json(
         serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos}),
     ))
@@ -749,6 +795,8 @@ pub async fn switch_possession(
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
         cache::invalidate_division(division).await;
     }
+
+    state.live_updates.publish_match_updated(match_id);
 
     Ok(Json(
         serde_json::json!({"success": true, "possession": new_pos}),
@@ -856,6 +904,8 @@ pub async fn undo_event(
             cache::invalidate_player_stats().await;
         }
 
+        state.live_updates.publish_match_updated(match_id);
+
         Ok(Json(
             serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": current_pos}),
         ))
@@ -941,6 +991,8 @@ pub async fn submit_spirit_score(
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
     }
+
+    state.live_updates.publish_match_updated(match_id);
 
     Ok(Json(serde_json::json!({"success": true})))
 }
@@ -1235,6 +1287,8 @@ pub async fn submit_wfdf_spirit(
         cache::invalidate_division(division).await;
     }
 
+    state.live_updates.publish_match_updated(match_id);
+
     Ok(Json(serde_json::json!({"success": true})))
 }
 
@@ -1291,6 +1345,8 @@ pub async fn confirm_score(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    state.live_updates.publish_match_updated(match_id);
+
     Ok(Json(
         serde_json::json!({"success": true, "finalized": finalized}),
     ))
@@ -1345,7 +1401,7 @@ pub async fn get_opponent_players(
     };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
-        "SELECT id, name, team_id FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL ORDER BY name ASC"
+        "SELECT id, name, common_name, team_id FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL ORDER BY name ASC"
     ).bind(opponent_team_id).fetch_all(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 

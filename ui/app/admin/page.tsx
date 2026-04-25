@@ -7,6 +7,7 @@ import useSWR from 'swr';
 import { Text } from '../components/Text';
 import { useAuth } from '../auth-provider';
 import { apiUrl } from '../lib/api';
+import { subscribeToLiveUpdates } from '../lib/live-updates';
 import { getTeamAbbreviation } from '../lib/team-name';
 
 interface UpcomingMatch {
@@ -177,20 +178,37 @@ function AdminContent() {
   const { data: matches = [], mutate: mutateMatches, isLoading: matchesLoading } = useSWR(
     token && isLoggedIn && canReport ? apiUrl('/v1/admin/matches') : null,
     fetchVolunteerMatches,
-    { refreshInterval: 4000, revalidateOnFocus: true }
+    { revalidateOnFocus: true }
   );
 
   const { data: activeMatch, mutate: mutateActiveMatch } = useSWR(
     activeMatchId ? apiUrl(`/v1/matches/${activeMatchId}`) : null,
     fetchMatchDetail,
-    { refreshInterval: 3000, revalidateOnFocus: true }
+    { revalidateOnFocus: true }
   );
 
   const { data: reportingRounds = [], mutate: mutateReportingRounds, isLoading: reportingRoundsLoading } = useSWR(
     token && isLoggedIn && canReport ? apiUrl('/v1/admin/reporting-rounds') : null,
     fetchReportingRounds,
-    { refreshInterval: 4000, revalidateOnFocus: true }
+    { revalidateOnFocus: true }
   );
+
+  useEffect(() => {
+    if (!isLoggedIn || !canReport) return;
+
+    return subscribeToLiveUpdates({
+      onMatchUpdated: (updatedMatchId) => {
+        void mutateMatches();
+        if (activeMatchId === updatedMatchId) {
+          void mutateActiveMatch();
+        }
+      },
+      onReportingRoundsUpdated: () => {
+        void mutateReportingRounds();
+        void mutateMatches();
+      },
+    });
+  }, [activeMatchId, canReport, isLoggedIn, mutateActiveMatch, mutateMatches, mutateReportingRounds]);
 
   useEffect(() => {
     const possession = activeMatch?.possession;
@@ -282,6 +300,9 @@ function AdminContent() {
       resetComposer();
       setActiveMatchId(null);
       await mutateMatches();
+      if (isPoc) {
+        router.push('/myteam');
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to end the match right now.');
     } finally {
@@ -304,8 +325,8 @@ function AdminContent() {
       } else if (isOffView && pendingTurnoverId !== null) {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingTurnoverId, event_type: 3 });
       } else if (isOffView && pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId !== pendingAssisterId) {
-        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingScorerId, event_type: 0 });
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingAssisterId, event_type: 1 });
+        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingScorerId, event_type: 0 });
       } else if (!isOffView && pendingBlockId !== null) {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingBlockId, event_type: 2 });
       }
@@ -910,7 +931,7 @@ function AdminContent() {
 
                   {!canEditMatch && status !== 'ended' && (
                     <div className="mt-3 rounded-lg border border-amber-300 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-400/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
-                      {getReportingLabel(match.match_type)} reporting is locked until the super admin enables it.
+                      {getReportingLabel(match.match_type)} reporting is locked, please wait until it is enabled.
                     </div>
                   )}
 

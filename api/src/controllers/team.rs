@@ -26,7 +26,7 @@ pub struct DivisionQuery {
     pub division: Option<i32>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct Team {
     pub id: i64,
     pub name: String,
@@ -149,9 +149,13 @@ pub struct AddPlayerRequest {
 
 // All teams
 pub async fn get_teams(State(state): State<crate::AppState>) -> Json<Vec<Team>> {
+    if let Some(cached) = crate::helpers::cache::get_teams_list::<Vec<Team>>().await {
+        return Json(cached);
+    }
     let teams = sqlx::query_as::<_, Team>(
         "SELECT id, name, abbreviation, division, location, init_rank, full_logo, small_logo FROM teams WHERE deleted_at IS NULL ORDER BY division, init_rank"
     ).fetch_all(&state.db).await.unwrap_or_default();
+    crate::helpers::cache::set_teams_list(&teams).await;
     Json(teams)
 }
 
@@ -699,6 +703,7 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
     if let Some((division,)) = division {
         cache::invalidate_division(division).await;
     }
+    cache::invalidate_teams_list().await;
 }
 
 async fn ensure_team_edits_enabled(db: &SqlitePool) -> Result<(), axum::http::StatusCode> {

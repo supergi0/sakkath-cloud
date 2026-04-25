@@ -3,6 +3,7 @@ use axum::routing::{get, get_service};
 use std::net::SocketAddr;
 use std::process;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 
 use api::{AppState, controllers, helpers, middleware, migration, routes, telemetry};
@@ -155,6 +156,7 @@ async fn main() {
     let app_state = AppState {
         db: db_pool,
         telemetry_enabled,
+        live_updates: helpers::live_updates::LiveUpdates::new(),
     };
 
     let telemetry_routes = Router::new().route(
@@ -164,7 +166,9 @@ async fn main() {
     );
 
     // Use routes from routes.rs
-    let api_routes = routes::api_routes().layer(middleware::rate_limit::api_rate_limit_layer());
+    let api_routes = routes::api_routes()
+        .layer(CompressionLayer::new())
+        .layer(middleware::rate_limit::api_rate_limit_layer());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
