@@ -3,10 +3,12 @@ use axum::{
     extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 
 use crate::helpers::cache;
 
 const MAX_TEAM_PLAYERS: i64 = 22;
+const TEAM_EDITS_ROUND_KEY: i64 = 10_001;
 
 type PocPlayerCurrentRow = (
     i64,
@@ -334,6 +336,7 @@ pub async fn update_poc_team(
     Json(payload): Json<UpdatePocTeamRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    ensure_team_edits_enabled(&state.db).await?;
 
     let team_id: Option<(i64,)> = sqlx::query_as(
         "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
@@ -393,6 +396,7 @@ pub async fn update_poc_player(
     Json(payload): Json<UpdatePlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    ensure_team_edits_enabled(&state.db).await?;
     let normalized_name = payload.name.trim();
     let normalized_common_name = payload
         .common_name
@@ -522,6 +526,7 @@ pub async fn add_poc_player(
     Json(payload): Json<AddPlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    ensure_team_edits_enabled(&state.db).await?;
     let normalized_name = payload.name.trim();
     let normalized_common_name = payload
         .common_name
@@ -594,6 +599,7 @@ pub async fn delete_poc_player(
     Path(player_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    ensure_team_edits_enabled(&state.db).await?;
 
     let mut tx = state
         .db
@@ -658,6 +664,7 @@ pub async fn update_poc_team_logo(
     Json(payload): Json<UpdateLogoRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
+    ensure_team_edits_enabled(&state.db).await?;
 
     let team_id: Option<(i64,)> = sqlx::query_as(
         "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
@@ -692,6 +699,22 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
     if let Some((division,)) = division {
         cache::invalidate_division(division).await;
     }
+}
+
+async fn ensure_team_edits_enabled(db: &SqlitePool) -> Result<(), axum::http::StatusCode> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?",
+    )
+    .bind(TEAM_EDITS_ROUND_KEY)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if matches!(row, Some((0,))) {
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
+
+    Ok(())
 }
 
 fn extract_email(headers: &axum::http::HeaderMap) -> Result<String, axum::http::StatusCode> {

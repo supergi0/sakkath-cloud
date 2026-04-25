@@ -448,7 +448,7 @@ pub async fn get_match_detail(
     })
 }
 
-// Get upcoming matches for volunteers (next 12 matches)
+// Get upcoming matches for volunteers (next 16 matches)
 pub async fn get_upcoming_matches(
     State(state): State<crate::AppState>,
     headers: axum::http::HeaderMap,
@@ -472,7 +472,7 @@ pub async fn get_upcoming_matches(
               AND (m.possession IS NULL OR m.possession <= 2)
               AND (m.t1_id = ? OR m.t2_id = ?)
             ORDER BY m.time ASC
-            LIMIT 12
+            LIMIT 16
             "#
         ).bind(team_id).bind(team_id).fetch_all(&state.db).await.unwrap_or_default()
     } else {
@@ -488,7 +488,7 @@ pub async fn get_upcoming_matches(
             LEFT JOIN fields f ON f.id = m.field_id
             LEFT JOIN reporting_round_settings rrs ON rrs.round_key = m.type
             WHERE m.deleted_at IS NULL AND (m.possession IS NULL OR m.possession <= 2)
-            ORDER BY m.time ASC LIMIT 12
+            ORDER BY m.time ASC LIMIT 16
             "#
         ).fetch_all(&state.db).await.unwrap_or_default()
     };

@@ -65,6 +65,8 @@ interface ReportingRoundSetting {
   is_enabled: boolean;
 }
 
+const TEAM_EDITS_ROUND_KEY = 10001;
+
 type MatchStatus = 'upcoming' | 'live' | 'ended';
 type PanelKey = 't1' | 'log' | 't2';
 type ConfirmAction = 'end' | 'save' | 'undo' | 'possession';
@@ -121,7 +123,7 @@ function AdminContent() {
   const { isLoggedIn, isAdmin, isPoc, isSuperAdmin, token, isLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const canReport = isAdmin || isPoc;
+  const canReport = isAdmin || isPoc || isSuperAdmin;
   const requestedMatchId = searchParams.get('match_id');
 
   const [adminView, setAdminView] = useState<AdminView>('reporting');
@@ -842,6 +844,7 @@ function AdminContent() {
               )}
               {reportingRounds.map(round => {
                 const saving = savingRoundKey === round.round_key;
+                const isTeamEditToggle = round.round_key === TEAM_EDITS_ROUND_KEY;
                 return (
                   <div
                     key={round.round_key}
@@ -850,7 +853,13 @@ function AdminContent() {
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">{round.label}</div>
                       <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                        {round.is_enabled ? 'Admins and POCs can report this round.' : 'Pairings stay visible, but reporting is locked.'}
+                        {isTeamEditToggle
+                          ? (round.is_enabled
+                            ? 'POCs can edit roster entries, team code, and logos.'
+                            : 'POCs can still handle reporting and spirit, but team profile edits are locked.')
+                          : (round.is_enabled
+                            ? 'Admins and POCs can report this round.'
+                            : 'Pairings stay visible, but reporting is locked.')}
                       </div>
                     </div>
                     <button

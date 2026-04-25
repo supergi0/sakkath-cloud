@@ -81,6 +81,12 @@ interface ScoreConfirmRow {
   t2_score: number;
 }
 
+interface ReportingRoundSetting {
+  round_key: number;
+  label: string;
+  is_enabled: boolean;
+}
+
 // Per-match post-game form: opponent spirit + self spirit + score confirm
 interface PostMatchForm {
   t1_score: number;
@@ -92,6 +98,8 @@ interface PostMatchForm {
 type FeedbackState = { type: 'error' | 'success'; message: string } | null;
 
 const MAX_TEAM_PLAYERS = 22;
+const TEAM_EDITS_ROUND_KEY = 10001;
+const TEAM_EDITS_LOCKED_MESSAGE = 'Team edits are currently locked by the super admin.';
 type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain';
 const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain'];
 
@@ -243,10 +251,12 @@ export default function MyTeamPage() {
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
+  const [teamEditsEnabled, setTeamEditsEnabled] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editingPlayer = editingId ? players.find(player => player.id === editingId) ?? null : null;
   const rosterMovesExhausted = !!team && team.roster_moves_remaining <= 0;
   const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
+  const teamEditsLocked = !teamEditsEnabled;
 
   useEffect(() => {
     if (isLoading) return;
@@ -261,10 +271,11 @@ export default function MyTeamPage() {
   const fetchData = async () => {
     if (!token) return;
     try {
-      const [teamRes, playersRes, matchesRes] = await Promise.all([
+      const [teamRes, playersRes, matchesRes, settingsRes] = await Promise.all([
         fetch(apiUrl('/v1/poc/team'), { headers: { Authorization: `Bearer ${token}` } }),
         fetch(apiUrl('/v1/poc/players'), { headers: { Authorization: `Bearer ${token}` } }),
         fetch(apiUrl('/v1/poc/matches'), { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(apiUrl('/v1/admin/reporting-rounds'), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (teamRes.ok) {
         const teamData = await teamRes.json();
@@ -273,12 +284,23 @@ export default function MyTeamPage() {
       }
       if (playersRes.ok) setPlayers(await playersRes.json());
       if (matchesRes.ok) setMatches(await matchesRes.json());
+      if (settingsRes.ok) {
+        const settings: ReportingRoundSetting[] = await settingsRes.json();
+        const teamEditSetting = settings.find((setting) => setting.round_key === TEAM_EDITS_ROUND_KEY);
+        setTeamEditsEnabled(teamEditSetting ? teamEditSetting.is_enabled : true);
+      } else {
+        setTeamEditsEnabled(true);
+      }
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
 
   const handleTeamAbbreviationSave = async () => {
     if (!token || !team) return;
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
 
     const trimmed = teamAbbreviation.trim();
     if (trimmed && !/^[A-Za-z0-9]{1,5}$/.test(trimmed)) {
@@ -295,6 +317,9 @@ export default function MyTeamPage() {
       });
       if (res.ok) {
         setTeam({ ...team, abbreviation: trimmed || null });
+      } else if (res.status === 403) {
+        setTeamEditsEnabled(false);
+        setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
       } else {
         setFeedback({ type: 'error', message: 'Unable to save the team code right now.' });
       }
@@ -303,6 +328,10 @@ export default function MyTeamPage() {
   };
 
   const handleEdit = (player: Player) => {
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
     setEditingId(player.id);
     setEditForm({ ...player });
     setEditRole(roleFromPlayer(player));
@@ -310,6 +339,10 @@ export default function MyTeamPage() {
 
   const handleSave = () => {
     if (!editingId || !token || !team) return;
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
     setConfirmDialog({
       title: 'Save Changes', message: 'Save changes to this player?',
       onConfirm: async () => {
@@ -327,6 +360,9 @@ export default function MyTeamPage() {
             setPlayers(players.map(p => p.id === editingId ? { ...p, ...payload } as Player : p));
             setTeam({ ...team, roster_moves_remaining: data.roster_moves_remaining ?? team.roster_moves_remaining });
             setEditingId(null);
+          } else if (res.status === 403) {
+            setTeamEditsEnabled(false);
+            setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
           } else if (res.status === 409) {
             setFeedback({ type: 'error', message: 'Roster edit/remove slots are exhausted. Only common name edits stay free now.' });
           } else {
@@ -339,6 +375,10 @@ export default function MyTeamPage() {
 
   const handleDelete = (id: number, name: string) => {
     if (!token || !team) return;
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
     setConfirmDialog({
       title: 'Delete Player', message: `Remove ${name} from the team? This cannot be undone.`,
       onConfirm: async () => {
@@ -350,6 +390,9 @@ export default function MyTeamPage() {
             const data = await res.json();
             setPlayers(players.filter(p => p.id !== id));
             setTeam({ ...team, roster_moves_remaining: data.roster_moves_remaining ?? team.roster_moves_remaining });
+          } else if (res.status === 403) {
+            setTeamEditsEnabled(false);
+            setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
           } else if (res.status === 409) {
             setFeedback({ type: 'error', message: 'No roster edit/remove slots remain for this team.' });
           } else {
@@ -362,6 +405,10 @@ export default function MyTeamPage() {
 
   const handleAdd = () => {
     if (!token || !newPlayer.name) return;
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
     if (players.length >= MAX_TEAM_PLAYERS) {
       setFeedback({ type: 'error', message: `This team already has the maximum ${MAX_TEAM_PLAYERS} players.` });
       return;
@@ -383,6 +430,9 @@ export default function MyTeamPage() {
             setPlayers([...players, { id: data.id, ...payload } as Player]);
             setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
             setNewRole('Player'); setIsAdding(false);
+          } else if (res.status === 403) {
+            setTeamEditsEnabled(false);
+            setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
           } else if (res.status === 409) {
             setFeedback({ type: 'error', message: `This team already has the maximum ${MAX_TEAM_PLAYERS} players.` });
           } else {
@@ -512,6 +562,11 @@ export default function MyTeamPage() {
   }, [matches, team]);
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      e.target.value = '';
+      return;
+    }
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -549,6 +604,10 @@ export default function MyTeamPage() {
 
   const handleSaveLogo = async () => {
     if (!logoPreview || !token) return;
+    if (teamEditsLocked) {
+      setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
+      return;
+    }
     try {
       const fullLogo = await compressImage(logoPreview, 10, 0.9);
       const smallLogo = await compressImage(logoPreview, 1, 0.5);
@@ -559,6 +618,9 @@ export default function MyTeamPage() {
       if (res.ok) {
         setTeam(team ? { ...team, full_logo: fullLogo, small_logo: smallLogo } : null);
         setIsEditingLogo(false); setLogoPreview(null); setRotation(0); setScale(1);
+      } else if (res.status === 403) {
+        setTeamEditsEnabled(false);
+        setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
       }
     } catch (err) { console.error(err); }
   };
@@ -601,7 +663,8 @@ export default function MyTeamPage() {
                 )}
               </div>
               <button onClick={() => fileInputRef.current?.click()}
-                className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-cyan-700 text-white flex items-center justify-center hover:bg-cyan-600">
+                disabled={teamEditsLocked}
+                className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-cyan-700 text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50">
                 <Upload className="w-2.5 h-2.5" />
               </button>
               <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
@@ -617,13 +680,14 @@ export default function MyTeamPage() {
               value={teamAbbreviation}
               maxLength={5}
               placeholder="Team code"
+              disabled={teamEditsLocked}
               onChange={e => setTeamAbbreviation(e.target.value.replace(/[^a-zA-Z0-9]/g, ''))}
-              className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm uppercase text-gray-900 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+              className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm uppercase text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
             />
             <button
               onClick={handleTeamAbbreviationSave}
-              disabled={savingTeamAbbreviation || (team.abbreviation || '') === teamAbbreviation.trim()}
-              className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-600 disabled:opacity-50"
+              disabled={teamEditsLocked || savingTeamAbbreviation || (team.abbreviation || '') === teamAbbreviation.trim()}
+              className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {savingTeamAbbreviation ? 'Saving' : 'Save code'}
             </button>
@@ -638,6 +702,13 @@ export default function MyTeamPage() {
               : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200'
           }`}>
             {feedback.message}
+          </div>
+        )}
+
+        {teamEditsLocked && (
+          <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-400/10 dark:text-amber-200">
+            Team edits are locked. Send your request to <a href="mailto:sakkathultimate@gmail.com" className="underline">sakkathultimate@gmail.com</a> for changes.
+            
           </div>
         )}
 
@@ -800,7 +871,7 @@ export default function MyTeamPage() {
             {!isAdding && (
               <button
                 onClick={() => { setFeedback(null); setIsAdding(true); }}
-                disabled={players.length >= MAX_TEAM_PLAYERS}
+                disabled={teamEditsLocked || players.length >= MAX_TEAM_PLAYERS}
                 className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Plus className="w-3 h-3" /> Add
@@ -811,24 +882,26 @@ export default function MyTeamPage() {
           <p className="mb-3 text-xs text-gray-600 dark:text-slate-400">
             Emails and phone numbers are not mandatory, but please fill contact details for a few people so they are reachable in case of issues.
           </p>
-          <p className="mb-3 text-xs text-gray-600 dark:text-slate-400">
-            Common name updates are always free and remain available even after the roster edit/remove budget is exhausted.
-          </p>
 
           {isAdding && (
             <div className="mb-2 p-3 rounded-xl border border-cyan-200 dark:border-cyan-800 bg-cyan-50/50 dark:bg-cyan-900/10 space-y-2">
               <input type="text" placeholder="Name *" value={newPlayer.name || ''} onChange={e => setNewPlayer({ ...newPlayer, name: e.target.value })}
+                disabled={teamEditsLocked}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />              <input type="text" placeholder="Common Name (optional)" value={newPlayer.common_name || ''} onChange={e => setNewPlayer({ ...newPlayer, common_name: e.target.value })}
+                disabled={teamEditsLocked}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />              <input type="email" placeholder="Email (optional)" value={newPlayer.email || ''} onChange={e => setNewPlayer({ ...newPlayer, email: e.target.value })}
+                disabled={teamEditsLocked}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
               <input type="text" placeholder="Phone (optional)" value={newPlayer.phone || ''} onChange={e => setNewPlayer({ ...newPlayer, phone: e.target.value })}
+                disabled={teamEditsLocked}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
               <select value={newRole} onChange={e => setNewRole(e.target.value as PlayerRole)}
+                disabled={teamEditsLocked}
                 className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
                 {PLAYER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
               <div className="flex gap-2">
-                <button onClick={handleAdd} disabled={!newPlayer.name}
+                <button onClick={handleAdd} disabled={teamEditsLocked || !newPlayer.name}
                   className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold disabled:opacity-50 transition">
                   <Save className="w-3 h-3" /> Add
                 </button>
@@ -848,18 +921,19 @@ export default function MyTeamPage() {
                   {editingId === player.id ? (
                     <div className="p-2.5 space-y-2">
                       <input type="text" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })}
-                        disabled={rosterMovesExhausted}
+                        disabled={teamEditsLocked || rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="text" placeholder="Common Name (optional)" value={editForm.common_name || ''} onChange={e => setEditForm({ ...editForm, common_name: e.target.value })}
+                        disabled={teamEditsLocked}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="email" placeholder="Email (optional)" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
-                        disabled={rosterMovesExhausted}
+                        disabled={teamEditsLocked || rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="text" placeholder="Phone (optional)" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })}
-                        disabled={rosterMovesExhausted}
+                        disabled={teamEditsLocked || rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <select value={editRole} onChange={e => setEditRole(e.target.value as PlayerRole)}
-                        disabled={rosterMovesExhausted}
+                        disabled={teamEditsLocked || rosterMovesExhausted}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
                         {PLAYER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
@@ -869,7 +943,7 @@ export default function MyTeamPage() {
                         </Text>
                       )}
                       <div className="flex gap-2">
-                        <button onClick={handleSave} disabled={!editForm.name?.trim() || (rosterMovesExhausted && saveConsumesMove)} className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50">
+                        <button onClick={handleSave} disabled={teamEditsLocked || !editForm.name?.trim() || (rosterMovesExhausted && saveConsumesMove)} className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold transition disabled:cursor-not-allowed disabled:opacity-50">
                           <Save className="w-3 h-3" /> Save
                         </button>
                         <button onClick={() => setEditingId(null)} className="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-slate-300 transition">Cancel</button>
@@ -888,13 +962,14 @@ export default function MyTeamPage() {
                       <div className="flex gap-0.5 shrink-0">
                         <button
                           onClick={() => handleEdit(player)}
+                          disabled={teamEditsLocked}
                           className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-700 transition"
                         >
                           <Edit2 className="w-3.5 h-3.5 text-gray-500" />
                         </button>
                         <button
                           onClick={() => handleDelete(player.id, player.name)}
-                          disabled={team.roster_moves_remaining <= 0}
+                          disabled={teamEditsLocked || team.roster_moves_remaining <= 0}
                           className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/30 transition disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <Trash2 className="w-3.5 h-3.5 text-red-500" />

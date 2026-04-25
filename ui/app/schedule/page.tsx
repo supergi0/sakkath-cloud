@@ -70,6 +70,39 @@ const DAY_LABELS: Record<(typeof DAY_ORDER)[number], string> = {
   sun: 'Sunday',
 };
 
+const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
+  'O P1-01': '1 v 4',
+  'O P1-02': '2 v 3',
+  'O P1-03': '5 v 8',
+  'O P1-04': '6 v 7',
+  'O P1-05': '9 v 12',
+  'O P1-06': '10 v 11',
+  'O P1-07': '13 v 16',
+  'O P1-08': '14 v 15',
+  'O P1-09': '17 v 20',
+  'O P1-10': '18 v 19',
+  'O P1-11': '21 v 22',
+  'W P1-01': '1 v 4',
+  'W P1-02': '2 v 3',
+  'W P1-03': '5 v 8',
+  'W P1-04': '6 v 7',
+  'W P1-05': '9 v 10',
+  'O P2-01': '1 v 2',
+  'O P2-02': '3 v 4',
+  'O P2-03': '5 v 6',
+  'O P2-04': '7 v 8',
+  'O P2-05': '9 v 10',
+  'O P2-06': '11 v 12',
+  'O P2-07': '13 v 14',
+  'O P2-08': '15 v 16',
+  'O P2-09': '17 v 18',
+  'O P2-10': '19 v 20',
+  'W P2-01': '1 v 2',
+  'W P2-02': '3 v 4',
+  'W P2-03': '5 v 6',
+  'W P2-04': '7 v 8',
+};
+
 function formatCompactTime(value: string) {
   return value.replace(/^0/, '').replace(':', '.');
 }
@@ -87,7 +120,7 @@ function getStageLabel(cell: ScheduleGridCell) {
     return `${divisionLabel} F`;
   }
   if (round === 1001) {
-    return `${divisionLabel} P1`;
+    return `${divisionLabel} P`;
   }
   if (round !== null) {
     return `${divisionLabel} R${round}`;
@@ -117,9 +150,16 @@ function getStatusDotClass(status: CellStatus) {
 
 function getSeedLabel(cell: ScheduleGridCell) {
   if (!cell.seed_ranks) {
-    return null;
+    return cell.slot_code ? PLAYOFF_PLACEHOLDER_SEEDS[cell.slot_code] ?? null : null;
   }
   return `${cell.seed_ranks[0]} v ${cell.seed_ranks[1]}`;
+}
+
+function isStageBreak(previousRow: ScheduleGridRow | undefined, currentRow: ScheduleGridRow) {
+  if (!previousRow) {
+    return false;
+  }
+  return getRowTitle(previousRow.label) !== getRowTitle(currentRow.label);
 }
 
 function TeamLogo({ name, logo }: { name: string | null; logo: string | null }) {
@@ -456,7 +496,7 @@ export default function SchedulePage() {
     }
   };
 
-  const renderCell = (row: ScheduleGridRow, cell: ScheduleGridCell) => {
+  const renderCell = (row: ScheduleGridRow, cell: ScheduleGridCell, gapBefore: boolean) => {
     const hasMatch = cell.match_id !== null;
     const interactive = Boolean(cell.slot_code);
     const draggable = Boolean(
@@ -487,7 +527,9 @@ export default function SchedulePage() {
     return (
       <td
         key={`${row.key}-${cell.field_index}`}
-        className="border-t border-gray-200 p-0.5 align-top leading-tight dark:border-slate-700 sm:p-1"
+        className={`border-t border-gray-200 p-0.5 align-top leading-tight dark:border-slate-700 sm:p-1 ${
+          gapBefore ? 'border-t-[3px] border-t-gray-300 dark:border-t-slate-600' : ''
+        }`}
         onDragOver={(event) => {
           if (droppable) {
             event.preventDefault();
@@ -585,7 +627,12 @@ export default function SchedulePage() {
               </div>
             </div>
           ) : cell.slot_code ? (
-            <div className="mt-3">
+            <div className="mt-3 space-y-1">
+              {seedLabel ? (
+                <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400 sm:text-[10px]">
+                  {seedLabel}
+                </p>
+              ) : null}
               <p className="text-sm font-medium text-gray-400 dark:text-slate-500">TBD</p>
             </div>
           ) : null}
@@ -715,17 +762,20 @@ export default function SchedulePage() {
               </tr>
             </thead>
             <tbody>
-              {visibleRows.map((row) => {
+              {visibleRows.map((row, index) => {
                 const draft = drafts[row.key] ?? {
                   start_time: row.start_time,
                   end_time: row.end_time,
                 };
                 const changed = draft.start_time !== row.start_time || draft.end_time !== row.end_time;
+                const gapBefore = isStageBreak(visibleRows[index - 1], row);
 
                 return (
                   <tr key={row.key} className="align-top">
                     <td
-                      className="sticky left-0 z-10 border-t border-gray-200 bg-white p-0 align-middle dark:border-slate-700 dark:bg-slate-900"
+                      className={`sticky left-0 z-10 border-t border-gray-200 bg-white p-0 align-middle dark:border-slate-700 dark:bg-slate-900 ${
+                        gapBefore ? 'border-t-[3px] border-t-gray-300 dark:border-t-slate-600' : ''
+                      }`}
                       style={{
                         width: showTimings ? 88 : 0,
                         minWidth: showTimings ? 88 : 0,
@@ -772,7 +822,7 @@ export default function SchedulePage() {
                         ) : null}
                       </div>
                     </td>
-                    {row.cells.map((cell) => renderCell(row, cell))}
+                    {row.cells.map((cell) => renderCell(row, cell, gapBefore))}
                   </tr>
                 );
               })}

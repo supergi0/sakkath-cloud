@@ -358,10 +358,10 @@ async fn seed_default_staff_and_fields(
 
     sqlx::query(
         r#"INSERT INTO fields (name, hints, map_link) VALUES
-        ('Field Alpha', 'Main Astroturf Ground, Sports Complex, North Block', 'https://maps.google.com/?q=field+alpha+sports+complex'),
-        ('Field Bravo', 'Secondary Astroturf, Sports Complex, East Block', 'https://maps.google.com/?q=field+bravo+sports+complex'),
-        ('Field Charlie', 'Natural Grass Field, Sports Complex, South Block', 'https://maps.google.com/?q=field+charlie+sports+complex'),
-        ('Field Delta', 'Open Grass Field, Sports Complex, West Block', 'https://maps.google.com/?q=field+delta+sports+complex')"#,
+        ('Ground 1', 'Main Astroturf Ground, Sports Complex, North Block', 'https://maps.google.com/?q=ground+1+sports+complex'),
+        ('Ground 2', 'Secondary Astroturf, Sports Complex, East Block', 'https://maps.google.com/?q=ground+2+sports+complex'),
+        ('Ground 3', 'Natural Grass Field, Sports Complex, South Block', 'https://maps.google.com/?q=ground+3+sports+complex'),
+        ('Ground 4', 'Open Grass Field, Sports Complex, West Block', 'https://maps.google.com/?q=ground+4+sports+complex')"#,
     )
     .execute(&mut **tx)
     .await?;

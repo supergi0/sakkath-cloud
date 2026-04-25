@@ -157,7 +157,7 @@ function TeamContent() {
     const showingCommonName = Boolean(showingCommonNames[player.id]);
 
     return (
-      <div className="relative inline-block max-w-[220px] pointer-events-none">
+      <div className="relative inline-block max-w-[180px] w-full pointer-events-none">
         <span className="relative block min-h-[1.5rem] w-full overflow-hidden">
           <span
             className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${
