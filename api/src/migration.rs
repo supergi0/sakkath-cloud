@@ -646,6 +646,25 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
     seed_reporting_round_settings(pool).await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS telemetry_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind VARCHAR(32) NOT NULL,
+            cpu_percent REAL,
+            memory_mb_used REAL,
+            memory_percent REAL,
+            method VARCHAR(16),
+            path TEXT,
+            ip_address VARCHAR(64),
+            status_code INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Create indexes for query optimization
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_team_id ON users(team_id)")
         .execute(pool)
@@ -664,6 +683,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
     create_match_indexes(pool).await?;
     create_match_event_indexes(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_telemetry_logs_kind_created_at ON telemetry_logs(kind, created_at)")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_telemetry_logs_request_path_created_at ON telemetry_logs(path, created_at)")
+        .execute(pool)
+        .await?;
 
     if !table_has_column(pool, "teams", "abbreviation").await? {
         sqlx::query("ALTER TABLE teams ADD COLUMN abbreviation VARCHAR(5)")
@@ -899,6 +924,7 @@ pub async fn verify_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "matches",
         "match_events",
         "announcements",
+        "telemetry_logs",
         "spirit_scores",
         "score_confirmations",
     ];
