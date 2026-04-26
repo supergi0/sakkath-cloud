@@ -220,8 +220,16 @@ pub(crate) fn build_playoff_seed_order(
             apply_seed_swap(right, 1001, tracker, &mut seed_holders);
 
             ordered.push(*seed_holders.get(&left.seed_a).expect("missing seed holder"));
-            ordered.push(*seed_holders.get(&right.seed_a).expect("missing seed holder"));
-            ordered.push(*seed_holders.get(&right.seed_b).expect("missing seed holder"));
+            ordered.push(
+                *seed_holders
+                    .get(&right.seed_a)
+                    .expect("missing seed holder"),
+            );
+            ordered.push(
+                *seed_holders
+                    .get(&right.seed_b)
+                    .expect("missing seed holder"),
+            );
             ordered.push(*seed_holders.get(&left.seed_b).expect("missing seed holder"));
             index += 2;
             continue;
@@ -262,7 +270,10 @@ pub(crate) fn build_final_seed_order(
 
     while round_one_index < round_one.len() {
         if round_one_index + 1 < round_one.len()
-            && is_four_team_bracket_start(&round_one[round_one_index], &round_one[round_one_index + 1])
+            && is_four_team_bracket_start(
+                &round_one[round_one_index],
+                &round_one[round_one_index + 1],
+            )
         {
             let left = round_two
                 .get(round_two_index)
@@ -282,8 +293,16 @@ pub(crate) fn build_final_seed_order(
 
             ordered.push(*seed_holders.get(&left.seed_a).expect("missing seed holder"));
             ordered.push(*seed_holders.get(&left.seed_b).expect("missing seed holder"));
-            ordered.push(*seed_holders.get(&right.seed_a).expect("missing seed holder"));
-            ordered.push(*seed_holders.get(&right.seed_b).expect("missing seed holder"));
+            ordered.push(
+                *seed_holders
+                    .get(&right.seed_a)
+                    .expect("missing seed holder"),
+            );
+            ordered.push(
+                *seed_holders
+                    .get(&right.seed_b)
+                    .expect("missing seed holder"),
+            );
 
             round_one_index += 2;
             round_two_index += 2;
@@ -299,10 +318,7 @@ pub(crate) fn build_final_seed_order(
     ordered
 }
 
-fn is_four_team_bracket_start(
-    left: &ExpectedPlayoffMatch,
-    right: &ExpectedPlayoffMatch,
-) -> bool {
+fn is_four_team_bracket_start(left: &ExpectedPlayoffMatch, right: &ExpectedPlayoffMatch) -> bool {
     (left.seed_b - left.seed_a).abs() == 3 && (right.seed_b - right.seed_a).abs() == 1
 }
 

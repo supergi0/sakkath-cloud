@@ -312,6 +312,7 @@ function AdminContent() {
   }, [activeMatchId, canReport, isLoggedIn, mutateActiveMatch, mutateMatches, mutateReportingRounds]);
 
   useEffect(() => {
+    if (!activeMatch) return;
     const possession = activeMatch?.possession;
     if (possession === undefined || possession === null || possession >= 3) return;
     setPanel(getDefaultPanel(activeMatch, isPoc, pocTeam?.id ?? null));

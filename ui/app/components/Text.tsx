@@ -7,13 +7,15 @@ interface TextProps {
   variant?: 'primary' | 'secondary';
   className?: string;
   as?: 'span' | 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'div';
+  title?: string;
 }
 
 export function Text({ 
   children, 
   variant = 'primary', 
   className = '',
-  as: Component = 'span'
+  as: Component = 'span',
+  title,
 }: TextProps) {
   const variantClasses = {
     primary: 'text-gray-900 dark:text-white',
@@ -21,7 +23,7 @@ export function Text({
   };
 
   return (
-    <Component className={`${variantClasses[variant]} ${className}`}>
+    <Component className={`${variantClasses[variant]} ${className}`} title={title}>
       {children}
     </Component>
   );

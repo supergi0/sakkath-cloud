@@ -429,18 +429,19 @@ async fn fetch_display_stats(
     division: i64,
     include_live: bool,
 ) -> HashMap<i64, DisplayStats> {
-    let matches: Vec<(i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
+    type DisplayMatchRow = (i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>);
+
+    let matches: Vec<DisplayMatchRow> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
                FROM matches m
                JOIN teams t ON m.t1_id = t.id
                WHERE t.division = ? AND m.deleted_at IS NULL
                ORDER BY m.type ASC, m.time ASC, m.field_id ASC, m.id ASC"#,
-        )
-        .bind(division)
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
 
     let mut stats_by_team: HashMap<i64, DisplayStats> = HashMap::new();
 
@@ -484,19 +485,19 @@ fn apply_display_result(
     stats.points_for += scored;
     stats.points_against += conceded;
 
-    if scored > conceded {
-        stats.wins += 1;
-    } else if scored < conceded {
-        stats.losses += 1;
+    if scored != conceded {
+        if scored > conceded {
+            stats.wins += 1;
+        } else {
+            stats.losses += 1;
+        }
     } else {
         stats.draws += 1;
     }
 
-    if is_completed {
-        if let Some(spirit) = spirit {
-            stats.spirit_total += spirit;
-            stats.spirit_count += 1;
-        }
+    if is_completed && let Some(spirit) = spirit {
+        stats.spirit_total += spirit;
+        stats.spirit_count += 1;
     }
 }
 
@@ -505,7 +506,10 @@ fn apply_display_stats(
     display_stats: &HashMap<i64, DisplayStats>,
 ) -> Vec<TeamSortData> {
     for team in &mut teams {
-        let stats = display_stats.get(&team.team_id).cloned().unwrap_or_default();
+        let stats = display_stats
+            .get(&team.team_id)
+            .cloned()
+            .unwrap_or_default();
         team.wins = stats.wins;
         team.losses = stats.losses;
         team.draws = stats.draws;
@@ -522,11 +526,12 @@ fn apply_display_stats(
     teams
 }
 
-fn reorder_teams_by_team_id(teams: Vec<TeamSortData>, ordered_team_ids: Vec<i64>) -> Vec<TeamSortData> {
-    let mut teams_by_id: HashMap<i64, TeamSortData> = teams
-        .into_iter()
-        .map(|team| (team.team_id, team))
-        .collect();
+fn reorder_teams_by_team_id(
+    teams: Vec<TeamSortData>,
+    ordered_team_ids: Vec<i64>,
+) -> Vec<TeamSortData> {
+    let mut teams_by_id: HashMap<i64, TeamSortData> =
+        teams.into_iter().map(|team| (team.team_id, team)).collect();
 
     let mut ordered = Vec::with_capacity(teams_by_id.len());
     for team_id in ordered_team_ids {

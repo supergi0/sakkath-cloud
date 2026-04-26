@@ -2,8 +2,8 @@ use axum::middleware as axum_middleware;
 use axum::routing::{get, get_service};
 use std::net::SocketAddr;
 use std::process;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 use api::{AppState, controllers, helpers, middleware, migration, routes, telemetry};
@@ -89,10 +89,7 @@ async fn run_database_setup(database_url: &str, seed_source: Option<migration::S
     }
 }
 
-async fn run_mock_database(
-    database_url: &str,
-    request: helpers::mock_seed::MockDatabaseRequest,
-) {
+async fn run_mock_database(database_url: &str, request: helpers::mock_seed::MockDatabaseRequest) {
     let db_pool = connect_db(database_url, false).await;
 
     migration::run_migrations(&db_pool)

@@ -195,12 +195,13 @@ pub async fn get_team_detail(
 
     match result {
         Ok(Some(r)) => {
-            let current_rank = crate::helpers::sorting::get_display_intermediate_standings(&state.db, r.4)
-                .await
-                .iter()
-                .position(|team| team.team_id == r.0)
-                .map(|index| index as i64 + 1)
-                .unwrap_or(r.5.unwrap_or(0));
+            let current_rank =
+                crate::helpers::sorting::get_display_intermediate_standings(&state.db, r.4)
+                    .await
+                    .iter()
+                    .position(|team| team.team_id == r.0)
+                    .map(|index| index as i64 + 1)
+                    .unwrap_or(r.5.unwrap_or(0));
 
             Json(TeamDetail {
                 id: r.0,
@@ -216,7 +217,7 @@ pub async fn get_team_detail(
                 draws: r.9,
                 spirit_avg: r.10,
                 spirit_rank: r.11,
-                current_rank: current_rank,
+                current_rank,
                 full_logo: r.12,
                 small_logo: r.13,
             })
@@ -277,7 +278,8 @@ pub async fn get_standings(
 ) -> Json<Vec<TeamStanding>> {
     let division = params.division.unwrap_or(0) as i64;
 
-    let sorted = crate::helpers::sorting::get_display_intermediate_standings(&state.db, division).await;
+    let sorted =
+        crate::helpers::sorting::get_display_intermediate_standings(&state.db, division).await;
 
     let standings: Vec<TeamStanding> = sorted
         .iter()
@@ -385,12 +387,14 @@ pub async fn get_team_seed_timeline(
     let mut last_completed_round = 0;
 
     for round in 1..=total_rounds {
-        let (total_matches, completed_matches) = get_stage_progress(&state.db, division, round).await?;
+        let (total_matches, completed_matches) =
+            get_stage_progress(&state.db, division, round).await?;
         if total_matches == 0 || total_matches != completed_matches {
             break;
         }
 
-        let standings = sorting::get_sorted_standings_through_round(&state.db, division, round).await;
+        let standings =
+            sorting::get_sorted_standings_through_round(&state.db, division, round).await;
         if let Some(seed) = standings
             .iter()
             .position(|standing| standing.team_id == team_id)
@@ -411,8 +415,10 @@ pub async fn get_team_seed_timeline(
         } else {
             total_rounds
         };
-        let swiss_order = sorting::get_sorted_standings_through_round(&state.db, division, swiss_round).await;
-        let playoff_seed_order = rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
+        let swiss_order =
+            sorting::get_sorted_standings_through_round(&state.db, division, swiss_round).await;
+        let playoff_seed_order =
+            rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
 
         if let Some(seed) = find_seed_position(&playoff_seed_order, team_id) {
             timeline.push(TeamSeedTimelinePoint {
@@ -868,13 +874,12 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
 }
 
 async fn ensure_team_edits_enabled(db: &SqlitePool) -> Result<(), axum::http::StatusCode> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?",
-    )
-    .bind(TEAM_EDITS_ROUND_KEY)
-    .fetch_optional(db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?")
+            .bind(TEAM_EDITS_ROUND_KEY)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if matches!(row, Some((0,))) {
         return Err(axum::http::StatusCode::FORBIDDEN);

@@ -167,7 +167,10 @@ async fn assert_standings_match_tracker_with_order(
                 .get(team_id)
                 .unwrap_or_else(|| panic!("missing expected standings row for team {}", team_id));
             assert_eq!(detail.id, *team_id);
-            assert_eq!(detail.games_played, expected_row.wins + expected_row.losses + expected_row.draws);
+            assert_eq!(
+                detail.games_played,
+                expected_row.wins + expected_row.losses + expected_row.draws
+            );
             assert_eq!(detail.wins, expected_row.wins);
             assert_eq!(detail.losses, expected_row.losses);
             assert_eq!(detail.draws, expected_row.draws);

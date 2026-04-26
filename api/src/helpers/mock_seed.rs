@@ -329,9 +329,15 @@ pub async fn mock_existing_database(
     };
 
     for round_key in request.target.prior_stage_keys() {
-        let stage_summary =
-            process_stage(pool, &client, &staff, round_key, StageMode::CompleteAll, &mut rng)
-                .await?;
+        let stage_summary = process_stage(
+            pool,
+            &client,
+            &staff,
+            round_key,
+            StageMode::CompleteAll,
+            &mut rng,
+        )
+        .await?;
         summary.newly_completed_matches += stage_summary.newly_completed_matches;
         summary.post_match_updates += stage_summary.post_match_updates;
     }
@@ -368,7 +374,10 @@ async fn process_stage(
     enable_reporting_round(client, staff.super_admin.as_str(), round_key).await?;
 
     let stage_matches = ensure_stage_matches(pool, client, staff, round_key).await?;
-    let completed_before = stage_matches.iter().filter(|m| is_match_complete(m)).count();
+    let completed_before = stage_matches
+        .iter()
+        .filter(|m| is_match_complete(m))
+        .count();
     let mut pending_matches: Vec<_> = stage_matches
         .iter()
         .filter(|m| !is_match_complete(m))
@@ -478,7 +487,8 @@ async fn ensure_stage_matches_for_division(
             ),
         )?;
     } else {
-        let _ = crate::controllers::scheduling::auto_advance_division_if_ready(pool, division).await;
+        let _ =
+            crate::controllers::scheduling::auto_advance_division_if_ready(pool, division).await;
     }
 
     stage_matches = client.get_schedule_matches(division, round_key).await?;
@@ -565,7 +575,11 @@ async fn finish_match(
                 stage_label(detail.match_type)
             ))
         })?;
-        let start_possession = if first_scoring_team == detail.t1_id { 1 } else { 2 };
+        let start_possession = if first_scoring_team == detail.t1_id {
+            1
+        } else {
+            2
+        };
         let response = client
             .mutation(
                 Method::POST,
@@ -589,7 +603,10 @@ async fn finish_match(
                     None,
                 )
                 .await?;
-            ensure_success(&response, &format!("switch possession for match {match_id}"))?;
+            ensure_success(
+                &response,
+                &format!("switch possession for match {match_id}"),
+            )?;
             possession = response.possession;
             reporter_index += 1;
         }
@@ -612,7 +629,10 @@ async fn finish_match(
                 })),
             )
             .await?;
-        ensure_success(&assist_response, &format!("record assist for match {match_id}"))?;
+        ensure_success(
+            &assist_response,
+            &format!("record assist for match {match_id}"),
+        )?;
         reporter_index += 1;
 
         let goal_response = client
@@ -635,10 +655,7 @@ async fn finish_match(
     if final_detail.t1_score != target_t1_score || final_detail.t2_score != target_t2_score {
         return Err(error(format!(
             "match {match_id} ended at {}-{} instead of the target {}-{}",
-            final_detail.t1_score,
-            final_detail.t2_score,
-            target_t1_score,
-            target_t2_score
+            final_detail.t1_score, final_detail.t2_score, target_t1_score, target_t2_score
         )));
     }
 
@@ -670,7 +687,12 @@ async fn ensure_post_match_data(
     let mut updates = 0usize;
     let confirmations = client.get_score_confirmations(match_id).await?;
 
-    if !has_confirmation(&confirmations, detail.t1_id, detail.t1_score, detail.t2_score) {
+    if !has_confirmation(
+        &confirmations,
+        detail.t1_id,
+        detail.t1_score,
+        detail.t2_score,
+    ) {
         let response = client
             .mutation(
                 Method::POST,
@@ -683,11 +705,19 @@ async fn ensure_post_match_data(
                 })),
             )
             .await?;
-        ensure_success(&response, &format!("confirm score for match {match_id} team {}", detail.t1_id))?;
+        ensure_success(
+            &response,
+            &format!("confirm score for match {match_id} team {}", detail.t1_id),
+        )?;
         updates += 1;
     }
 
-    if !has_confirmation(&confirmations, detail.t2_id, detail.t1_score, detail.t2_score) {
+    if !has_confirmation(
+        &confirmations,
+        detail.t2_id,
+        detail.t1_score,
+        detail.t2_score,
+    ) {
         let response = client
             .mutation(
                 Method::POST,
@@ -700,7 +730,10 @@ async fn ensure_post_match_data(
                 })),
             )
             .await?;
-        ensure_success(&response, &format!("confirm score for match {match_id} team {}", detail.t2_id))?;
+        ensure_success(
+            &response,
+            &format!("confirm score for match {match_id} team {}", detail.t2_id),
+        )?;
         updates += 1;
     }
 
@@ -720,7 +753,10 @@ async fn ensure_post_match_data(
             .await?;
         ensure_success(
             &response,
-            &format!("submit spirit for match {match_id} rated team {}", detail.t2_id),
+            &format!(
+                "submit spirit for match {match_id} rated team {}",
+                detail.t2_id
+            ),
         )?;
         updates += 1;
     }
@@ -737,7 +773,10 @@ async fn ensure_post_match_data(
             .await?;
         ensure_success(
             &response,
-            &format!("submit spirit for match {match_id} rated team {}", detail.t1_id),
+            &format!(
+                "submit spirit for match {match_id} rated team {}",
+                detail.t1_id
+            ),
         )?;
         updates += 1;
     }
@@ -791,13 +830,16 @@ async fn validate_existing_progress(pool: &SqlitePool, target: MockRoundTarget) 
     Ok(())
 }
 
-async fn build_staff_token(pool: &SqlitePool, email: &str, expected_role: i64) -> MockResult<String> {
-    let user: Option<(i64, String, i64)> = sqlx::query_as(
-        "SELECT id, email, role FROM users WHERE email = ? AND deleted_at IS NULL",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
+async fn build_staff_token(
+    pool: &SqlitePool,
+    email: &str,
+    expected_role: i64,
+) -> MockResult<String> {
+    let user: Option<(i64, String, i64)> =
+        sqlx::query_as("SELECT id, email, role FROM users WHERE email = ? AND deleted_at IS NULL")
+            .bind(email)
+            .fetch_optional(pool)
+            .await?;
 
     let (user_id, email, role) = user.ok_or_else(|| {
         error(format!(
@@ -920,7 +962,10 @@ fn offense_team_id(possession: Option<i64>, t1_id: i64, t2_id: i64) -> Option<i6
     }
 }
 
-fn players_for_team(detail: &MatchDetailResponse, team_id: i64) -> MockResult<Vec<MatchPlayerResponse>> {
+fn players_for_team(
+    detail: &MatchDetailResponse,
+    team_id: i64,
+) -> MockResult<Vec<MatchPlayerResponse>> {
     let mut players: Vec<_> = detail
         .players
         .iter()
@@ -963,9 +1008,9 @@ fn has_confirmation(
     t1_score: i64,
     t2_score: i64,
 ) -> bool {
-    confirmations.iter().any(|row| {
-        row.team_id == team_id && row.t1_score == t1_score && row.t2_score == t2_score
-    })
+    confirmations
+        .iter()
+        .any(|row| row.team_id == team_id && row.t1_score == t1_score && row.t2_score == t2_score)
 }
 
 fn needs_spirit_submission(

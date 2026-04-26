@@ -1,8 +1,8 @@
 use crate::helpers::cache;
 use crate::helpers::sorting;
 use axum::{
-    extract::Query,
     Json,
+    extract::Query,
     extract::{Path, State},
     response::sse::{Event, KeepAlive, Sse},
 };
@@ -628,7 +628,8 @@ pub async fn start_match(
 
     state.live_updates.publish_match_updated(match_id);
 
-    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+    let (started_at, _updated_at, server_time) =
+        load_match_timing_snapshot(&state.db, match_id).await?;
 
     Ok(Json(
         serde_json::json!({"success": true, "possession": possession, "started_at": started_at, "server_time": server_time}),
@@ -684,7 +685,8 @@ pub async fn end_match(
     cache::invalidate_player_stats().await;
     state.live_updates.publish_match_updated(match_id);
 
-    let (started_at, updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+    let (started_at, updated_at, server_time) =
+        load_match_timing_snapshot(&state.db, match_id).await?;
 
     Ok(Json(
         serde_json::json!({"success": true, "auto_action": auto_action, "started_at": started_at, "updated_at": updated_at, "server_time": server_time}),
@@ -809,7 +811,8 @@ pub async fn record_event(
 
     state.live_updates.publish_match_updated(match_id);
 
-    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+    let (started_at, _updated_at, server_time) =
+        load_match_timing_snapshot(&state.db, match_id).await?;
 
     Ok(Json(
         serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos, "started_at": started_at, "server_time": server_time}),
@@ -861,7 +864,8 @@ pub async fn switch_possession(
 
     state.live_updates.publish_match_updated(match_id);
 
-    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+    let (started_at, _updated_at, server_time) =
+        load_match_timing_snapshot(&state.db, match_id).await?;
 
     Ok(Json(
         serde_json::json!({"success": true, "possession": new_pos, "started_at": started_at, "server_time": server_time}),
