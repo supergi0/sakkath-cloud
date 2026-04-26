@@ -3,9 +3,9 @@ use super::api_types::{
     TeamResponse,
 };
 use super::pairings::{
-    ExpectedPlayoffMatch, ExpectedSwissRound, SortMetrics, build_playoff_round_one,
-    build_playoff_round_two, build_scoring_groups, generate_round_pairings, naive_pairings,
-    sort_metrics,
+    ExpectedPlayoffMatch, ExpectedSwissRound, SortMetrics, build_final_seed_order,
+    build_playoff_round_one, build_playoff_round_two, build_playoff_seed_order,
+    build_scoring_groups, generate_round_pairings, naive_pairings, sort_metrics,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -285,6 +285,23 @@ impl TournamentTracker {
     }
 
     pub(crate) fn swiss_summary(&self, division: i64) -> Vec<SortMetrics> {
+        self.summary(division, false, None)
+    }
+
+    pub(crate) fn display_summary_for_order(
+        &self,
+        division: i64,
+        order: &[i64],
+    ) -> Vec<SortMetrics> {
+        self.summary(division, true, Some(order))
+    }
+
+    fn summary(
+        &self,
+        division: i64,
+        include_elimination: bool,
+        order: Option<&[i64]>,
+    ) -> Vec<SortMetrics> {
         let team_ids: Vec<i64> = self
             .teams
             .values()
@@ -307,8 +324,8 @@ impl TournamentTracker {
 
             for state in self.matches.values().filter(|state| {
                 state.division == division
-                    && state.match_type < 1000
                     && state.possession.unwrap_or(0) >= 3
+                    && (include_elimination || state.match_type < 1000)
             }) {
                 let (scored, conceded, opponent) = if state.t1_id == team_id {
                     (state.t1_score, state.t2_score, state.t2_id)
@@ -340,7 +357,7 @@ impl TournamentTracker {
             }
 
             let round_results = per_round.into_values().collect();
-            let spirit_avg = self.team_spirit_average(team_id, true);
+            let spirit_avg = self.team_spirit_average(team_id, !include_elimination);
 
             metrics.push(SortMetrics {
                 team_id,
@@ -362,8 +379,27 @@ impl TournamentTracker {
             });
         }
 
-        sort_metrics(&mut metrics);
-        metrics
+        if let Some(order) = order {
+            let mut metrics_by_team: HashMap<i64, SortMetrics> = metrics
+                .into_iter()
+                .map(|metric| (metric.team_id, metric))
+                .collect();
+            let mut ordered = Vec::with_capacity(metrics_by_team.len());
+
+            for team_id in order {
+                if let Some(metric) = metrics_by_team.remove(team_id) {
+                    ordered.push(metric);
+                }
+            }
+
+            let mut remaining: Vec<_> = metrics_by_team.into_values().collect();
+            remaining.sort_by_key(|metric| (metric.init_rank, metric.team_id));
+            ordered.extend(remaining);
+            ordered
+        } else {
+            sort_metrics(&mut metrics);
+            metrics
+        }
     }
 
     pub(crate) fn standings_rank_map(&self, division: i64) -> HashMap<i64, i64> {
@@ -401,6 +437,16 @@ impl TournamentTracker {
     pub(crate) fn expected_playoff_round_two(&self, division: i64) -> Vec<ExpectedPlayoffMatch> {
         let round_one = self.expected_playoff_round_one(division);
         build_playoff_round_two(&round_one, self)
+    }
+
+    pub(crate) fn expected_display_order_after_playoffs(&self, division: i64) -> Vec<i64> {
+        let round_one = self.expected_playoff_round_one(division);
+        build_playoff_seed_order(&round_one, self)
+    }
+
+    pub(crate) fn expected_display_order_after_elimination(&self, division: i64) -> Vec<i64> {
+        let round_one = self.expected_playoff_round_one(division);
+        build_final_seed_order(&round_one, self)
     }
 
     fn team_spirit_average(&self, team_id: i64, swiss_only: bool) -> f64 {

@@ -5,6 +5,7 @@ use rand::{RngCore, SeedableRng, rngs::StdRng};
 pub(crate) enum OutcomeKind {
     T1Win,
     T2Win,
+    Draw,
 }
 
 impl OutcomeKind {
@@ -12,6 +13,7 @@ impl OutcomeKind {
         match self {
             Self::T1Win => "t1 win",
             Self::T2Win => "t2 win",
+            Self::Draw => "draw",
         }
     }
 }
@@ -34,6 +36,10 @@ impl TournamentSimulation {
         schedule_match: &ScheduleMatchResponse,
         tracker: &TournamentTracker,
     ) -> OutcomeKind {
+        if self.percent() < 20 {
+            return OutcomeKind::Draw;
+        }
+
         let seed_map = tracker.standings_rank_map(division);
         let t1_seed = seed_map
             .get(&schedule_match.t1_id)

@@ -1,12 +1,14 @@
 'use client';
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { ArrowLeft, Circle, Play } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, Circle, Play } from "lucide-react";
 import { Text } from "../components/Text";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import useSWR from 'swr';
 import { apiUrl } from '../lib/api';
+import { abbreviatePlayerName } from '../lib/player-name';
+import { formatIndiaLongDate, formatIndiaTime } from '../lib/time';
 import { subscribeToLiveUpdates } from '../lib/live-updates';
 import { getTeamAbbreviation } from '../lib/team-name';
 
@@ -30,6 +32,9 @@ interface MatchDetail {
   field_name: string;
   time: string;
   stream_url: string | null;
+  started_at?: string | null;
+  updated_at?: string;
+  server_time?: string;
   players: { id: number; name: string; common_name: string | null; team_id: number }[];
   events: { id: number; player_id: number | null; player_name: string; team_id: number; event_type: number; created_at: string }[];
 }
@@ -65,10 +70,12 @@ interface SpiritScoreRow {
   total: number;
   mvp_player_id: number | null;
   msp_player_id: number | null;
+  notes: string | null;
   submitted_by_team_id: number;
 }
 
 type MatchTabType = 'log' | 'chart' | 'stats' | 'spirit';
+type MatchStatsSortField = 'goals' | 'assists' | 'blocks' | 'turnovers';
 interface MatchesPreferences {
   activeTab: MatchTabType;
 }
@@ -76,6 +83,76 @@ interface MatchesPreferences {
 const MATCHES_PREFS_KEY = 'sakkath:matches:preferences';
 
 const fetcher = (url: string) => fetch(url).then(r => r.ok ? r.json() : null);
+
+function truncateLabel(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function getDisplayMatchTeamName(name: string, abbreviation?: string | null) {
+  if (!name.trim()) return name;
+  if (name.length > 15) {
+    return getTeamAbbreviation(name, abbreviation ?? undefined, 15);
+  }
+  return name;
+}
+
+function formatElapsed(elapsedSeconds: number) {
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function getElapsedSeconds(startedAt: string, referenceTime?: string) {
+  const startedMs = new Date(startedAt).getTime();
+  const referenceMs = referenceTime ? new Date(referenceTime).getTime() : Date.now();
+  if (Number.isNaN(startedMs) || Number.isNaN(referenceMs)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor((referenceMs - startedMs) / 1000));
+}
+
+function formatMatchDuration(startedAt?: string | null, updatedAt?: string) {
+  if (!startedAt || !updatedAt) return null;
+  return formatElapsed(getElapsedSeconds(startedAt, updatedAt));
+}
+
+function MatchTimer({ startedAt, serverTime }: { startedAt?: string | null; serverTime?: string }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const initializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!startedAt) {
+      initializedRef.current = false;
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const nextElapsed = getElapsedSeconds(startedAt, serverTime);
+    setElapsedSeconds((current) => {
+      if (!initializedRef.current) {
+        initializedRef.current = true;
+        return nextElapsed;
+      }
+
+      return Math.abs(current - nextElapsed) > 5 ? nextElapsed : current;
+    });
+  }, [startedAt, serverTime]);
+
+  useEffect(() => {
+    if (!startedAt) return;
+    const interval = window.setInterval(() => {
+      setElapsedSeconds((current) => current + 1);
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+
+  if (!startedAt) return null;
+
+  return <span className="font-mono text-sm font-semibold text-gray-500 dark:text-slate-400">{formatElapsed(elapsedSeconds)}</span>;
+}
 
 const SPIRIT_CRITERIA = [
   { key: 'rules_knowledge' as const, label: 'Rules Knowledge & Use' },
@@ -89,6 +166,8 @@ function MatchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<MatchTabType>('log');
+  const [statsSortField, setStatsSortField] = useState<MatchStatsSortField>('goals');
+  const [statsSortDir, setStatsSortDir] = useState<'asc' | 'desc'>('desc');
   const matchId = searchParams.get('match_id');
   const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
 
@@ -179,7 +258,10 @@ function MatchContent() {
         else if (e.event_type === 3) stat.turnovers++;
       }
     });
-    return Array.from(statsMap.values()).sort((a, b) => (b.goals + b.assists + b.blocks) - (a.goals + a.assists + a.blocks));
+    return Array.from(statsMap.values()).sort((a, b) => {
+      const diff = a[statsSortField] - b[statsSortField];
+      return statsSortDir === 'asc' ? diff : -diff;
+    });
   };
 
   const buildChartData = (): ChartDataPoint[] => {
@@ -222,6 +304,9 @@ function MatchContent() {
   const playerStats = getPlayerStats();
   const chartData = buildChartData();
   const matchDate = match.time ? new Date(match.time) : null;
+  const matchDuration = formatMatchDuration(match.started_at, match.updated_at);
+  const displayT1Name = getDisplayMatchTeamName(match.t1_name, match.t1_abbreviation);
+  const displayT2Name = getDisplayMatchTeamName(match.t2_name, match.t2_abbreviation);
 
   // Spirit tab data
   const resolvePlayer = (id: number | null) => !id ? null : match.players.find(p => p.id === id);
@@ -234,17 +319,31 @@ function MatchContent() {
   // MVP/MSP are nominated by the opposing team only
   const mvps = oppSpirits.filter(s => s.mvp_player_id).map(s => ({ player: resolvePlayer(s.mvp_player_id), teamId: resolvePlayer(s.mvp_player_id)?.team_id })).filter(m => m.player);
   const msps = oppSpirits.filter(s => s.msp_player_id).map(s => ({ player: resolvePlayer(s.msp_player_id), teamId: resolvePlayer(s.msp_player_id)?.team_id })).filter(m => m.player);
+  const notes = oppSpirits
+    .map(s => ({
+      teamId: s.team_id,
+      note: s.notes?.trim() ?? '',
+    }))
+    .filter((entry) => entry.note.length > 0);
 
   return (
     <div className="py-4 px-3 md:px-0 min-h-screen overflow-x-hidden">
       <div className="max-w-2xl mx-auto">
-        <button 
-          onClick={() => router.back()} 
-          className="flex items-center gap-2 mb-4 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <Text variant="secondary">Back</Text>
-        </button>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <button 
+            onClick={() => router.back()} 
+            className="flex items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <Text variant="secondary">Back</Text>
+          </button>
+          {isLive && match.started_at && (
+            <MatchTimer startedAt={match.started_at} serverTime={match.server_time} />
+          )}
+          {isEnded && matchDuration && (
+            <span className="font-mono text-sm font-semibold text-gray-500 dark:text-slate-400">{matchDuration}</span>
+          )}
+        </div>
 
         {/* Match Header */}
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900 mb-4">
@@ -253,9 +352,9 @@ function MatchContent() {
             <div className="flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400 mb-1.5">
               {matchDate && (
                 <>
-                  <span>{matchDate.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                  <span>{formatIndiaLongDate(match.time)}</span>
                   <span>&bull;</span>
-                  <span>{matchDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}</span>
+                  <span>{formatIndiaTime(match.time)}</span>
                 </>
               )}
               <span>&bull;</span>
@@ -275,6 +374,7 @@ function MatchContent() {
                 {isLive && <><Circle className="w-2 h-2 fill-red-500 text-red-500" /><span className="font-medium text-red-500">Live</span></>}
                 {isEnded && <><Circle className="w-2 h-2 fill-gray-400 text-gray-400" /><span className="text-gray-500">Ended</span></>}
                 {isUpcoming && <><Circle className="w-2 h-2 fill-yellow-400 text-yellow-400" /><span className="font-medium text-yellow-500">Upcoming</span></>}
+                {isEnded && matchDuration && <span className="font-mono text-gray-500 dark:text-slate-400">{matchDuration}</span>}
               </div>
             </div>
           </div>
@@ -295,7 +395,7 @@ function MatchContent() {
                     <span className="text-sm font-bold text-gray-500">{match.t1_name.charAt(0)}</span>
                   )}
                 </div>
-                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight">{match.t1_name}</span>
+                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight" title={match.t1_name}>{displayT1Name}</span>
               </div>
               {isLive && (
                 <div className={`text-[10px] font-bold tracking-widest ${match.possession === 1 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
@@ -317,7 +417,7 @@ function MatchContent() {
               }`}
             >
               <div className="flex items-center gap-2 justify-end mb-1">
-                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight">{match.t2_name}</span>
+                <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight" title={match.t2_name}>{displayT2Name}</span>
                 <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
                   {match.t2_small_logo ? (
                     <img src={match.t2_small_logo} alt={match.t2_name} className="w-full h-full object-cover" />
@@ -367,7 +467,7 @@ function MatchContent() {
                     const isT1 = event.team_id === match.t1_id;
                     const eventTypes = ['Score', 'Assist', 'Defense', 'Turnover'];
                     const eventColors = ['text-green-500', 'text-blue-500', 'text-purple-500', 'text-yellow-500'];
-                    const eventTime = new Date(event.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                    const eventTime = formatIndiaTime(event.created_at);
                     
                     return (
                       <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
@@ -456,20 +556,42 @@ function MatchContent() {
             {activeTab === 'stats' && (
               <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 md:p-6 bg-white dark:bg-slate-900">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
+                  <table className="w-full table-fixed text-sm">
                     <thead>
                       <tr className="border-b border-gray-200 dark:border-slate-700">
-                        <th className="py-3 px-2 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
-                        <th className="py-3 px-2 text-left font-medium text-gray-500 dark:text-gray-400">Team</th>
-                        <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">G</th>
-                        <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">A</th>
-                        <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">D</th>
-                        <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">T</th>
+                        <th className="w-[168px] py-3 px-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
+                        {([
+                          ['goals', 'Gls'],
+                          ['assists', 'Ast'],
+                          ['blocks', 'Blk'],
+                          ['turnovers', 'Tvr'],
+                        ] as const).map(([field, label]) => {
+                          const active = statsSortField === field;
+                          return (
+                            <th
+                              key={field}
+                              className={`w-12 py-3 px-1.5 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 ${active ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'}`}
+                              onClick={() => {
+                                if (active) {
+                                  setStatsSortDir((current) => current === 'asc' ? 'desc' : 'asc');
+                                } else {
+                                  setStatsSortField(field);
+                                  setStatsSortDir('desc');
+                                }
+                              }}
+                            >
+                              <div className="flex items-center justify-center gap-1 whitespace-nowrap">
+                                <span>{label}</span>
+                                {active && (statsSortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />)}
+                              </div>
+                            </th>
+                          );
+                        })}
                       </tr>
                     </thead>
                     <tbody>
                       {playerStats.length === 0 && (
-                        <tr><td colSpan={6} className="py-4 text-center"><Text variant="secondary">No player data</Text></td></tr>
+                        <tr><td colSpan={5} className="py-4 text-center"><Text variant="secondary">No player data</Text></td></tr>
                       )}
                       {playerStats.map((player) => {
                         const commonName = player.common_name?.trim();
@@ -479,33 +601,34 @@ function MatchContent() {
                         const teamAbbr = player.team_id === match.t1_id
                           ? getTeamAbbreviation(match.t1_name, match.t1_abbreviation ?? undefined)
                           : getTeamAbbreviation(match.t2_name, match.t2_abbreviation ?? undefined);
+                        const teamLabel = teamAbbr || truncateLabel(teamName, 20);
+                        const displayName = abbreviatePlayerName(player.name, 20);
+                        const displayCommonName = commonName ? abbreviatePlayerName(commonName, 20) : commonName;
                         return (
                           <tr key={player.id} onClick={() => togglePlayerName(player.id)} className="border-b border-gray-200 dark:border-slate-700 hover:bg-gray-50 dark:hover:bg-slate-800 cursor-pointer">
-                            <td className="py-3 px-2">
-                              {!hasAlternateName ? (
-                                <Text variant="primary" className="font-medium">{player.name}</Text>
-                              ) : (
-                                <div className="relative inline-block pointer-events-none align-middle w-full">
-                                  <span className="relative block h-[1.5rem] w-full overflow-hidden">
-                                    <span className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${showingCommonName ? '-translate-y-full scale-95 opacity-0' : 'translate-y-0 scale-100 opacity-100'}`}>
-                                      {player.name}
+                            <td className="w-[168px] py-3 px-1.5">
+                              <div className="flex flex-col justify-center">
+                                {!hasAlternateName ? (
+                                  <Text variant="primary" className="truncate font-medium" title={player.name}>{displayName}</Text>
+                                ) : (
+                                  <div className="relative inline-block pointer-events-none align-middle w-full">
+                                    <span className="relative block h-[1.5rem] w-full overflow-hidden">
+                                      <span className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${showingCommonName ? '-translate-y-full scale-95 opacity-0' : 'translate-y-0 scale-100 opacity-100'}`} title={player.name}>
+                                        {displayName}
+                                      </span>
+                                      <span className={`absolute inset-0 block truncate font-medium text-blue-700 transition-all duration-300 dark:text-cyan-300 pointer-events-none ${showingCommonName ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-full scale-95 opacity-0'}`} title={commonName ?? undefined}>
+                                        {displayCommonName}
+                                      </span>
                                     </span>
-                                    <span className={`absolute inset-0 block truncate font-medium text-blue-700 transition-all duration-300 dark:text-cyan-300 pointer-events-none ${showingCommonName ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-full scale-95 opacity-0'}`}>
-                                      {commonName}
-                                    </span>
-                                  </span>
-                                </div>
-                              )}
+                                  </div>
+                                )}
+                                <Text variant="secondary" className="text-[10px] leading-tight truncate" title={teamName}>{teamLabel}</Text>
+                              </div>
                             </td>
-                            <td className="py-3 px-2">
-                              <span className={`text-xs px-2 py-0.5 rounded inline-block whitespace-normal break-words leading-snug ${player.team_id === match.t1_id ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'}`}>
-                                {teamAbbr || teamName}
-                              </span>
-                            </td>
-                            <td className="py-3 px-2 text-center"><Text variant="primary">{player.goals}</Text></td>
-                            <td className="py-3 px-2 text-center"><Text variant="primary">{player.assists}</Text></td>
-                            <td className="py-3 px-2 text-center"><Text variant="primary">{player.blocks}</Text></td>
-                            <td className="py-3 px-2 text-center"><Text variant="primary">{player.turnovers}</Text></td>
+                            <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.goals}</Text></td>
+                            <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.assists}</Text></td>
+                            <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.blocks}</Text></td>
+                            <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.turnovers}</Text></td>
                           </tr>
                         );
                       })}
@@ -633,6 +756,23 @@ function MatchContent() {
                               <span className={`text-xs px-2 py-0.5 rounded font-medium ${m.teamId === match.t1_id ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'}`}>
                                 {m.teamId === match.t1_id ? getTeamAbbreviation(match.t1_name, match.t1_abbreviation ?? undefined) : getTeamAbbreviation(match.t2_name, match.t2_abbreviation ?? undefined)}
                               </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {notes.length > 0 && (
+                      <div className={msps.length > 0 ? 'mt-4' : ''}>
+                        <Text variant="primary" className="text-center font-semibold text-blue-600 dark:text-blue-400 mb-2">Notes</Text>
+                        <div className="space-y-3">
+                          {notes.map(({ teamId, note }) => (
+                            <div key={teamId} className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 dark:border-slate-700 dark:bg-slate-800">
+                              <div className="mb-1">
+                                <span className={`text-xs px-2 py-0.5 rounded font-medium ${teamId === match.t1_id ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'}`}>
+                                  {teamId === match.t1_id ? getTeamAbbreviation(match.t1_name, match.t1_abbreviation ?? undefined) : getTeamAbbreviation(match.t2_name, match.t2_abbreviation ?? undefined)}
+                                </span>
+                              </div>
+                              <Text variant="primary" className="whitespace-pre-wrap text-sm leading-6">{note}</Text>
                             </div>
                           ))}
                         </div>

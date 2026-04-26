@@ -14,20 +14,45 @@ enum CliCommand {
     Serve,
     CreateDatabase,
     SeedDatabase(migration::SeedSource),
+    MockDatabase(helpers::mock_seed::MockDatabaseRequest),
 }
 
-fn parse_cli_command() -> CliCommand {
+fn mock_database_usage() -> &'static str {
+    "Usage: sakkath-api mock-database <round> [games]\n  round: 1..6, P, or F\n  games: optional integer between 1 and 15"
+}
+
+fn parse_cli_command() -> Result<CliCommand, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
-        Some("create-database") => CliCommand::CreateDatabase,
+        Some("create-database") => Ok(CliCommand::CreateDatabase),
         Some("seed-database") => match args.get(1).map(String::as_str) {
-            Some("csv") => CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
+            Some("csv") => Ok(CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
                 path: args.get(2).cloned(),
-            }),
-            _ => CliCommand::SeedDatabase(migration::SeedSource::MockData),
+            })),
+            _ => Ok(CliCommand::SeedDatabase(migration::SeedSource::MockData)),
         },
-        _ => CliCommand::Serve,
+        Some("mock-database") => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(mock_database_usage().to_string());
+            }
+
+            let target = helpers::mock_seed::MockRoundTarget::parse(&args[1])?;
+            let games = match args.get(2) {
+                Some(raw_games) => Some(raw_games.parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid games value `{raw_games}`. {}",
+                        mock_database_usage()
+                    )
+                })?),
+                None => None,
+            };
+
+            Ok(CliCommand::MockDatabase(
+                helpers::mock_seed::MockDatabaseRequest::new(target, games)?,
+            ))
+        }
+        _ => Ok(CliCommand::Serve),
     }
 }
 
@@ -64,6 +89,34 @@ async fn run_database_setup(database_url: &str, seed_source: Option<migration::S
     }
 }
 
+async fn run_mock_database(
+    database_url: &str,
+    request: helpers::mock_seed::MockDatabaseRequest,
+) {
+    let db_pool = connect_db(database_url, false).await;
+
+    migration::run_migrations(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to run migrations: {err}")));
+
+    migration::verify_migrations(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to verify migrations: {err}")));
+
+    let summary = helpers::mock_seed::mock_existing_database(&db_pool, request)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to mock database: {err}")));
+
+    tracing::info!(
+        target = %summary.target_label,
+        newly_completed_matches = summary.newly_completed_matches,
+        post_match_updates = summary.post_match_updates,
+        target_stage_completed = summary.target_stage_completed,
+        target_stage_total = summary.target_stage_total,
+        "Database mock reporting completed successfully"
+    );
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
@@ -83,7 +136,7 @@ async fn main() {
         .to_lowercase()
         == "true";
 
-    let cli_command = parse_cli_command();
+    let cli_command = parse_cli_command().unwrap_or_else(|err| exit_with_error(&err));
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "9000".to_string())
@@ -122,6 +175,16 @@ async fn main() {
             }
 
             run_database_setup(&database_url, Some(source)).await;
+            return;
+        }
+        CliCommand::MockDatabase(request) => {
+            if !migration::is_sqlite_file_present(&database_url) {
+                exit_with_error(
+                    "Database file is missing. Run `sakkath-api create-database` first, then seed it before using `sakkath-api mock-database`.",
+                );
+            }
+
+            run_mock_database(&database_url, request).await;
             return;
         }
         CliCommand::Serve => {}

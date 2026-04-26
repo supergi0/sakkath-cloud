@@ -1,4 +1,4 @@
-use crate::helpers::cache;
+use crate::helpers::{cache, rounds};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
@@ -27,6 +27,17 @@ pub struct TeamSortData {
 }
 
 type TeamIdentityRow = (i64, String, Option<String>, Option<String>, i64);
+
+#[derive(Clone, Default)]
+struct DisplayStats {
+    wins: i64,
+    losses: i64,
+    draws: i64,
+    points_for: i64,
+    points_against: i64,
+    spirit_total: i64,
+    spirit_count: i64,
+}
 
 async fn fetch_sort_data_with_round_limit(
     db: &SqlitePool,
@@ -378,6 +389,195 @@ pub async fn get_cached_intermediate_standings(
     let standings = get_intermediate_standings(db, division).await;
     cache::set_intermediate_standings(division, &standings).await;
     standings
+}
+
+async fn fetch_completed_stage_results(
+    db: &SqlitePool,
+    division: i64,
+    match_type: i64,
+) -> Vec<rounds::PlayedMatchResult> {
+    let rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.possession >= 3 AND m.deleted_at IS NULL
+           ORDER BY m.time ASC, m.field_id ASC, m.id ASC"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
+            if t1_score == t2_score {
+                return None;
+            }
+
+            Some(rounds::PlayedMatchResult {
+                t1: t1_id,
+                t2: t2_id,
+                winner: if t1_score > t2_score { t1_id } else { t2_id },
+            })
+        })
+        .collect()
+}
+
+async fn fetch_display_stats(
+    db: &SqlitePool,
+    division: i64,
+    include_live: bool,
+) -> HashMap<i64, DisplayStats> {
+    let matches: Vec<(i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>)> =
+        sqlx::query_as(
+            r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
+               FROM matches m
+               JOIN teams t ON m.t1_id = t.id
+               WHERE t.division = ? AND m.deleted_at IS NULL
+               ORDER BY m.type ASC, m.time ASC, m.field_id ASC, m.id ASC"#,
+        )
+        .bind(division)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+    let mut stats_by_team: HashMap<i64, DisplayStats> = HashMap::new();
+
+    for (t1_id, t2_id, t1_score, t2_score, possession, t1_spirit, t2_spirit) in matches {
+        let is_completed = matches!(possession, Some(value) if value >= 3);
+        let is_live = include_live && matches!(possession, Some(value) if value < 3);
+        if !is_completed && !is_live {
+            continue;
+        }
+
+        apply_display_result(
+            &mut stats_by_team,
+            t1_id,
+            t1_score,
+            t2_score,
+            is_completed,
+            t1_spirit,
+        );
+        apply_display_result(
+            &mut stats_by_team,
+            t2_id,
+            t2_score,
+            t1_score,
+            is_completed,
+            t2_spirit,
+        );
+    }
+
+    stats_by_team
+}
+
+fn apply_display_result(
+    stats_by_team: &mut HashMap<i64, DisplayStats>,
+    team_id: i64,
+    scored: i64,
+    conceded: i64,
+    is_completed: bool,
+    spirit: Option<i64>,
+) {
+    let stats = stats_by_team.entry(team_id).or_default();
+    stats.points_for += scored;
+    stats.points_against += conceded;
+
+    if scored > conceded {
+        stats.wins += 1;
+    } else if scored < conceded {
+        stats.losses += 1;
+    } else {
+        stats.draws += 1;
+    }
+
+    if is_completed {
+        if let Some(spirit) = spirit {
+            stats.spirit_total += spirit;
+            stats.spirit_count += 1;
+        }
+    }
+}
+
+fn apply_display_stats(
+    mut teams: Vec<TeamSortData>,
+    display_stats: &HashMap<i64, DisplayStats>,
+) -> Vec<TeamSortData> {
+    for team in &mut teams {
+        let stats = display_stats.get(&team.team_id).cloned().unwrap_or_default();
+        team.wins = stats.wins;
+        team.losses = stats.losses;
+        team.draws = stats.draws;
+        team.points = stats.wins * 2 + stats.draws;
+        team.points_for = stats.points_for;
+        team.points_against = stats.points_against;
+        team.spirit_avg = if stats.spirit_count > 0 {
+            stats.spirit_total as f64 / stats.spirit_count as f64
+        } else {
+            0.0
+        };
+    }
+
+    teams
+}
+
+fn reorder_teams_by_team_id(teams: Vec<TeamSortData>, ordered_team_ids: Vec<i64>) -> Vec<TeamSortData> {
+    let mut teams_by_id: HashMap<i64, TeamSortData> = teams
+        .into_iter()
+        .map(|team| (team.team_id, team))
+        .collect();
+
+    let mut ordered = Vec::with_capacity(teams_by_id.len());
+    for team_id in ordered_team_ids {
+        if let Some(team) = teams_by_id.remove(&team_id) {
+            ordered.push(team);
+        }
+    }
+
+    ordered.extend(teams_by_id.into_values());
+    ordered
+}
+
+async fn apply_post_swiss_seed_order(
+    db: &SqlitePool,
+    division: i64,
+    teams: Vec<TeamSortData>,
+) -> Vec<TeamSortData> {
+    if teams.is_empty() {
+        return teams;
+    }
+
+    let playoff_results = fetch_completed_stage_results(db, division, 1001).await;
+    let final_results = fetch_completed_stage_results(db, division, 1002).await;
+
+    if playoff_results.is_empty() && final_results.is_empty() {
+        return teams;
+    }
+
+    let ordered_team_ids = rounds::build_seed_order_after_elimination_results(
+        &teams,
+        &playoff_results,
+        &final_results,
+    );
+    reorder_teams_by_team_id(teams, ordered_team_ids)
+}
+
+pub async fn get_display_standings(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
+    let teams = get_sorted_standings(db, division).await;
+    let ordered = apply_post_swiss_seed_order(db, division, teams).await;
+    let display_stats = fetch_display_stats(db, division, false).await;
+    apply_display_stats(ordered, &display_stats)
+}
+
+pub async fn get_display_intermediate_standings(
+    db: &SqlitePool,
+    division: i64,
+) -> Vec<TeamSortData> {
+    let teams = get_cached_intermediate_standings(db, division).await;
+    let ordered = apply_post_swiss_seed_order(db, division, teams).await;
+    let display_stats = fetch_display_stats(db, division, true).await;
+    apply_display_stats(ordered, &display_stats)
 }
 
 // Refresh intermediate standings cache after score/spirit writes.

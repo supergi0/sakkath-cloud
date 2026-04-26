@@ -314,6 +314,7 @@ async fn rebuild_spirit_scores_with_current_foreign_keys(
             total INTEGER NOT NULL DEFAULT 10,
             mvp_player_id INTEGER,
             msp_player_id INTEGER,
+            notes TEXT,
             submitted_by_team_id INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches(id),
@@ -332,12 +333,12 @@ async fn rebuild_spirit_scores_with_current_foreign_keys(
         r#"
         INSERT INTO spirit_scores (
             id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
-            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id, notes,
             submitted_by_team_id, created_at
         )
         SELECT
             id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
-            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id, notes,
             submitted_by_team_id, created_at
         FROM spirit_scores_old
         "#,
@@ -826,6 +827,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         rebuild_matches_without_volunteer_id(pool).await?;
     }
 
+    if !table_has_column(pool, "matches", "started_at").await? {
+        sqlx::query("ALTER TABLE matches ADD COLUMN started_at TIMESTAMP")
+            .execute(pool)
+            .await?;
+    }
+
     create_match_event_indexes(pool).await?;
     create_match_indexes(pool).await?;
 
@@ -844,6 +851,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             total INTEGER NOT NULL DEFAULT 10,
             mvp_player_id INTEGER,
             msp_player_id INTEGER,
+            notes TEXT,
             submitted_by_team_id INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches(id),
@@ -864,6 +872,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_team_id ON spirit_scores(team_id)")
         .execute(pool)
         .await?;
+
+    if !table_has_column(pool, "spirit_scores", "notes").await? {
+        sqlx::query("ALTER TABLE spirit_scores ADD COLUMN notes TEXT")
+            .execute(pool)
+            .await?;
+    }
 
     if !table_has_foreign_key_target(pool, "spirit_scores", "match_id", "matches").await? {
         rebuild_spirit_scores_with_current_foreign_keys(pool).await?;

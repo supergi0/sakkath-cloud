@@ -23,6 +23,17 @@ pub(crate) struct TeamResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TeamDetailResponse {
+    pub(crate) id: i64,
+    pub(crate) games_played: i64,
+    pub(crate) wins: i64,
+    pub(crate) losses: i64,
+    pub(crate) draws: i64,
+    pub(crate) spirit_avg: f64,
+    pub(crate) current_rank: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MatchPlayerResponse {
     pub(crate) id: i64,
     pub(crate) team_id: i64,
@@ -96,6 +107,7 @@ pub(crate) struct StandingRowResponse {
     pub(crate) id: i64,
     pub(crate) wins: i64,
     pub(crate) losses: i64,
+    pub(crate) draws: i64,
     pub(crate) points_for: i64,
     pub(crate) points_against: i64,
     pub(crate) spirit_avg: f64,

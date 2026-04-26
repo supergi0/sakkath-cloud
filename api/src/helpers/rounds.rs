@@ -416,6 +416,104 @@ pub fn build_seed_order_after_playoffs(
     seed_order
 }
 
+pub fn build_seed_order_after_elimination_results(
+    sorted_teams: &[TeamSortData],
+    playoff_results: &[PlayedMatchResult],
+    final_results: &[PlayedMatchResult],
+) -> Vec<i64> {
+    let playoff_lookup: HashMap<(i64, i64), i64> = playoff_results
+        .iter()
+        .map(|result| {
+            let key = if result.t1 < result.t2 {
+                (result.t1, result.t2)
+            } else {
+                (result.t2, result.t1)
+            };
+            (key, result.winner)
+        })
+        .collect();
+    let final_lookup: HashMap<(i64, i64), i64> = final_results
+        .iter()
+        .map(|result| {
+            let key = if result.t1 < result.t2 {
+                (result.t1, result.t2)
+            } else {
+                (result.t2, result.t1)
+            };
+            (key, result.winner)
+        })
+        .collect();
+
+    let mut seed_order = Vec::with_capacity(sorted_teams.len());
+    let mut offset = 0;
+    while offset < sorted_teams.len() {
+        let remaining = sorted_teams.len() - offset;
+        if remaining >= 4 {
+            let mut bracket_seed_order: Vec<i64> = sorted_teams[offset..offset + 4]
+                .iter()
+                .map(|team| team.team_id)
+                .collect();
+            let first_playoff_pair = (bracket_seed_order[0], bracket_seed_order[3]);
+            let second_playoff_pair = (bracket_seed_order[1], bracket_seed_order[2]);
+
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                first_playoff_pair.0,
+                first_playoff_pair.1,
+                &playoff_lookup,
+            );
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                second_playoff_pair.0,
+                second_playoff_pair.1,
+                &playoff_lookup,
+            );
+
+            let first_final_pair = (bracket_seed_order[0], bracket_seed_order[1]);
+            let second_final_pair = (bracket_seed_order[2], bracket_seed_order[3]);
+
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                first_final_pair.0,
+                first_final_pair.1,
+                &final_lookup,
+            );
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                second_final_pair.0,
+                second_final_pair.1,
+                &final_lookup,
+            );
+
+            seed_order.extend(bracket_seed_order);
+            offset += 4;
+            continue;
+        }
+
+        if remaining >= 2 {
+            let mut bracket_seed_order: Vec<i64> = sorted_teams[offset..offset + 2]
+                .iter()
+                .map(|team| team.team_id)
+                .collect();
+            let direct_pair = (bracket_seed_order[0], bracket_seed_order[1]);
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                direct_pair.0,
+                direct_pair.1,
+                &playoff_lookup,
+            );
+            seed_order.extend(bracket_seed_order);
+            offset += 2;
+            continue;
+        }
+
+        seed_order.push(sorted_teams[offset].team_id);
+        offset += 1;
+    }
+
+    seed_order
+}
+
 pub fn build_final_pairings_from_playoff_results(
     sorted_teams: &[TeamSortData],
     playoff_results: &[PlayedMatchResult],

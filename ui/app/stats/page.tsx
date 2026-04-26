@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
 import { apiUrl } from "../lib/api";
+import { abbreviatePlayerName } from "../lib/player-name";
 
 interface PlayerStat {
   id: number;
@@ -56,25 +57,7 @@ export default function Stats() {
     }));
   };
 
-  const truncateName = (name: string, maxLen: number = 18) => {
-    if (!name) return '';
-    if (name.length <= maxLen) return name;
-    const parts = name.trim().split(/\s+/);
-    if (parts.length <= 1) return name.substring(0, maxLen - 3) + '...';
-    
-    let current = [...parts];
-    for (let i = current.length - 1; i > 0; i--) {
-      current[i] = current[i][0] + '.';
-      const joined = current.join(' ');
-      if (joined.length <= maxLen) return joined;
-    }
-    
-    const joined = current.join(' ');
-    if (joined.length > maxLen) {
-      return joined.substring(0, maxLen - 3) + '...';
-    }
-    return joined;
-  };
+  const truncateName = (name: string, maxLen: number = 18) => abbreviatePlayerName(name, maxLen);
 
   const renderPlayerName = (player: PlayerStat) => {
     const commonName = player.common_name?.trim();

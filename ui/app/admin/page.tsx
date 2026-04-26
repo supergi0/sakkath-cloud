@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
+import { useEffect, useRef, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeftRight, ChevronLeft, Circle, RotateCcw, Save, Shield, AlertTriangle, ToggleLeft, ToggleRight } from 'lucide-react';
 import useSWR from 'swr';
@@ -9,6 +9,7 @@ import { useAuth } from '../auth-provider';
 import { apiUrl } from '../lib/api';
 import { subscribeToLiveUpdates } from '../lib/live-updates';
 import { getTeamAbbreviation } from '../lib/team-name';
+import { formatIndiaShortDateTime, formatIndiaTime } from '../lib/time';
 
 interface UpcomingMatch {
   id: number;
@@ -56,6 +57,8 @@ interface MatchDetail {
   reporting_enabled: boolean;
   field_name: string;
   time: string;
+  started_at?: string | null;
+  server_time?: string;
   players: MatchPlayer[];
   events: MatchEvent[];
 }
@@ -64,6 +67,10 @@ interface ReportingRoundSetting {
   round_key: number;
   label: string;
   is_enabled: boolean;
+}
+
+interface PocTeamSummary {
+  id: number;
 }
 
 const TEAM_EDITS_ROUND_KEY = 10001;
@@ -84,18 +91,91 @@ function getMatchStatus(match: UpcomingMatch | MatchDetail): MatchStatus {
 
 function formatTime(time: string) {
   if (!time) return '';
-  const date = new Date(time);
-  return `${date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })} - ${date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+  return formatIndiaShortDateTime(time);
 }
 
 function formatLogTime(time: string) {
-  return new Date(time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return formatIndiaTime(time);
 }
 
 function getReportingLabel(matchType: number) {
   if (matchType === 1001) return 'Playoffs';
   if (matchType === 1002) return 'Finals';
   return `Round ${matchType}`;
+}
+
+function getPocPanel(match: UpcomingMatch | MatchDetail, pocTeamId: number | null): PanelKey | null {
+  if (pocTeamId === null) return null;
+  if (match.t1_id === pocTeamId) return 't1';
+  if (match.t2_id === pocTeamId) return 't2';
+  return null;
+}
+
+function getDefaultPanel(match: UpcomingMatch | MatchDetail, isPoc: boolean, pocTeamId: number | null): PanelKey {
+  if (isPoc) {
+    const pocPanel = getPocPanel(match, pocTeamId);
+    if (pocPanel) return pocPanel;
+  }
+
+  if (match.possession === 1) return 't1';
+  if (match.possession === 2) return 't2';
+  return 'log';
+}
+
+function formatElapsed(elapsedSeconds: number) {
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function getElapsedSeconds(startedAt: string, referenceTime?: string) {
+  const startedMs = new Date(startedAt).getTime();
+  const referenceMs = referenceTime ? new Date(referenceTime).getTime() : Date.now();
+  if (Number.isNaN(startedMs) || Number.isNaN(referenceMs)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.floor((referenceMs - startedMs) / 1000));
+}
+
+function MatchTimer({ startedAt, serverTime }: { startedAt?: string | null; serverTime?: string }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const initializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!startedAt) {
+      initializedRef.current = false;
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const nextElapsed = getElapsedSeconds(startedAt, serverTime);
+    setElapsedSeconds((current) => {
+      if (!initializedRef.current) {
+        initializedRef.current = true;
+        return nextElapsed;
+      }
+
+      return Math.abs(current - nextElapsed) > 5 ? nextElapsed : current;
+    });
+  }, [startedAt, serverTime]);
+
+  useEffect(() => {
+    if (!startedAt) return;
+    const interval = window.setInterval(() => {
+      setElapsedSeconds((current) => current + 1);
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+
+  if (!startedAt) return null;
+
+  return (
+    <span className="font-mono text-sm font-semibold text-gray-500 dark:text-slate-400">
+      {formatElapsed(elapsedSeconds)}
+    </span>
+  );
 }
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
@@ -162,6 +242,13 @@ function AdminContent() {
     return response.json();
   };
 
+  const fetchPocTeam = async (): Promise<PocTeamSummary | null> => {
+    if (!token || !isPoc) return null;
+    const response = await fetch(apiUrl('/v1/poc/team'), { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) return null;
+    return response.json();
+  };
+
   const fetchMatchDetail = async (url: string): Promise<MatchDetail | null> => {
     const response = await fetch(url);
     if (!response.ok) return null;
@@ -184,6 +271,12 @@ function AdminContent() {
   const { data: activeMatch, mutate: mutateActiveMatch } = useSWR(
     activeMatchId ? apiUrl(`/v1/matches/${activeMatchId}`) : null,
     fetchMatchDetail,
+    { revalidateOnFocus: true }
+  );
+
+  const { data: pocTeam } = useSWR(
+    token && isLoggedIn && isPoc ? apiUrl('/v1/poc/team') : null,
+    fetchPocTeam,
     { revalidateOnFocus: true }
   );
 
@@ -213,7 +306,7 @@ function AdminContent() {
   useEffect(() => {
     const possession = activeMatch?.possession;
     if (possession === undefined || possession === null || possession >= 3) return;
-    setPanel(possession === 1 ? 't1' : 't2');
+    setPanel(getDefaultPanel(activeMatch, isPoc, pocTeam?.id ?? null));
     setPendingScorerId(null);
     setPendingAssisterId(null);
     setPendingBlockId(null);
@@ -221,7 +314,15 @@ function AdminContent() {
     setPendingTurnoverId(null);
     setPendingSwitchOnly(false);
     setErrorMessage(null);
-  }, [activeMatch?.possession]);
+  }, [activeMatch, isPoc, pocTeam?.id]);
+
+  useEffect(() => {
+    if (!isPoc || !activeMatch || activeMatch.possession === null || activeMatch.possession < 3) return;
+    resetComposer();
+    setActiveMatchId(null);
+    setChoosingPossession(null);
+    router.push('/myteam');
+  }, [activeMatch, isPoc, router]);
 
   async function postAction(path: string, body?: Record<string, number | null>) {
     if (!token) throw new Error('Missing auth token');
@@ -479,6 +580,9 @@ function AdminContent() {
             >
               <ChevronLeft className="h-4 w-4" /> Back
             </button>
+            <div className="flex flex-1 justify-center px-3">
+              <MatchTimer startedAt={activeMatch.started_at} serverTime={activeMatch.server_time} />
+            </div>
             <button
               onClick={() => setConfirmAction('end')}
               disabled={isSubmitting || activeMatchReportingLocked}
@@ -940,7 +1044,7 @@ function AdminContent() {
                       <button
                         onClick={() => {
                           setActiveMatchId(match.id);
-                          setPanel(match.possession === 1 ? 't1' : 't2');
+                          setPanel(getDefaultPanel(match, isPoc, pocTeam?.id ?? null));
                         }}
                         className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
                           canEditMatch

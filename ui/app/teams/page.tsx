@@ -2,14 +2,18 @@
 
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { MapPin, Users, Trophy, Target, ArrowUp, ArrowDown, Star, TrendingUp, TrendingDown, Sparkle, AlignStartVertical, Play, Circle } from "lucide-react";
+import { MapPin, Users, Trophy, Target, ArrowUp, ArrowDown, Star, TrendingUp, TrendingDown, Sparkle, AlignStartVertical, Play, Circle, ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { apiUrl } from '../lib/api';
+import { abbreviatePlayerName } from '../lib/player-name';
+import { getTeamAbbreviation } from '../lib/team-name';
+import { formatIndiaShortDateTime } from '../lib/time';
 
 interface Team {
   id: number;
   name: string;
+  abbreviation?: string | null;
   location: string;
   division: number;
   init_rank: number;
@@ -17,6 +21,7 @@ interface Team {
   games_played: number;
   wins: number;
   losses: number;
+  draws: number;
   spirit_avg: number;
   spirit_rank: number;
   current_rank: number;
@@ -42,6 +47,8 @@ interface TeamMatch {
   t2_id: number;
   t1_name: string;
   t2_name: string;
+  t1_abbreviation?: string | null;
+  t2_abbreviation?: string | null;
   t1_score: number;
   t2_score: number;
   t1_spirit: number | null;
@@ -53,7 +60,13 @@ interface TeamMatch {
   match_type: number;
 }
 
+interface TeamSeedTimelinePoint {
+  label: string;
+  seed: number;
+}
+
 type TabType = 'matches' | 'players' | 'timeline';
+type PlayerSortField = 'goals' | 'assists' | 'blocks' | 'turnovers';
 interface TeamsPreferences {
   activeTab: TabType;
 }
@@ -87,8 +100,11 @@ function TeamContent() {
   const [team, setTeam] = useState<Team | null>(null);
   const [playerStats, setPlayerStats] = useState<PlayerStat[]>([]);
   const [matches, setMatches] = useState<TeamMatch[]>([]);
+  const [seedTimeline, setSeedTimeline] = useState<TeamSeedTimelinePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>(getInitialActiveTab);
+  const [playerSortField, setPlayerSortField] = useState<PlayerSortField>('goals');
+  const [playerSortDir, setPlayerSortDir] = useState<'asc' | 'desc'>('desc');
   const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
   const teamId = searchParams.get('team_id') || '1';
 
@@ -102,10 +118,12 @@ function TeamContent() {
       fetch(apiUrl(`/v1/teams/${teamId}`)).then(r => r.json()),
       fetch(apiUrl(`/v1/teams/${teamId}/players`)).then(r => r.json()),
       fetch(apiUrl(`/v1/teams/${teamId}/matches`)).then(r => r.json()),
-    ]).then(([teamData, playersData, matchesData]) => {
+      fetch(apiUrl(`/v1/teams/${teamId}/seed-timeline`)).then(r => r.ok ? r.json() : []),
+    ]).then(([teamData, playersData, matchesData, seedTimelineData]) => {
       setTeam(teamData);
       setPlayerStats(playersData);
       setMatches(matchesData);
+      setSeedTimeline(seedTimelineData);
       setShowingCommonNames({});
       setLoading(false);
     }).catch(() => setLoading(false));
@@ -129,8 +147,15 @@ function TeamContent() {
 
   const formatTime = (time: string) => {
     if (!time) return '';
-    const d = new Date(time);
-    return d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' }) + ' - ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return formatIndiaShortDateTime(time);
+  };
+
+  const getCardTeamName = (name: string, abbreviation?: string | null) => {
+    if (name.length > 16) {
+      return getTeamAbbreviation(name, abbreviation ?? undefined, 16);
+    }
+
+    return name;
   };
 
   const getRoundLabel = (type: number) => {
@@ -151,27 +176,31 @@ function TeamContent() {
     const hasAlternateName = Boolean(commonName && commonName !== player.full_name);
 
     if (!hasAlternateName) {
-      return <Text variant="primary" className="font-medium truncate max-w-[180px] pointer-events-none">{player.full_name}</Text>;
+      return <Text variant="primary" className="font-medium truncate max-w-[150px] pointer-events-none" title={player.full_name}>{abbreviatePlayerName(player.full_name, 20)}</Text>;
     }
 
     const showingCommonName = Boolean(showingCommonNames[player.id]);
+    const displayName = abbreviatePlayerName(player.full_name, 20);
+    const displayCommonName = abbreviatePlayerName(commonName, 20);
 
     return (
-      <div className="relative inline-block max-w-[180px] w-full pointer-events-none">
+      <div className="relative inline-block max-w-[150px] w-full pointer-events-none">
         <span className="relative block min-h-[1.5rem] w-full overflow-hidden">
           <span
             className={`block truncate font-medium text-gray-900 transition-all duration-300 dark:text-white pointer-events-none ${
               showingCommonName ? '-translate-y-full scale-95 opacity-0' : 'translate-y-0 scale-100 opacity-100'
             }`}
+            title={player.full_name}
           >
-            {player.full_name}
+            {displayName}
           </span>
           <span
             className={`absolute inset-0 block truncate font-medium text-blue-700 transition-all duration-300 dark:text-cyan-300 pointer-events-none ${
               showingCommonName ? 'translate-y-0 scale-100 opacity-100' : 'translate-y-full scale-95 opacity-0'
             }`}
+            title={commonName}
           >
-            {commonName}
+            {displayCommonName}
           </span>
         </span>
       </div>
@@ -325,6 +354,10 @@ function TeamContent() {
                 const ourSpirit = isT1 ? match.t1_spirit : match.t2_spirit;
                 const theirSpirit = isT1 ? match.t2_spirit : match.t1_spirit;
                 const opponent = isT1 ? match.t2_name : match.t1_name;
+                const ourDisplayName = getCardTeamName(team.name, team.abbreviation);
+                const opponentDisplayName = isT1
+                  ? getCardTeamName(match.t2_name, match.t2_abbreviation)
+                  : getCardTeamName(match.t1_name, match.t1_abbreviation);
                 
                 return (
                   <div 
@@ -363,11 +396,11 @@ function TeamContent() {
                     
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-2">
-                        <Text variant="primary" className="font-medium truncate min-w-0 flex-1">{team.name}</Text>
+                        <Text variant="primary" className="font-medium truncate min-w-0 flex-1" title={team.name}>{ourDisplayName}</Text>
                         <Text variant="primary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : ourScore}</Text>
                       </div>
                       <div className="flex items-center justify-between gap-2">
-                        <Text variant="secondary" className="truncate min-w-0 flex-1">{opponent}</Text>
+                        <Text variant="secondary" className="truncate min-w-0 flex-1" title={opponent}>{opponentDisplayName}</Text>
                         <Text variant="secondary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : theirScore}</Text>
                       </div>
                     </div>
@@ -399,34 +432,62 @@ function TeamContent() {
           {/* Players Tab */}
           {activeTab === 'players' && (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="border-b border-gray-200 dark:border-slate-700">
-                    <th className="py-3 px-2 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
-                    <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">Goals</th>
-                    <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">Assists</th>
-                    <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">Blocks</th>
-                    <th className="py-3 px-2 text-center font-medium text-gray-500 dark:text-gray-400">Turnovers</th>
+                    <th className="w-[168px] py-3 px-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
+                    {([
+                      ['goals', 'Gls'],
+                      ['assists', 'Ast'],
+                      ['blocks', 'Blk'],
+                      ['turnovers', 'Tvr'],
+                    ] as const).map(([field, label]) => {
+                      const active = playerSortField === field;
+                      return (
+                        <th
+                          key={field}
+                          className={`w-12 py-3 px-1.5 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 ${active ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'}`}
+                          onClick={() => {
+                            if (active) {
+                              setPlayerSortDir((current) => current === 'asc' ? 'desc' : 'asc');
+                            } else {
+                              setPlayerSortField(field);
+                              setPlayerSortDir('desc');
+                            }
+                          }}
+                        >
+                          <div className="flex items-center justify-center gap-1 whitespace-nowrap">
+                            <span>{label}</span>
+                            {active && (playerSortDir === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />)}
+                          </div>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
-                  {playerStats.map((player) => (
+                  {[...playerStats]
+                    .sort((a, b) => {
+                      const diff = a[playerSortField] - b[playerSortField];
+                      return playerSortDir === 'asc' ? diff : -diff;
+                    })
+                    .map((player) => (
                     <tr 
                       key={player.id} 
                       onClick={() => togglePlayerName(player.id)}
                       className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700 cursor-pointer"
                     >
-                      <td className="py-3 px-2">
+                      <td className="w-[168px] py-3 px-1.5">
                         <div className="flex items-center gap-2">
                           {renderPlayerName(player)}
                           {player.is_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-yellow-500 text-white text-xs font-bold">C</span>}
                           {player.is_spirit_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-purple-500 text-white text-xs font-bold">SC</span>}
                         </div>
                       </td>
-                      <td className="py-3 px-2 text-center"><Text variant="primary">{player.goals}</Text></td>
-                      <td className="py-3 px-2 text-center"><Text variant="primary">{player.assists}</Text></td>
-                      <td className="py-3 px-2 text-center"><Text variant="primary">{player.blocks}</Text></td>
-                      <td className="py-3 px-2 text-center"><Text variant="primary">{player.turnovers}</Text></td>
+                      <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.goals}</Text></td>
+                      <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.assists}</Text></td>
+                      <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.blocks}</Text></td>
+                      <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.turnovers}</Text></td>
                     </tr>
                   ))}
                 </tbody>
@@ -438,51 +499,36 @@ function TeamContent() {
           {activeTab === 'timeline' && (
             <div>
               {(() => {
-                const endedMatches = matches.filter(m => m.possession !== null && m.possession >= 3);
-                if (endedMatches.length === 0) {
+                if (seedTimeline.length <= 1) {
                   return <Text variant="secondary">No completed matches yet</Text>;
                 }
 
-                // Build seed progression data
-                const seedData: { match: string; seed: number; tooltip: string }[] = [
-                  { match: 'Start', seed: team?.init_rank || 5, tooltip: 'Initial Seed' }
-                ];
-                let currentSeed = team?.init_rank || 5;
-                
-                endedMatches.forEach((match, idx) => {
-                  const isT1 = match.t1_id === team?.id;
-                  const ourScore = isT1 ? match.t1_score : match.t2_score;
-                  const theirScore = isT1 ? match.t2_score : match.t1_score;
-                  const opponent = isT1 ? match.t2_name : match.t1_name;
-                  const won = ourScore > theirScore;
-                  currentSeed = won ? Math.max(1, currentSeed - 1) : Math.min(10, currentSeed + 1);
-                  seedData.push({ 
-                    match: `M${idx + 1}`, 
-                    seed: currentSeed,
-                    tooltip: `vs ${opponent}: ${ourScore}-${theirScore} (${won ? 'W' : 'L'})`
-                  });
-                });
+                const seedData = seedTimeline.map((point) => ({
+                  stage: point.label,
+                  seed: point.seed,
+                  tooltip: `${point.label}: Seed ${point.seed}`,
+                }));
 
                 return (
                   <div className="mb-6">
                     <div className="w-full overflow-x-auto overflow-y-hidden">
-                      <div style={{ width: `${Math.max(1200, seedData.length * 80)}px`, height: '500px' }}>
-                          <LineChart data={seedData} width={Math.max(1200, seedData.length * 80)} height={500} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
+                      <div style={{ width: `${Math.max(720, seedData.length * 56)}px`, height: '500px' }}>
+                          <LineChart data={seedData} width={Math.max(720, seedData.length * 56)} height={500} margin={{ top: 30, right: 30, left: 10, bottom: 80 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#374151" opacity={0.3} />
                             <XAxis 
-                              dataKey="match" 
+                              dataKey="stage" 
                               stroke="#9ca3af" 
                               fontSize={12}
                               tick={{ fill: '#9ca3af' }}
-                              label={{ value: 'Match', position: 'insideBottom', offset: -15, fill: '#9ca3af', fontWeight: 500 }}
+                              label={{ value: 'Stage', position: 'insideBottom', offset: -15, fill: '#9ca3af', fontWeight: 500 }}
                             />
                             <YAxis 
                               stroke="#9ca3af" 
                               fontSize={12}
                               tick={{ fill: '#9ca3af' }}
-                              domain={[1, 10]}
+                              domain={[1, 'dataMax + 1']}
                               reversed
-                              ticks={[1, 3, 5, 7, 10]}
+                              allowDecimals={false}
                               label={{ value: 'Seed', angle: -90, position: 'insideLeft', offset: 5, fill: '#9ca3af', fontWeight: 500 }}
                             />
                             <Tooltip 

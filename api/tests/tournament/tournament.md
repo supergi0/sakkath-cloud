@@ -22,7 +22,7 @@ Supported forms:
 - `--itr=1`
 - `itr=1`
 
-`itr` changes the seeded random winners used during swiss and playoff play while remaining reproducible for the same value.
+`itr` changes the seeded random winners used during swiss and playoff play while remaining reproducible for the same value. Swiss simulation also injects a deterministic `20%` draw chance, so the same `itr` reproduces the same drawn matches too.
 
 ## Logging And Artifacts
 
@@ -52,6 +52,7 @@ The harness copies `sakkath.db` and its WAL file into a temp directory for each 
 ### `match-flow`
 
 - Verifies match visibility for admin, super-admin, and both POCs
+- Resets `Round 1` reporting to disabled through `/v1/super/reporting-rounds/1` when the copied DB snapshot already has it enabled, so the scenario stays deterministic
 - Starts a match, records events, ends it, confirms score from both teams, and submits spirit rows
 - Confirms the API rejects new events after the score is finalized
 - Re-checks public match, team, standings, and player-stat surfaces
@@ -59,10 +60,13 @@ The harness copies `sakkath.db` and its WAL file into a temp directory for each 
 ### `full-tournament`
 
 - Loads all swiss rounds across both divisions
-- Uses seeded randomness to decide winners and occasional swiss draws
+- Uses seeded randomness to decide winners and a deterministic `20%` swiss draw rate
 - Validates standings and rematch-aware swiss pairings after each round
 - Runs playoff rounds `1001` and `1002`
 - Verifies final public stats, team match histories, grid seed labels, and standings state
+- Verifies `/v1/standings` reflects playoff seed-holder swaps after round `1001` and final placement swaps after round `1002`
+- Verifies `/v1/teams/:id` `current_rank` matches the same API-visible final placement order
+- Verifies elimination matches contribute to displayed `wins`, `losses`, `points_for`, `points_against`, `games_played`, and all-match spirit average while placement order still follows seed swapping instead of swiss sorting
 
 ## Design Rules
 

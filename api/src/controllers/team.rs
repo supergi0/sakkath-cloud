@@ -5,7 +5,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use crate::helpers::cache;
+use crate::helpers::{cache, rounds, sorting};
 
 const MAX_TEAM_PLAYERS: i64 = 22;
 const TEAM_EDITS_ROUND_KEY: i64 = 10_001;
@@ -50,6 +50,7 @@ pub struct TeamDetail {
     pub games_played: i64,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub spirit_avg: f64,
     pub spirit_rank: i64,
     pub current_rank: i64,
@@ -66,10 +67,17 @@ pub struct TeamStanding {
     pub init_rank: i64,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub points_for: i64,
     pub points_against: i64,
     pub spirit_avg: f64,
     pub small_logo: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TeamSeedTimelinePoint {
+    pub label: String,
+    pub seed: i64,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
@@ -164,13 +172,14 @@ pub async fn get_team_detail(
     State(state): State<crate::AppState>,
     Path(id): Path<i64>,
 ) -> Json<TeamDetail> {
-    let result = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
+    let result = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
         r#"
         SELECT 
             t.id, t.name, t.abbreviation, t.location, t.division, t.init_rank,
             (SELECT COUNT(*) FROM users WHERE team_id = t.id AND role = 2 AND deleted_at IS NULL) as players,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score > t2_score) OR (t2_id = t.id AND t2_score > t1_score))) as wins,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score < t2_score) OR (t2_id = t.id AND t2_score < t1_score))) as losses,
+            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id OR t2_id = t.id) AND t1_score = t2_score)) as draws,
             COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0) as spirit_avg,
             (SELECT COUNT(*) + 1 FROM (
                 SELECT tm.id, COALESCE(AVG(CASE WHEN m.t1_id = tm.id THEN m.t1_spirit WHEN m.t2_id = tm.id THEN m.t2_spirit END), 0.0) as avg_spirit
@@ -185,23 +194,33 @@ pub async fn get_team_detail(
     ).bind(id).fetch_optional(&state.db).await;
 
     match result {
-        Ok(Some(r)) => Json(TeamDetail {
-            id: r.0,
-            name: r.1,
-            abbreviation: r.2,
-            location: r.3.unwrap_or_default(),
-            division: r.4,
-            init_rank: r.5.unwrap_or(0),
-            players: r.6,
-            games_played: r.7 + r.8,
-            wins: r.7,
-            losses: r.8,
-            spirit_avg: r.9,
-            spirit_rank: r.10,
-            current_rank: r.5.unwrap_or(0),
-            full_logo: r.11,
-            small_logo: r.12,
-        }),
+        Ok(Some(r)) => {
+            let current_rank = crate::helpers::sorting::get_display_intermediate_standings(&state.db, r.4)
+                .await
+                .iter()
+                .position(|team| team.team_id == r.0)
+                .map(|index| index as i64 + 1)
+                .unwrap_or(r.5.unwrap_or(0));
+
+            Json(TeamDetail {
+                id: r.0,
+                name: r.1,
+                abbreviation: r.2,
+                location: r.3.unwrap_or_default(),
+                division: r.4,
+                init_rank: r.5.unwrap_or(0),
+                players: r.6,
+                games_played: r.7 + r.8 + r.9,
+                wins: r.7,
+                losses: r.8,
+                draws: r.9,
+                spirit_avg: r.10,
+                spirit_rank: r.11,
+                current_rank: current_rank,
+                full_logo: r.12,
+                small_logo: r.13,
+            })
+        }
         _ => Json(TeamDetail {
             id: 0,
             name: "Not Found".to_string(),
@@ -213,6 +232,7 @@ pub async fn get_team_detail(
             games_played: 0,
             wins: 0,
             losses: 0,
+            draws: 0,
             spirit_avg: 0.0,
             spirit_rank: 0,
             current_rank: 0,
@@ -257,8 +277,7 @@ pub async fn get_standings(
 ) -> Json<Vec<TeamStanding>> {
     let division = params.division.unwrap_or(0) as i64;
 
-    let sorted =
-        crate::helpers::sorting::get_cached_intermediate_standings(&state.db, division).await;
+    let sorted = crate::helpers::sorting::get_display_intermediate_standings(&state.db, division).await;
 
     let standings: Vec<TeamStanding> = sorted
         .iter()
@@ -270,6 +289,7 @@ pub async fn get_standings(
             init_rank: t.init_rank,
             wins: t.wins,
             losses: t.losses,
+            draws: t.draws,
             points_for: t.points_for,
             points_against: t.points_against,
             spirit_avg: t.spirit_avg,
@@ -278,6 +298,147 @@ pub async fn get_standings(
         .collect();
 
     Json(standings)
+}
+
+async fn get_stage_progress(
+    db: &SqlitePool,
+    division: i64,
+    match_type: i64,
+) -> Result<(i64, i64), axum::http::StatusCode> {
+    sqlx::query_as(
+        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.deleted_at IS NULL"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_one(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn fetch_completed_stage_results(
+    db: &SqlitePool,
+    division: i64,
+    match_type: i64,
+) -> Result<Vec<rounds::PlayedMatchResult>, axum::http::StatusCode> {
+    let rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.possession >= 3 AND m.deleted_at IS NULL
+           ORDER BY m.time ASC, m.field_id ASC, m.id ASC"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_all(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
+            if t1_score == t2_score {
+                return None;
+            }
+
+            Some(rounds::PlayedMatchResult {
+                t1: t1_id,
+                t2: t2_id,
+                winner: if t1_score > t2_score { t1_id } else { t2_id },
+            })
+        })
+        .collect())
+}
+
+fn find_seed_position(team_ids: &[i64], team_id: i64) -> Option<i64> {
+    team_ids
+        .iter()
+        .position(|current_team_id| *current_team_id == team_id)
+        .map(|index| index as i64 + 1)
+}
+
+pub async fn get_team_seed_timeline(
+    State(state): State<crate::AppState>,
+    Path(team_id): Path<i64>,
+) -> Result<Json<Vec<TeamSeedTimelinePoint>>, axum::http::StatusCode> {
+    let team_row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT division, COALESCE(init_rank, 0) FROM teams WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (division, init_rank) = team_row.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let total_rounds = if division == 0 {
+        crate::OPEN_ROUNDS
+    } else {
+        crate::WOMEN_ROUNDS
+    };
+
+    let mut timeline = vec![TeamSeedTimelinePoint {
+        label: "Start".to_string(),
+        seed: init_rank,
+    }];
+    let mut last_completed_round = 0;
+
+    for round in 1..=total_rounds {
+        let (total_matches, completed_matches) = get_stage_progress(&state.db, division, round).await?;
+        if total_matches == 0 || total_matches != completed_matches {
+            break;
+        }
+
+        let standings = sorting::get_sorted_standings_through_round(&state.db, division, round).await;
+        if let Some(seed) = standings
+            .iter()
+            .position(|standing| standing.team_id == team_id)
+            .map(|index| index as i64 + 1)
+        {
+            last_completed_round = round;
+            timeline.push(TeamSeedTimelinePoint {
+                label: format!("R{round}"),
+                seed,
+            });
+        }
+    }
+
+    let playoff_results = fetch_completed_stage_results(&state.db, division, 1001).await?;
+    if !playoff_results.is_empty() {
+        let swiss_round = if last_completed_round > 0 {
+            last_completed_round
+        } else {
+            total_rounds
+        };
+        let swiss_order = sorting::get_sorted_standings_through_round(&state.db, division, swiss_round).await;
+        let playoff_seed_order = rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
+
+        if let Some(seed) = find_seed_position(&playoff_seed_order, team_id) {
+            timeline.push(TeamSeedTimelinePoint {
+                label: "P".to_string(),
+                seed,
+            });
+        }
+
+        let final_results = fetch_completed_stage_results(&state.db, division, 1002).await?;
+        if !final_results.is_empty() {
+            let final_seed_order = rounds::build_seed_order_after_elimination_results(
+                &swiss_order,
+                &playoff_results,
+                &final_results,
+            );
+
+            if let Some(seed) = find_seed_position(&final_seed_order, team_id) {
+                timeline.push(TeamSeedTimelinePoint {
+                    label: "F".to_string(),
+                    seed,
+                });
+            }
+        }
+    }
+
+    Ok(Json(timeline))
 }
 
 // All player stats in one query

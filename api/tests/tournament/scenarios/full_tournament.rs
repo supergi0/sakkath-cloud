@@ -1,6 +1,7 @@
 use crate::tournament::assertions::{
-    assert_final_public_state, assert_playoff_grid_seed_labels, assert_playoff_pairings,
-    assert_standings_match_tracker, assert_swiss_grid_seed_labels, assert_swiss_round_pairings,
+    assert_display_standings_and_team_ranks, assert_final_public_state,
+    assert_playoff_grid_seed_labels, assert_playoff_pairings, assert_standings_match_tracker,
+    assert_swiss_grid_seed_labels, assert_swiss_round_pairings,
 };
 use crate::tournament::config::RunConfig;
 use crate::tournament::harness::{Harness, TestResult};
@@ -138,6 +139,22 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
             )?;
         }
 
+        let playoff_display_order = tracker.expected_display_order_after_playoffs(division);
+        assert_display_standings_and_team_ranks(
+            &harness,
+            &tracker,
+            division,
+            &playoff_display_order,
+        )
+        .await?;
+        reporter.record_ordered_standings(
+            "full-tournament",
+            division,
+            "after playoff round 1 seed swaps",
+            &tracker,
+            &playoff_display_order,
+        )?;
+
         let playoff_round_two = load_round_matches(&harness, &mut tracker, division, 1002).await?;
         enable_reporting_round(&harness, staff.super_admin.as_str(), 1002).await?;
         let expected_round_two = tracker.expected_playoff_round_two(division);
@@ -189,11 +206,13 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
             )?;
         }
 
-        reporter.record_standings(
+        let final_display_order = tracker.expected_display_order_after_elimination(division);
+        reporter.record_ordered_standings(
             "full-tournament",
             division,
-            "final swiss standings",
+            "final display standings",
             &tracker,
+            &final_display_order,
         )?;
     }
 

@@ -1,8 +1,8 @@
 use super::model::{
     LoginResponse, MatchDetailResponse, PlayerStatResponse, ReportingRoundSettingResponse,
     ScheduleGridResponse, ScheduleMatchResponse, ScoreConfirmRowResponse,
-    SpiritScoreRowResponse, StandingRowResponse, StatsResponse, TeamMatchResponse,
-    TeamResponse, TournamentTracker, UpcomingMatchResponse,
+    SpiritScoreRowResponse, StandingRowResponse, StatsResponse, TeamDetailResponse,
+    TeamMatchResponse, TeamResponse, TournamentTracker, UpcomingMatchResponse,
 };
 use api::{AppState, build_api_only_app, migration};
 use axum::body::{Body, to_bytes};
@@ -171,6 +171,17 @@ impl Harness {
         self.request_json(
             Method::GET,
             &format!("/v1/teams/{team_id}/matches"),
+            None,
+            None,
+            StatusCode::OK,
+        )
+        .await
+    }
+
+    pub async fn get_team_detail(&self, team_id: i64) -> TestResult<TeamDetailResponse> {
+        self.request_json(
+            Method::GET,
+            &format!("/v1/teams/{team_id}"),
             None,
             None,
             StatusCode::OK,

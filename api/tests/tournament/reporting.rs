@@ -1,6 +1,7 @@
 use super::config::RunConfig;
 use super::harness::TestResult;
 use super::model::{ScheduleMatchResponse, TournamentTracker};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -184,14 +185,32 @@ impl ReportWriter {
         label: &str,
         tracker: &TournamentTracker,
     ) -> TestResult {
-        let standings = tracker.swiss_summary(division);
-        let headline = standings
+        let order: Vec<i64> = tracker
+            .swiss_summary(division)
+            .iter()
+            .map(|metrics| metrics.team_id)
+            .collect();
+        self.record_ordered_standings(scenario, division, label, tracker, &order)
+    }
+
+    pub(crate) fn record_ordered_standings(
+        &mut self,
+        scenario: &str,
+        division: i64,
+        label: &str,
+        tracker: &TournamentTracker,
+        order: &[i64],
+    ) -> TestResult {
+        let standings_by_team: HashMap<i64, _> = tracker
+            .display_summary_for_order(division, order)
+            .into_iter()
+            .map(|metrics| (metrics.team_id, metrics))
+            .collect();
+        let headline = order
             .iter()
             .take(3)
             .enumerate()
-            .map(|(index, metrics)| {
-                format!("{}. {}", index + 1, tracker.team_name(metrics.team_id))
-            })
+            .map(|(index, team_id)| format!("{}. {}", index + 1, tracker.team_name(*team_id)))
             .collect::<Vec<_>>()
             .join(", ");
         println!(
@@ -208,11 +227,14 @@ impl ReportWriter {
             .push("| Rank | Team | W | L | D | PF | PA | Spirit |".to_string());
         self.standings_lines
             .push("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |".to_string());
-        for (index, metrics) in standings.iter().enumerate() {
+        for (index, team_id) in order.iter().enumerate() {
+            let metrics = standings_by_team
+                .get(team_id)
+                .unwrap_or_else(|| panic!("missing standings metrics for team {}", team_id));
             self.standings_lines.push(format!(
                 "| {} | {} | {} | {} | {} | {} | {} | {:.2} |",
                 index + 1,
-                escape_markdown(tracker.team_name(metrics.team_id)),
+                escape_markdown(tracker.team_name(*team_id)),
                 metrics.wins,
                 metrics.losses,
                 metrics.draws,

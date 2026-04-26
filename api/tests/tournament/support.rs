@@ -405,6 +405,18 @@ fn resolve_target_scores(current_t1: i64, current_t2: i64, outcome: OutcomeKind)
                 (current_t1, current_t1 + 1)
             }
         }
+        OutcomeKind::Draw => {
+            if current_t1 == current_t2 {
+                if current_t1 == 0 {
+                    (1, 1)
+                } else {
+                    (current_t1, current_t2)
+                }
+            } else {
+                let target = current_t1.max(current_t2);
+                (target, target)
+            }
+        }
     }
 }
 

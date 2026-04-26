@@ -42,6 +42,7 @@ pub struct TeamStanding {
     pub name: String,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub points_for: i64,
     pub points_against: i64,
     pub h2h_diff: i64,
@@ -405,7 +406,7 @@ pub async fn read_tournament_state(
 }
 
 async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStanding> {
-    let sorted = sorting::get_sorted_standings(db, division).await;
+    let sorted = sorting::get_display_standings(db, division).await;
     sorted
         .iter()
         .map(|team| TeamStanding {
@@ -413,6 +414,7 @@ async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStan
             name: team.name.clone(),
             wins: team.wins,
             losses: team.losses,
+            draws: team.draws,
             points_for: team.points_for,
             points_against: team.points_against,
             h2h_diff: 0,
@@ -423,7 +425,7 @@ async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStan
 }
 
 async fn compute_intermediate_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStanding> {
-    let sorted = sorting::get_cached_intermediate_standings(db, division).await;
+    let sorted = sorting::get_display_intermediate_standings(db, division).await;
     sorted
         .iter()
         .map(|team| TeamStanding {
@@ -431,6 +433,7 @@ async fn compute_intermediate_standings(db: &sqlx::SqlitePool, division: i64) ->
             name: team.name.clone(),
             wins: team.wins,
             losses: team.losses,
+            draws: team.draws,
             points_for: team.points_for,
             points_against: team.points_against,
             h2h_diff: 0,
@@ -1103,6 +1106,9 @@ async fn create_finals_if_needed(
 
     let sorted = sorting::get_sorted_standings(db, division).await;
     let playoff_results = fetch_completed_playoff_results(db, division).await?;
+    if playoff_results.len() as i64 != playoff_stats.0 {
+        return Ok(false);
+    }
     let final_pairings =
         rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
     if final_pairings.is_empty() {
@@ -1166,12 +1172,18 @@ async fn get_slot_assignments(
                 .find(|field| field.label == format!("G{}", slot.field_index))
                 .ok_or_else(|| sqlx::Error::Protocol("missing field mapping for slot".into()))?;
             slots.push((
+                slot.slot_code.clone(),
                 field.id,
                 row.start_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             ));
         }
     }
-    Ok(slots)
+    slots.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Ok(slots
+        .into_iter()
+        .map(|(_, field_id, start_time)| (field_id, start_time))
+        .collect())
 }
 
 fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowTemplate> {

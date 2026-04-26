@@ -50,6 +50,7 @@ interface WfdfSpirit {
   communication: number;
   mvp_player_id: number | null;
   msp_player_id: number | null;
+  notes: string;
 }
 
 interface OpponentPlayer {
@@ -70,6 +71,7 @@ interface SpiritScoreRow {
   total: number;
   mvp_player_id: number | null;
   msp_player_id: number | null;
+  notes: string | null;
   submitted_by_team_id: number;
 }
 
@@ -138,7 +140,9 @@ function roleBadge(role: PlayerRole) {
   return <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${c[role] || ''}`}>{role}</span>;
 }
 
-const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null });
+const countWords = (value: string) => value.trim() ? value.trim().split(/\s+/).length : 0;
+
+const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null, notes: '' });
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
   return (
@@ -158,15 +162,17 @@ function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string;
   );
 }
 
-function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp = true }: {
+function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp = true, showNotes = false }: {
   label: string;
   form: WfdfSpirit;
   onChange: (f: WfdfSpirit) => void;
   playerList: { id: number; name: string }[];
   playerLabel: string;
   showMvpMsp?: boolean;
+  showNotes?: boolean;
 }) {
   const total = form.rules_knowledge + form.fouls_contact + form.fair_mindedness + form.positive_attitude + form.communication;
+  const noteWordCount = countWords(form.notes);
   const categories = [
     { key: 'rules_knowledge' as const, label: 'Rules Knowledge & Use' },
     { key: 'fouls_contact' as const, label: 'Fouls & Body Contact' },
@@ -218,6 +224,21 @@ function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp
             </select>
           </div>
         </>
+      )}
+      {showNotes && (
+        <div>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <Text variant="secondary" className="text-xs">Notes ({playerLabel})</Text>
+            <Text variant="secondary" className={`text-[11px] ${noteWordCount > 250 ? 'text-red-600 dark:text-red-400' : ''}`}>{noteWordCount}/250 words</Text>
+          </div>
+          <textarea
+            value={form.notes}
+            onChange={e => onChange({ ...form, notes: e.target.value })}
+            rows={4}
+            placeholder="Optional notes for the other team"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+          />
+        </div>
       )}
     </div>
   );
@@ -479,6 +500,10 @@ export default function MyTeamPage() {
     if (!m) return;
     const isT1 = m.t1_id === team.id;
     const opponentId = isT1 ? m.t2_id : m.t1_id;
+    if (countWords(form.opponentSpirit.notes) > 250) {
+      setFeedback({ type: 'error', message: 'Opponent notes must be 250 words or fewer.' });
+      return;
+    }
 
     try {
       // 1. Confirm score
@@ -829,6 +854,7 @@ export default function MyTeamPage() {
                           onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
                           playerList={opponents}
                           playerLabel={oppTeamName}
+                          showNotes
                         />
                       )}
 

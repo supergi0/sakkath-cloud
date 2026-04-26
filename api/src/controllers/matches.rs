@@ -90,6 +90,9 @@ pub struct MatchDetail {
     pub field_name: String,
     pub time: String,
     pub stream_url: Option<String>,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub server_time: String,
     pub players: Vec<MatchPlayer>,
     pub events: Vec<MatchEvent>,
 }
@@ -175,6 +178,35 @@ fn map_reporting_round_setting(row: ReportingRoundSettingRow) -> ReportingRoundS
     }
 }
 
+async fn load_match_timing_snapshot(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<(Option<String>, String, String), axum::http::StatusCode> {
+    let timing: Option<(Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT
+            CASE
+                WHEN started_at IS NULL THEN NULL
+                ELSE strftime('%Y-%m-%dT%H:%M:%SZ', started_at)
+            END AS started_at,
+            COALESCE(
+                strftime('%Y-%m-%dT%H:%M:%SZ', updated_at),
+                strftime('%Y-%m-%dT%H:%M:%SZ', created_at),
+                ''
+            ) AS updated_at
+        FROM matches
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (started_at, updated_at) = timing.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    Ok((started_at, updated_at, chrono::Utc::now().to_rfc3339()))
+}
+
 pub async fn get_reporting_round_settings(
     State(state): State<crate::AppState>,
     headers: axum::http::HeaderMap,
@@ -210,9 +242,17 @@ pub async fn stream_live_updates(
             return None;
         }
 
+        let mut event_data = serde_json::to_value(&update).ok()?;
+        if let Some(object) = event_data.as_object_mut() {
+            object.insert(
+                "server_time".to_string(),
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+
         Event::default()
             .event("update")
-            .json_data(&update)
+            .json_data(&event_data)
             .ok()
             .map(Ok)
     });
@@ -359,7 +399,9 @@ pub async fn get_match_detail(
         SELECT m.id, m.t1_id, m.t2_id, t1.name, t2.name, t1.abbreviation, t2.abbreviation, m.t1_score, m.t2_score, 
                m.t1_spirit, m.t2_spirit, t1.division, t2.division, t1.small_logo, t2.small_logo, m.possession,
                m.type, COALESCE(rrs.is_enabled, 0) as reporting_enabled,
-               COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time, m.stream_url
+             COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time, m.stream_url,
+             CASE WHEN m.started_at IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', m.started_at) END as started_at,
+             COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', m.updated_at), strftime('%Y-%m-%dT%H:%M:%SZ', m.created_at), '') as updated_at
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
@@ -391,6 +433,8 @@ pub async fn get_match_detail(
         field_name,
         time,
         stream_url,
+        started_at,
+        updated_at,
     ) = match match_row {
         Some(row) => (
             row.get::<i64, _>(0),
@@ -414,6 +458,8 @@ pub async fn get_match_detail(
             row.get::<String, _>(18),
             row.get::<String, _>(19),
             row.get::<Option<String>, _>(20),
+            row.get::<Option<String>, _>(21),
+            row.get::<String, _>(22),
         ),
         None => (
             0,
@@ -437,8 +483,12 @@ pub async fn get_match_detail(
             "".to_string(),
             "".to_string(),
             None,
+            None,
+            "".to_string(),
         ),
     };
+
+    let server_time = chrono::Utc::now().to_rfc3339();
 
     let players = sqlx::query_as::<_, MatchPlayer>(
         "SELECT id, name, common_name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
@@ -484,6 +534,9 @@ pub async fn get_match_detail(
         field_name,
         time,
         stream_url,
+        started_at,
+        updated_at,
+        server_time,
         players,
         events,
     })
@@ -566,7 +619,7 @@ pub async fn start_match(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    sqlx::query("UPDATE matches SET possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    sqlx::query("UPDATE matches SET possession = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(possession)
         .bind(match_id)
         .execute(&state.db)
@@ -575,8 +628,10 @@ pub async fn start_match(
 
     state.live_updates.publish_match_updated(match_id);
 
+    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+
     Ok(Json(
-        serde_json::json!({"success": true, "possession": possession}),
+        serde_json::json!({"success": true, "possession": possession, "started_at": started_at, "server_time": server_time}),
     ))
 }
 
@@ -596,8 +651,8 @@ pub async fn end_match(
     ensure_reporting_round_enabled(&state.db, &access, match_id).await?;
     ensure_match_not_finalized(&state.db, match_id).await?;
 
-    let info: Option<(Option<i64>, i64)> = sqlx::query_as(
-        r#"SELECT m.possession, t.division
+    let info: Option<(Option<i64>, i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.possession, t.division, m.type, m.t1_score, m.t2_score
            FROM matches m
            JOIN teams t ON t.id = m.t1_id
            WHERE m.id = ? AND m.deleted_at IS NULL"#,
@@ -607,9 +662,13 @@ pub async fn end_match(
     .await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (possession, division) = info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let (possession, division, match_type, t1_score, t2_score) =
+        info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
     if possession.is_none() || possession.unwrap_or(0) >= 3 {
         return Err(axum::http::StatusCode::CONFLICT);
+    }
+    if match_type >= 1000 && t1_score == t2_score {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
     }
 
     sqlx::query("UPDATE matches SET possession = 3, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -625,8 +684,10 @@ pub async fn end_match(
     cache::invalidate_player_stats().await;
     state.live_updates.publish_match_updated(match_id);
 
+    let (started_at, updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+
     Ok(Json(
-        serde_json::json!({"success": true, "auto_action": auto_action}),
+        serde_json::json!({"success": true, "auto_action": auto_action, "started_at": started_at, "updated_at": updated_at, "server_time": server_time}),
     ))
 }
 
@@ -748,8 +809,10 @@ pub async fn record_event(
 
     state.live_updates.publish_match_updated(match_id);
 
+    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+
     Ok(Json(
-        serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos}),
+        serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": new_pos, "started_at": started_at, "server_time": server_time}),
     ))
 }
 
@@ -798,8 +861,10 @@ pub async fn switch_possession(
 
     state.live_updates.publish_match_updated(match_id);
 
+    let (started_at, _updated_at, server_time) = load_match_timing_snapshot(&state.db, match_id).await?;
+
     Ok(Json(
-        serde_json::json!({"success": true, "possession": new_pos}),
+        serde_json::json!({"success": true, "possession": new_pos, "started_at": started_at, "server_time": server_time}),
     ))
 }
 
@@ -906,8 +971,11 @@ pub async fn undo_event(
 
         state.live_updates.publish_match_updated(match_id);
 
+        let (started_at, _updated_at, server_time) =
+            load_match_timing_snapshot(&state.db, match_id).await?;
+
         Ok(Json(
-            serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": current_pos}),
+            serde_json::json!({"success": true, "t1_score": t1_score, "t2_score": t2_score, "possession": current_pos, "started_at": started_at, "server_time": server_time}),
         ))
     } else {
         Ok(Json(
@@ -1149,6 +1217,7 @@ pub struct WfdfSpiritRequest {
     pub communication: i64,
     pub mvp_player_id: Option<i64>,
     pub msp_player_id: Option<i64>,
+    pub notes: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -1164,7 +1233,21 @@ pub struct SpiritScoreRow {
     pub total: i64,
     pub mvp_player_id: Option<i64>,
     pub msp_player_id: Option<i64>,
+    pub notes: Option<String>,
     pub submitted_by_team_id: i64,
+}
+
+fn normalize_spirit_notes(notes: Option<&str>) -> Result<Option<String>, axum::http::StatusCode> {
+    let trimmed = notes.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.split_whitespace().count() > 250 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    Ok(Some(trimmed.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -1228,6 +1311,12 @@ pub async fn submit_wfdf_spirit(
     if payload.team_id != t1_id && payload.team_id != t2_id {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
+
+    let notes = normalize_spirit_notes(payload.notes.as_deref())?;
+    if payload.team_id == my_team_id && notes.is_some() {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
     validate_spirit_player(&state.db, payload.mvp_player_id, payload.team_id).await?;
     validate_spirit_player(&state.db, payload.msp_player_id, payload.team_id).await?;
 
@@ -1238,18 +1327,19 @@ pub async fn submit_wfdf_spirit(
         + payload.communication;
 
     sqlx::query(
-        r#"INSERT INTO spirit_scores (match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness, positive_attitude, communication, total, mvp_player_id, msp_player_id, submitted_by_team_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        r#"INSERT INTO spirit_scores (match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness, positive_attitude, communication, total, mvp_player_id, msp_player_id, notes, submitted_by_team_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(match_id, team_id, submitted_by_team_id) DO UPDATE SET
              rules_knowledge=excluded.rules_knowledge, fouls_contact=excluded.fouls_contact,
              fair_mindedness=excluded.fair_mindedness, positive_attitude=excluded.positive_attitude,
              communication=excluded.communication, total=excluded.total,
-             mvp_player_id=excluded.mvp_player_id, msp_player_id=excluded.msp_player_id"#
+             mvp_player_id=excluded.mvp_player_id, msp_player_id=excluded.msp_player_id,
+             notes=excluded.notes"#
     )
     .bind(match_id).bind(payload.team_id)
     .bind(payload.rules_knowledge).bind(payload.fouls_contact).bind(payload.fair_mindedness)
     .bind(payload.positive_attitude).bind(payload.communication).bind(total)
-    .bind(payload.mvp_player_id).bind(payload.msp_player_id).bind(my_team_id)
+        .bind(payload.mvp_player_id).bind(payload.msp_player_id).bind(notes).bind(my_team_id)
     .execute(&state.db).await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1298,7 +1388,7 @@ pub async fn get_match_spirits(
     Path(match_id): Path<i64>,
 ) -> Result<Json<Vec<SpiritScoreRow>>, axum::http::StatusCode> {
     let rows = sqlx::query_as::<_, SpiritScoreRow>(
-        "SELECT id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness, positive_attitude, communication, total, mvp_player_id, msp_player_id, submitted_by_team_id FROM spirit_scores WHERE match_id = ?"
+        "SELECT id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness, positive_attitude, communication, total, mvp_player_id, msp_player_id, notes, submitted_by_team_id FROM spirit_scores WHERE match_id = ?"
     ).bind(match_id).fetch_all(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(rows))

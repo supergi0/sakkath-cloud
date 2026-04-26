@@ -166,8 +166,8 @@ pub(crate) fn build_playoff_round_two(
             (left.seed_b, left.team_b),
         ]);
 
-        apply_seed_swap(left, tracker, &mut seed_holders);
-        apply_seed_swap(right, tracker, &mut seed_holders);
+        apply_seed_swap(left, 1001, tracker, &mut seed_holders);
+        apply_seed_swap(right, 1001, tracker, &mut seed_holders);
 
         expected.push(ExpectedPlayoffMatch {
             team_a: *seed_holders
@@ -194,6 +194,116 @@ pub(crate) fn build_playoff_round_two(
     }
 
     expected
+}
+
+pub(crate) fn build_playoff_seed_order(
+    round_one: &[ExpectedPlayoffMatch],
+    tracker: &TournamentTracker,
+) -> Vec<i64> {
+    let mut ordered = Vec::new();
+    let mut index = 0usize;
+
+    while index < round_one.len() {
+        if index + 1 < round_one.len()
+            && is_four_team_bracket_start(&round_one[index], &round_one[index + 1])
+        {
+            let left = &round_one[index];
+            let right = &round_one[index + 1];
+            let mut seed_holders = HashMap::from([
+                (left.seed_a, left.team_a),
+                (right.seed_a, right.team_a),
+                (right.seed_b, right.team_b),
+                (left.seed_b, left.team_b),
+            ]);
+
+            apply_seed_swap(left, 1001, tracker, &mut seed_holders);
+            apply_seed_swap(right, 1001, tracker, &mut seed_holders);
+
+            ordered.push(*seed_holders.get(&left.seed_a).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&right.seed_a).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&right.seed_b).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&left.seed_b).expect("missing seed holder"));
+            index += 2;
+            continue;
+        }
+
+        let match_expectation = &round_one[index];
+        let mut seed_holders = HashMap::from([
+            (match_expectation.seed_a, match_expectation.team_a),
+            (match_expectation.seed_b, match_expectation.team_b),
+        ]);
+        apply_seed_swap(match_expectation, 1001, tracker, &mut seed_holders);
+        ordered.push(
+            *seed_holders
+                .get(&match_expectation.seed_a)
+                .expect("missing direct seed holder"),
+        );
+        ordered.push(
+            *seed_holders
+                .get(&match_expectation.seed_b)
+                .expect("missing direct seed holder"),
+        );
+        index += 1;
+    }
+
+    ordered
+}
+
+pub(crate) fn build_final_seed_order(
+    round_one: &[ExpectedPlayoffMatch],
+    tracker: &TournamentTracker,
+) -> Vec<i64> {
+    let after_playoffs = build_playoff_seed_order(round_one, tracker);
+    let round_two = build_playoff_round_two(round_one, tracker);
+    let mut ordered = Vec::new();
+    let mut round_one_index = 0usize;
+    let mut round_two_index = 0usize;
+    let mut seed_offset = 0usize;
+
+    while round_one_index < round_one.len() {
+        if round_one_index + 1 < round_one.len()
+            && is_four_team_bracket_start(&round_one[round_one_index], &round_one[round_one_index + 1])
+        {
+            let left = round_two
+                .get(round_two_index)
+                .expect("missing first finals expectation for bracket");
+            let right = round_two
+                .get(round_two_index + 1)
+                .expect("missing second finals expectation for bracket");
+            let mut seed_holders = HashMap::from([
+                (left.seed_a, left.team_a),
+                (left.seed_b, left.team_b),
+                (right.seed_a, right.team_a),
+                (right.seed_b, right.team_b),
+            ]);
+
+            apply_seed_swap(left, 1002, tracker, &mut seed_holders);
+            apply_seed_swap(right, 1002, tracker, &mut seed_holders);
+
+            ordered.push(*seed_holders.get(&left.seed_a).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&left.seed_b).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&right.seed_a).expect("missing seed holder"));
+            ordered.push(*seed_holders.get(&right.seed_b).expect("missing seed holder"));
+
+            round_one_index += 2;
+            round_two_index += 2;
+            seed_offset += 4;
+            continue;
+        }
+
+        ordered.extend(after_playoffs[seed_offset..seed_offset + 2].iter().copied());
+        round_one_index += 1;
+        seed_offset += 2;
+    }
+
+    ordered
+}
+
+fn is_four_team_bracket_start(
+    left: &ExpectedPlayoffMatch,
+    right: &ExpectedPlayoffMatch,
+) -> bool {
+    (left.seed_b - left.seed_a).abs() == 3 && (right.seed_b - right.seed_a).abs() == 1
 }
 
 fn compare_metrics(left: &SortMetrics, right: &SortMetrics, all: &[SortMetrics]) -> Ordering {
@@ -448,6 +558,7 @@ fn force_pairings(team_ids: &[i64]) -> Vec<(i64, i64)> {
 
 fn apply_seed_swap(
     expected_match: &ExpectedPlayoffMatch,
+    match_type: i64,
     tracker: &TournamentTracker,
     seed_holders: &mut HashMap<i64, i64>,
 ) {
@@ -455,7 +566,7 @@ fn apply_seed_swap(
         .matches
         .values()
         .find(|state| {
-            state.match_type == 1001
+            state.match_type == match_type
                 && state.possession.unwrap_or(0) >= 3
                 && state.t1_id == expected_match.team_a
                 && state.t2_id == expected_match.team_b

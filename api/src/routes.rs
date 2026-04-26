@@ -73,6 +73,7 @@ fn team_routes() -> Router<AppState> {
     Router::new()
         .route("/teams", get(team::get_teams))
         .route("/teams/:id", get(team::get_team_detail))
+    .route("/teams/:id/seed-timeline", get(team::get_team_seed_timeline))
         .route("/teams/:id/players", get(team::get_team_players))
         .route("/teams/:id/matches", get(matches::get_team_matches))
         .route("/standings", get(team::get_standings))
