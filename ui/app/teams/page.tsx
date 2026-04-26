@@ -172,11 +172,11 @@ function TeamContent() {
   };
 
   const renderPlayerName = (player: PlayerStat) => {
-    const commonName = player.common_name?.trim();
+    const commonName = player.common_name?.trim() || "Player";
     const hasAlternateName = Boolean(commonName && commonName !== player.full_name);
 
     if (!hasAlternateName) {
-      return <Text variant="primary" className="font-medium truncate max-w-[150px] pointer-events-none" title={player.full_name}>{abbreviatePlayerName(player.full_name, 20)}</Text>;
+      return <Text variant="primary" className="font-medium truncate max-w-[150px] pointer-events-none">{abbreviatePlayerName(player.full_name, 20)}</Text>;
     }
 
     const showingCommonName = Boolean(showingCommonNames[player.id]);
@@ -396,11 +396,11 @@ function TeamContent() {
                     
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-2">
-                        <Text variant="primary" className="font-medium truncate min-w-0 flex-1" title={team.name}>{ourDisplayName}</Text>
+                        <Text variant="primary" className="font-medium truncate min-w-0 flex-1">{ourDisplayName}</Text>
                         <Text variant="primary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : ourScore}</Text>
                       </div>
                       <div className="flex items-center justify-between gap-2">
-                        <Text variant="secondary" className="truncate min-w-0 flex-1" title={opponent}>{opponentDisplayName}</Text>
+                        <Text variant="secondary" className="truncate min-w-0 flex-1">{opponentDisplayName}</Text>
                         <Text variant="secondary" className="font-bold text-lg shrink-0">{status === 'upcoming' ? '-' : theirScore}</Text>
                       </div>
                     </div>
