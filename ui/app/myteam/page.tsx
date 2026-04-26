@@ -6,6 +6,7 @@ import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown,
 import { Text } from "../components/Text";
 import { useAuth } from "../auth-provider";
 import { apiUrl } from "../lib/api";
+import { getTeamAbbreviation } from "../lib/team-name";
 
 interface Team {
   id: number;
@@ -140,7 +141,23 @@ function roleBadge(role: PlayerRole) {
   return <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${c[role] || ''}`}>{role}</span>;
 }
 
-const countWords = (value: string) => value.trim() ? value.trim().split(/\s+/).length : 0;
+const countCharacters = (value: string) => value.length;
+
+function getCompactTeamName(name: string, abbreviation?: string | null) {
+  if (name.length > 6) {
+    return getTeamAbbreviation(name, abbreviation, 6);
+  }
+
+  return name;
+}
+
+function getHeaderTeamName(name: string, abbreviation?: string | null) {
+  if (name.length > 16) {
+    return getTeamAbbreviation(name, abbreviation, 6);
+  }
+
+  return name;
+}
 
 const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null, notes: '' });
 
@@ -172,7 +189,7 @@ function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp
   showNotes?: boolean;
 }) {
   const total = form.rules_knowledge + form.fouls_contact + form.fair_mindedness + form.positive_attitude + form.communication;
-  const noteWordCount = countWords(form.notes);
+  const noteCharacterCount = countCharacters(form.notes);
   const categories = [
     { key: 'rules_knowledge' as const, label: 'Rules Knowledge & Use' },
     { key: 'fouls_contact' as const, label: 'Fouls & Body Contact' },
@@ -229,7 +246,7 @@ function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp
         <div>
           <div className="mb-1 flex items-center justify-between gap-2">
             <Text variant="secondary" className="text-xs">Notes ({playerLabel})</Text>
-            <Text variant="secondary" className={`text-[11px] ${noteWordCount > 250 ? 'text-red-600 dark:text-red-400' : ''}`}>{noteWordCount}/250 words</Text>
+            <Text variant="secondary" className={`text-[11px] ${noteCharacterCount > 250 ? 'text-red-600 dark:text-red-400' : ''}`}>{noteCharacterCount}/250 characters</Text>
           </div>
           <textarea
             value={form.notes}
@@ -342,7 +359,7 @@ export default function MyTeamPage() {
         setTeamEditsEnabled(false);
         setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
       } else {
-        setFeedback({ type: 'error', message: 'Unable to save the team code right now.' });
+        setFeedback({ type: 'error', message: 'Unable to save the team short name right now.' });
       }
     } catch (err) { console.error(err); }
     finally { setSavingTeamAbbreviation(false); }
@@ -500,8 +517,8 @@ export default function MyTeamPage() {
     if (!m) return;
     const isT1 = m.t1_id === team.id;
     const opponentId = isT1 ? m.t2_id : m.t1_id;
-    if (countWords(form.opponentSpirit.notes) > 250) {
-      setFeedback({ type: 'error', message: 'Opponent notes must be 250 words or fewer.' });
+    if (countCharacters(form.opponentSpirit.notes) > 250) {
+      setFeedback({ type: 'error', message: 'Opponent notes must be 250 characters or fewer.' });
       return;
     }
 
@@ -653,6 +670,8 @@ export default function MyTeamPage() {
   if (isLoading || loading) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">Loading...</Text></div></div>;
   if (!team) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">You are not assigned to a team.</Text></div></div>;
 
+  const headerTeamName = getHeaderTeamName(team.name, team.abbreviation);
+
   const getMatchStatus = (m: PocMatch) => {
     if (m.possession === null) return 'upcoming';
     if (m.possession >= 3) return 'ended';
@@ -667,7 +686,7 @@ export default function MyTeamPage() {
     if (!myDone) return 'action';
     if (!otherTeamSpirits.has(m.id)) {
       const isT1 = m.t1_id === team.id;
-      return 'waiting:' + (isT1 ? m.t2_name : m.t1_name);
+      return 'waiting:' + getCompactTeamName(isT1 ? m.t2_name : m.t1_name);
     }
     return 'done';
   };
@@ -695,7 +714,7 @@ export default function MyTeamPage() {
               <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
             </div>
             <div className="min-w-0">
-              <Text as="h1" variant="primary" className="text-base font-bold truncate">{team.name}</Text>
+              <Text as="h1" variant="primary" className="text-base font-bold truncate">{headerTeamName}</Text>
               {team.location && <Text variant="secondary" className="text-xs">{team.location}</Text>}
             </div>
           </div>
@@ -704,7 +723,7 @@ export default function MyTeamPage() {
               type="text"
               value={teamAbbreviation}
               maxLength={5}
-              placeholder="Team code"
+              placeholder="short name"
               disabled={teamEditsLocked}
               onChange={e => setTeamAbbreviation(e.target.value.replace(/[^a-zA-Z0-9]/g, ''))}
               className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm uppercase text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
@@ -714,7 +733,7 @@ export default function MyTeamPage() {
               disabled={teamEditsLocked || savingTeamAbbreviation || (team.abbreviation || '') === teamAbbreviation.trim()}
               className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {savingTeamAbbreviation ? 'Saving' : 'Save code'}
+              {savingTeamAbbreviation ? 'Saving' : 'Save'}
             </button>
             <Text variant="secondary" className="text-[11px]">Up to 5 letters or numbers.</Text>
           </div>
@@ -748,6 +767,10 @@ export default function MyTeamPage() {
               const isExpanded = expandedMatch === match.id;
               const myTeamName = isT1 ? match.t1_name : match.t2_name;
               const oppTeamName = isT1 ? match.t2_name : match.t1_name;
+              const myDisplayName = getCompactTeamName(myTeamName, team.abbreviation);
+              const oppDisplayName = getCompactTeamName(oppTeamName);
+              const t1DisplayName = getCompactTeamName(match.t1_name, isT1 ? team.abbreviation : null);
+              const t2DisplayName = getCompactTeamName(match.t2_name, !isT1 ? team.abbreviation : null);
               const myScore = isT1 ? match.t1_score : match.t2_score;
               const oppScore = isT1 ? match.t2_score : match.t1_score;
               const form = postForms[match.id];
@@ -786,13 +809,13 @@ export default function MyTeamPage() {
 
                     {/* Score row: my team vs opponent */}
                     <div className="flex items-center gap-2">
-                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">{myTeamName}</Text>
+                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">{myDisplayName}</Text>
                       <div className="shrink-0 flex items-center gap-1">
                         <Text variant="primary" className="text-xl font-bold tabular-nums">{status === 'upcoming' ? '-' : myScore}</Text>
                         <Text variant="secondary" className="text-sm">:</Text>
                         <Text variant="primary" className="text-xl font-bold tabular-nums">{status === 'upcoming' ? '-' : oppScore}</Text>
                       </div>
-                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">{oppTeamName}</Text>
+                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">{oppDisplayName}</Text>
                     </div>
 
                     {/* Action waiting info */}
@@ -830,14 +853,14 @@ export default function MyTeamPage() {
                           <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
                           <div className="flex items-center gap-3">
                             <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{match.t1_name}</Text>
+                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t1DisplayName}</Text>
                               <input type="number" min="0" inputMode="numeric" value={form.t1_score}
                                 onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t1_score: parseInt(e.target.value) || 0 } }))}
                                 className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
                             </div>
                             <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
                             <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{match.t2_name}</Text>
+                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t2DisplayName}</Text>
                               <input type="number" min="0" inputMode="numeric" value={form.t2_score}
                                 onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t2_score: parseInt(e.target.value) || 0 } }))}
                                 className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
@@ -849,11 +872,11 @@ export default function MyTeamPage() {
                       {/* Opponent spirit */}
                       {!submittedSpirits.has(match.id) && (
                         <SpiritForm
-                          label={`Rate ${oppTeamName}`}
+                          label={`Rate ${oppDisplayName}`}
                           form={form.opponentSpirit}
                           onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
                           playerList={opponents}
-                          playerLabel={oppTeamName}
+                          playerLabel={oppDisplayName}
                           showNotes
                         />
                       )}
@@ -863,11 +886,11 @@ export default function MyTeamPage() {
                         <>
                           <div className="border-t border-gray-200 dark:border-slate-700" />
                           <SpiritForm
-                            label={`Rate ${myTeamName} (Self)`}
+                            label={`Rate ${myDisplayName} (Self)`}
                             form={form.selfSpirit}
                             onChange={selfSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, selfSpirit } }))}
                             playerList={players.map(p => ({ id: p.id, name: p.name }))}
-                            playerLabel={myTeamName}
+                            playerLabel={myDisplayName}
                             showMvpMsp={false}
                           />
                         </>

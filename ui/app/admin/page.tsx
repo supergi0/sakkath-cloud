@@ -98,6 +98,14 @@ function formatLogTime(time: string) {
   return formatIndiaTime(time);
 }
 
+function getAdminDisplayTeamName(name: string, abbreviation?: string | null) {
+  if (name.length > 16) {
+    return getTeamAbbreviation(name, abbreviation, 16);
+  }
+
+  return name;
+}
+
 function getReportingLabel(matchType: number) {
   if (matchType === 1001) return 'Playoffs';
   if (matchType === 1002) return 'Finals';
@@ -554,6 +562,8 @@ function AdminContent() {
   if (activeMatch && matchStatus === 'live') {
     const t1Abbr = getTeamAbbreviation(activeMatch.t1_name, activeMatch.t1_abbreviation, 12);
     const t2Abbr = getTeamAbbreviation(activeMatch.t2_name, activeMatch.t2_abbreviation, 12);
+    const displayT1Name = getAdminDisplayTeamName(activeMatch.t1_name, activeMatch.t1_abbreviation);
+    const displayT2Name = getAdminDisplayTeamName(activeMatch.t2_name, activeMatch.t2_abbreviation);
 
     return (
       <div className="min-h-screen px-3 py-3 md:px-0">
@@ -609,7 +619,7 @@ function AdminContent() {
                   panel === 't1' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
                 }`}
               >
-                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{activeMatch.t1_name}</div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={activeMatch.t1_name}>{displayT1Name}</div>
                 <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${activeMatch.possession === 1 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
                   {activeMatch.possession === 1 ? 'OFFENSE' : 'DEFENSE'}
                 </div>
@@ -622,7 +632,7 @@ function AdminContent() {
                   panel === 't2' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
                 }`}
               >
-                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{activeMatch.t2_name}</div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={activeMatch.t2_name}>{displayT2Name}</div>
                 <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${activeMatch.possession === 2 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
                   {activeMatch.possession === 2 ? 'OFFENSE' : 'DEFENSE'}
                 </div>
