@@ -181,14 +181,30 @@ pub fn c2_head_to_head(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     }
 }
 
-// C3: Buchholz score - sum of wins of all opponents (higher = faced harder competition)
+// C3: Median Buchholz score - sum of opponent swiss points after dropping
+// the highest and lowest opponent totals when at least three exist.
 pub fn c3_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
-    let wins_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.wins)).collect();
+    let points_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.points)).collect();
 
-    let a_buch: i64 = a.opponents.iter().filter_map(|o| wins_map.get(o)).sum();
-    let b_buch: i64 = b.opponents.iter().filter_map(|o| wins_map.get(o)).sum();
+    let a_buch = median_buchholz_score(a, &points_map);
+    let b_buch = median_buchholz_score(b, &points_map);
 
     b_buch.cmp(&a_buch)
+}
+
+fn median_buchholz_score(team: &TeamSortData, points_map: &HashMap<i64, i64>) -> i64 {
+    let mut opponent_points: Vec<i64> = team
+        .opponents
+        .iter()
+        .filter_map(|opponent_id| points_map.get(opponent_id).copied())
+        .collect();
+
+    opponent_points.sort_unstable();
+    if opponent_points.len() > 2 {
+        opponent_points[1..opponent_points.len() - 1].iter().sum()
+    } else {
+        opponent_points.iter().sum()
+    }
 }
 
 // C4: Point difference (goals scored - goals allowed), descending
@@ -648,5 +664,93 @@ mod tests {
         assert_eq!(teams[0].team_id, 1);
         assert_eq!(teams[1].team_id, 2);
         assert_eq!(teams[2].team_id, 3);
+    }
+
+    #[test]
+    fn c3_buchholz_uses_median_opponent_points() {
+        let contender = TeamSortData {
+            team_id: 1,
+            name: "Team 1".to_string(),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: 1,
+            wins: 2,
+            losses: 1,
+            draws: 1,
+            points: 5,
+            points_for: 0,
+            points_against: 0,
+            spirit_avg: 0.0,
+            round_results: vec![1, 1, 0, -1],
+            opponents: vec![10, 11, 12, 13],
+            h2h: HashMap::new(),
+        };
+        let challenger = TeamSortData {
+            team_id: 2,
+            name: "Team 2".to_string(),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: 2,
+            wins: 2,
+            losses: 1,
+            draws: 1,
+            points: 5,
+            points_for: 0,
+            points_against: 0,
+            spirit_avg: 0.0,
+            round_results: vec![1, 0, 1, -1],
+            opponents: vec![14, 15, 16, 17],
+            h2h: HashMap::new(),
+        };
+
+        let all = vec![
+            contender.clone(),
+            challenger.clone(),
+            team(10, 10),
+            TeamSortData {
+                team_id: 11,
+                points: 8,
+                wins: 4,
+                ..team(11, 11)
+            },
+            TeamSortData {
+                team_id: 12,
+                points: 4,
+                wins: 2,
+                ..team(12, 12)
+            },
+            TeamSortData {
+                team_id: 13,
+                points: 2,
+                wins: 1,
+                ..team(13, 13)
+            },
+            TeamSortData {
+                team_id: 14,
+                points: 12,
+                wins: 6,
+                ..team(14, 14)
+            },
+            TeamSortData {
+                team_id: 15,
+                points: 6,
+                wins: 3,
+                ..team(15, 15)
+            },
+            TeamSortData {
+                team_id: 16,
+                points: 6,
+                wins: 3,
+                ..team(16, 16)
+            },
+            TeamSortData {
+                team_id: 17,
+                points: 0,
+                wins: 0,
+                ..team(17, 17)
+            },
+        ];
+
+        assert_eq!(c3_buchholz(&contender, &challenger, &all), Ordering::Greater);
     }
 }

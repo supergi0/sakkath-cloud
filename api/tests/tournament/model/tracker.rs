@@ -49,6 +49,13 @@ pub(crate) struct MatchState {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct SeedPairRound {
+    pub(crate) seed_a: i64,
+    pub(crate) seed_b: i64,
+    pub(crate) round: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct TournamentTracker {
     pub(crate) teams: HashMap<i64, TeamInfo>,
     pub(crate) players: HashMap<i64, PlayerTotals>,
@@ -284,6 +291,58 @@ impl TournamentTracker {
             .collect()
     }
 
+    pub(crate) fn swiss_round_for_seed_pair(
+        &self,
+        division: i64,
+        seed_a: i64,
+        seed_b: i64,
+    ) -> Option<i64> {
+        let team_a = self.team_id_for_seed(division, seed_a)?;
+        let team_b = self.team_id_for_seed(division, seed_b)?;
+
+        self.matches
+            .values()
+            .filter(|state| {
+                state.division == division
+                    && state.match_type > 0
+                    && state.match_type < 1000
+                    && ((state.t1_id == team_a && state.t2_id == team_b)
+                        || (state.t1_id == team_b && state.t2_id == team_a))
+            })
+            .map(|state| state.match_type)
+            .min()
+    }
+
+    pub(crate) fn swiss_cutline_pair_rounds(&self, division: i64) -> Vec<SeedPairRound> {
+        let team_count = self
+            .teams
+            .values()
+            .filter(|team| team.division == division)
+            .count() as i64;
+
+        let mut pairs = Vec::new();
+        let mut cutline = 4;
+        while cutline < team_count {
+            pairs.push(SeedPairRound {
+                seed_a: cutline,
+                seed_b: cutline + 1,
+                round: self.swiss_round_for_seed_pair(division, cutline, cutline + 1),
+            });
+
+            if cutline > 1 && cutline + 2 <= team_count {
+                pairs.push(SeedPairRound {
+                    seed_a: cutline - 1,
+                    seed_b: cutline + 2,
+                    round: self.swiss_round_for_seed_pair(division, cutline - 1, cutline + 2),
+                });
+            }
+
+            cutline += 4;
+        }
+
+        pairs
+    }
+
     pub(crate) fn swiss_summary(&self, division: i64) -> Vec<SortMetrics> {
         self.summary(division, false, None)
     }
@@ -422,7 +481,11 @@ impl TournamentTracker {
                 .unwrap_or(false)
         });
 
-        let pairings = generate_round_pairings(&standings, &history);
+        let next_round = standings
+            .first()
+            .map(|metrics| metrics.round_results.len() as i64 + 1)
+            .unwrap_or(1);
+        let pairings = generate_round_pairings(&standings, &history, next_round);
 
         ExpectedSwissRound {
             pairings,
@@ -490,6 +553,13 @@ impl TournamentTracker {
         }
 
         history
+    }
+
+    fn team_id_for_seed(&self, division: i64, seed: i64) -> Option<i64> {
+        self.teams
+            .values()
+            .find(|team| team.division == division && team.init_rank == seed)
+            .map(|team| team.id)
     }
 
     fn apply_player_event(&mut self, match_id: i64, player_id: Option<i64>, event_type: i64) {

@@ -815,7 +815,7 @@ pub async fn generate_next_round(
         })));
     }
 
-    let pairings = rounds::generate_round_pairings(&sorted, &history);
+    let pairings = rounds::generate_round_pairings(&sorted, &history, next_round);
     if pairings.len() * 2 != sorted.len() {
         return Ok(Json(serde_json::json!({
             "success": false,
@@ -922,7 +922,7 @@ async fn generate_next_round_internal(
     }
 
     let history = rounds::fetch_match_history(db, division).await;
-    let pairings = rounds::generate_round_pairings(&sorted, &history);
+    let pairings = rounds::generate_round_pairings(&sorted, &history, round);
     if pairings.len() * 2 != sorted.len() {
         return Err(sqlx::Error::Protocol(
             "incomplete pairings generated".into(),

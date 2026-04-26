@@ -32,6 +32,21 @@ pub(crate) struct ExpectedPlayoffMatch {
     pub(crate) seed_b: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct PairingScore {
+    same_score_pairs: i64,
+    cutline_adjacent_pairs: i64,
+    cutline_companion_pairs: i64,
+    natural_pairs: i64,
+    reverse_gap_sum: i64,
+}
+
+struct PairingPreferences<'a> {
+    points_by_team: &'a HashMap<i64, i64>,
+    rank_by_team: &'a HashMap<i64, usize>,
+    cutlines: &'a [usize],
+}
+
 pub(crate) fn sort_metrics(metrics: &mut [SortMetrics]) {
     let snapshot = metrics.to_vec();
     metrics.sort_by(|left, right| compare_metrics(left, right, &snapshot));
@@ -77,13 +92,29 @@ pub(crate) fn naive_pairings(groups: &[Vec<i64>]) -> Vec<(i64, i64)> {
 pub(crate) fn generate_round_pairings(
     sorted: &[SortMetrics],
     history: &HashMap<i64, HashSet<i64>>,
+    round: i64,
 ) -> Vec<(i64, i64)> {
     let mut groups = build_scoring_groups(sorted);
     let mut group_pairings: Vec<Option<Vec<(i64, i64)>>> = Vec::new();
     let mut failed_indices = Vec::new();
+    let points_by_team: HashMap<i64, i64> = sorted
+        .iter()
+        .map(|metrics| (metrics.team_id, metrics.points))
+        .collect();
+    let rank_by_team: HashMap<i64, usize> = sorted
+        .iter()
+        .enumerate()
+        .map(|(index, metrics)| (metrics.team_id, index + 1))
+        .collect();
+    let cutlines = build_cutlines(sorted.len());
+    let preferences = PairingPreferences {
+        points_by_team: &points_by_team,
+        rank_by_team: &rank_by_team,
+        cutlines: &cutlines,
+    };
 
     for (index, group) in groups.iter().enumerate() {
-        match pair_scoring_group(group, history) {
+        match pair_scoring_group_for_round(group, history, round, &preferences) {
             Some(pairings) => group_pairings.push(Some(pairings)),
             None => {
                 group_pairings.push(None);
@@ -93,7 +124,14 @@ pub(crate) fn generate_round_pairings(
     }
 
     for failed_index in failed_indices {
-        if try_rebalance_and_pair(&mut groups, &mut group_pairings, failed_index, history) {
+        if try_rebalance_and_pair(
+            &mut groups,
+            &mut group_pairings,
+            failed_index,
+            history,
+            round,
+            &preferences,
+        ) {
             continue;
         }
         group_pairings[failed_index] = Some(force_pairings(&groups[failed_index]));
@@ -355,21 +393,28 @@ fn tied_team_count(points: i64, teams: &[SortMetrics]) -> usize {
 }
 
 fn c3_buchholz(left: &SortMetrics, right: &SortMetrics, all: &[SortMetrics]) -> Ordering {
-    let wins_map: HashMap<i64, i64> = all
+    let points_map: HashMap<i64, i64> = all
         .iter()
-        .map(|metrics| (metrics.team_id, metrics.wins))
+        .map(|metrics| (metrics.team_id, metrics.points))
         .collect();
-    let left_buchholz: i64 = left
-        .opponents
-        .iter()
-        .filter_map(|team_id| wins_map.get(team_id))
-        .sum();
-    let right_buchholz: i64 = right
-        .opponents
-        .iter()
-        .filter_map(|team_id| wins_map.get(team_id))
-        .sum();
+    let left_buchholz = median_buchholz_score(left, &points_map);
+    let right_buchholz = median_buchholz_score(right, &points_map);
     right_buchholz.cmp(&left_buchholz)
+}
+
+fn median_buchholz_score(metrics: &SortMetrics, points_map: &HashMap<i64, i64>) -> i64 {
+    let mut opponent_points: Vec<i64> = metrics
+        .opponents
+        .iter()
+        .filter_map(|team_id| points_map.get(team_id).copied())
+        .collect();
+
+    opponent_points.sort_unstable();
+    if opponent_points.len() > 2 {
+        opponent_points[1..opponent_points.len() - 1].iter().sum()
+    } else {
+        opponent_points.iter().sum()
+    }
 }
 
 fn c4_point_difference(left: &SortMetrics, right: &SortMetrics) -> Ordering {
@@ -455,6 +500,170 @@ fn pair_scoring_group(
     }
 }
 
+fn pair_scoring_group_crossover(
+    team_ids: &[i64],
+    history: &HashMap<i64, HashSet<i64>>,
+    preferences: &PairingPreferences<'_>,
+) -> Option<Vec<(i64, i64)>> {
+    if team_ids.len() < 2 {
+        return Some(Vec::new());
+    }
+
+    let half = team_ids.len() / 2;
+    let top_half = &team_ids[..half];
+    let bottom_half = &team_ids[half..];
+    let mut used_bottom = HashSet::new();
+    let mut pairings = Vec::new();
+    let mut best_pairings: Option<Vec<(i64, i64)>> = None;
+    let mut best_score: Option<PairingScore> = None;
+
+    enumerate_crossover_pairings(
+        top_half,
+        bottom_half,
+        0,
+        history,
+        &mut used_bottom,
+        &mut pairings,
+        0,
+        0,
+        preferences,
+        &mut best_pairings,
+        &mut best_score,
+    );
+
+    best_pairings
+}
+
+fn enumerate_crossover_pairings(
+    top_half: &[i64],
+    bottom_half: &[i64],
+    index: usize,
+    history: &HashMap<i64, HashSet<i64>>,
+    used_bottom: &mut HashSet<usize>,
+    pairings: &mut Vec<(i64, i64)>,
+    natural_pairs: i64,
+    gap_sum: i64,
+    preferences: &PairingPreferences<'_>,
+    best_pairings: &mut Option<Vec<(i64, i64)>>,
+    best_score: &mut Option<PairingScore>,
+) {
+    if index == top_half.len() {
+        let score = score_crossover_pairings(pairings, natural_pairs, gap_sum, preferences);
+        if best_score.is_none_or(|current| score > current) {
+            *best_score = Some(score);
+            *best_pairings = Some(pairings.clone());
+        }
+        return;
+    }
+
+    let team = top_half[index];
+    let mut candidate_indices: Vec<usize> = (0..bottom_half.len()).collect();
+    if index < bottom_half.len() {
+        candidate_indices.remove(index);
+        candidate_indices.insert(0, index);
+    }
+
+    for candidate_index in candidate_indices {
+        if used_bottom.contains(&candidate_index) {
+            continue;
+        }
+
+        let opponent = bottom_half[candidate_index];
+        let is_rematch = history
+            .get(&team)
+            .map(|opponents| opponents.contains(&opponent))
+            .unwrap_or(false);
+        if is_rematch {
+            continue;
+        }
+
+        used_bottom.insert(candidate_index);
+        pairings.push((team, opponent));
+
+        enumerate_crossover_pairings(
+            top_half,
+            bottom_half,
+            index + 1,
+            history,
+            used_bottom,
+            pairings,
+            natural_pairs + i64::from(candidate_index == index),
+            gap_sum + (candidate_index as i64 - index as i64).abs(),
+            preferences,
+            best_pairings,
+            best_score,
+        );
+
+        pairings.pop();
+        used_bottom.remove(&candidate_index);
+    }
+}
+
+fn score_crossover_pairings(
+    pairings: &[(i64, i64)],
+    natural_pairs: i64,
+    gap_sum: i64,
+    preferences: &PairingPreferences<'_>,
+) -> PairingScore {
+    let mut score = PairingScore {
+        natural_pairs,
+        reverse_gap_sum: -gap_sum,
+        ..PairingScore::default()
+    };
+
+    for &(team_a, team_b) in pairings {
+        if preferences.points_by_team.get(&team_a) == preferences.points_by_team.get(&team_b) {
+            score.same_score_pairs += 1;
+        }
+
+        let left_rank = *preferences
+            .rank_by_team
+            .get(&team_a)
+            .expect("missing left rank for pairing preference");
+        let right_rank = *preferences
+            .rank_by_team
+            .get(&team_b)
+            .expect("missing right rank for pairing preference");
+        let (lower_rank, higher_rank) = if left_rank < right_rank {
+            (left_rank, right_rank)
+        } else {
+            (right_rank, left_rank)
+        };
+
+        for &cutline in preferences.cutlines {
+            if lower_rank == cutline && higher_rank == cutline + 1 {
+                score.cutline_adjacent_pairs += 1;
+            }
+            if cutline > 1 && lower_rank == cutline - 1 && higher_rank == cutline + 2 {
+                score.cutline_companion_pairs += 1;
+            }
+        }
+    }
+
+    score
+}
+
+fn should_use_crossover_pairing(round: i64) -> bool {
+    (5..=6).contains(&round)
+}
+
+fn build_cutlines(team_count: usize) -> Vec<usize> {
+    (4..team_count).step_by(4).collect()
+}
+
+fn pair_scoring_group_for_round(
+    team_ids: &[i64],
+    history: &HashMap<i64, HashSet<i64>>,
+    round: i64,
+    preferences: &PairingPreferences<'_>,
+) -> Option<Vec<(i64, i64)>> {
+    if should_use_crossover_pairing(round) {
+        pair_scoring_group_crossover(team_ids, history, preferences)
+    } else {
+        pair_scoring_group(team_ids, history)
+    }
+}
+
 fn backtrack_pairs(
     top_half: &[i64],
     bottom_half: &[i64],
@@ -514,6 +723,8 @@ fn try_rebalance_and_pair(
     group_pairings: &mut [Option<Vec<(i64, i64)>>],
     failed_index: usize,
     history: &HashMap<i64, HashSet<i64>>,
+    round: i64,
+    preferences: &PairingPreferences<'_>,
 ) -> bool {
     if failed_index + 1 < groups.len()
         && !groups[failed_index].is_empty()
@@ -526,8 +737,17 @@ fn try_rebalance_and_pair(
         groups[failed_index][failed_last_index] = next_first_team;
         groups[failed_index + 1][0] = last_team;
 
-        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history)
-            && let Some(next_pairs) = pair_scoring_group(&groups[failed_index + 1], history)
+        if let Some(failed_pairs) = pair_scoring_group_for_round(
+            &groups[failed_index],
+            history,
+            round,
+            preferences,
+        ) && let Some(next_pairs) = pair_scoring_group_for_round(
+            &groups[failed_index + 1],
+            history,
+            round,
+            preferences,
+        )
         {
             group_pairings[failed_index] = Some(failed_pairs);
             group_pairings[failed_index + 1] = Some(next_pairs);
@@ -547,8 +767,17 @@ fn try_rebalance_and_pair(
         groups[failed_index][0] = previous_last_team;
         groups[failed_index - 1][previous_last_index] = first_team;
 
-        if let Some(failed_pairs) = pair_scoring_group(&groups[failed_index], history)
-            && let Some(previous_pairs) = pair_scoring_group(&groups[failed_index - 1], history)
+        if let Some(failed_pairs) = pair_scoring_group_for_round(
+            &groups[failed_index],
+            history,
+            round,
+            preferences,
+        ) && let Some(previous_pairs) = pair_scoring_group_for_round(
+            &groups[failed_index - 1],
+            history,
+            round,
+            preferences,
+        )
         {
             group_pairings[failed_index] = Some(failed_pairs);
             group_pairings[failed_index - 1] = Some(previous_pairs);

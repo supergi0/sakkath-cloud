@@ -1,17 +1,29 @@
 use crate::tournament::assertions::{
     assert_display_standings_and_team_ranks, assert_final_public_state,
     assert_playoff_grid_seed_labels, assert_playoff_pairings, assert_standings_match_tracker,
-    assert_swiss_grid_seed_labels, assert_swiss_round_pairings,
+    assert_swiss_cutline_crossovers_completed, assert_swiss_grid_seed_labels,
+    assert_swiss_round_pairings,
 };
 use crate::tournament::config::RunConfig;
 use crate::tournament::harness::{Harness, TestResult};
-use crate::tournament::model::ExpectedPlayoffMatch;
+use crate::tournament::model::{ExpectedPlayoffMatch, SeedPairRound};
 use crate::tournament::reporting::ReportWriter;
 use crate::tournament::simulation::TournamentSimulation;
 use crate::tournament::support::{
     ensure_swiss_round_exists, finish_match_to_outcome, load_round_matches, login_staff,
     submit_standard_post_match,
 };
+
+fn describe_cutline_pair_rounds(pair_rounds: &[SeedPairRound]) -> String {
+    pair_rounds
+        .iter()
+        .map(|pair| match pair.round {
+            Some(round) => format!("{}v{}=R{}", pair.seed_a, pair.seed_b, round),
+            None => format!("{}v{}=missing", pair.seed_a, pair.seed_b),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> TestResult {
     reporter.start_scenario(
@@ -100,6 +112,15 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
                 assert_swiss_grid_seed_labels(&harness, &tracker, &next_round, division).await?;
             }
         }
+    }
+
+    for division in [0, 1] {
+        let pair_rounds = assert_swiss_cutline_crossovers_completed(&tracker, division);
+        reporter.note(format!(
+            "[full-tournament] {} swiss cutline crossovers by round 6: {}",
+            if division == 0 { "Open" } else { "Women" },
+            describe_cutline_pair_rounds(&pair_rounds),
+        ))?;
     }
 
     for division in [0, 1] {
