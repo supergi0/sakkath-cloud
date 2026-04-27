@@ -178,6 +178,29 @@ fn map_reporting_round_setting(row: ReportingRoundSettingRow) -> ReportingRoundS
     }
 }
 
+fn record_match_info(key: &'static str, details: serde_json::Value) {
+    crate::telemetry::record_info(key, details.to_string());
+}
+
+fn match_error_status(
+    match_id: i64,
+    action: &'static str,
+    status: axum::http::StatusCode,
+    details: impl Into<String>,
+) -> axum::http::StatusCode {
+    crate::telemetry::record_error(
+        "match.error",
+        serde_json::json!({
+            "match_id": match_id,
+            "action": action,
+            "status": status.as_u16(),
+            "details": details.into(),
+        })
+        .to_string(),
+    );
+    status
+}
+
 async fn load_match_timing_snapshot(
     db: &sqlx::SqlitePool,
     match_id: i64,
@@ -604,19 +627,43 @@ pub async fn start_match(
 
     let possession = payload.possession.unwrap_or(1);
     if possession != 1 && possession != 2 {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+        return Err(match_error_status(
+            match_id,
+            "start",
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid opening possession",
+        ));
     }
 
-    let current: Option<(Option<i64>,)> =
-        sqlx::query_as("SELECT possession FROM matches WHERE id = ? AND deleted_at IS NULL")
+    let current: Option<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT possession, type FROM matches WHERE id = ? AND deleted_at IS NULL")
             .bind(match_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|error| {
+                match_error_status(
+                    match_id,
+                    "start",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load match before start: {error}"),
+                )
+            })?;
 
-    let current_possession = current.ok_or(axum::http::StatusCode::NOT_FOUND)?.0;
+    let (current_possession, match_type) = current.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "start",
+            axum::http::StatusCode::NOT_FOUND,
+            "match not found",
+        )
+    })?;
     if current_possession.is_some() {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Err(match_error_status(
+            match_id,
+            "start",
+            axum::http::StatusCode::CONFLICT,
+            "match already started",
+        ));
     }
 
     sqlx::query("UPDATE matches SET possession = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -624,9 +671,25 @@ pub async fn start_match(
         .bind(match_id)
         .execute(&state.db)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            match_error_status(
+                match_id,
+                "start",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to start match: {error}"),
+            )
+        })?;
 
     state.live_updates.publish_match_updated(match_id);
+    record_match_info(
+        "match.start",
+        serde_json::json!({
+            "match_id": match_id,
+            "match_type": match_type,
+            "actor_user_id": access.user_id,
+            "possession": possession,
+        }),
+    );
 
     let (started_at, _updated_at, server_time) =
         load_match_timing_snapshot(&state.db, match_id).await?;
@@ -661,22 +724,53 @@ pub async fn end_match(
     .bind(match_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|error| {
+        match_error_status(
+            match_id,
+            "end",
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load match before end: {error}"),
+        )
+    })?;
 
     let (possession, division, match_type, t1_score, t2_score) =
-        info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        info.ok_or_else(|| {
+            match_error_status(
+                match_id,
+                "end",
+                axum::http::StatusCode::NOT_FOUND,
+                "match not found",
+            )
+        })?;
     if possession.is_none() || possession.unwrap_or(0) >= 3 {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Err(match_error_status(
+            match_id,
+            "end",
+            axum::http::StatusCode::CONFLICT,
+            "match is not in progress",
+        ));
     }
     if match_type >= 1000 && t1_score == t2_score {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+        return Err(match_error_status(
+            match_id,
+            "end",
+            axum::http::StatusCode::BAD_REQUEST,
+            "elimination matches cannot end in a draw",
+        ));
     }
 
     sqlx::query("UPDATE matches SET possession = 3, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
         .bind(match_id)
         .execute(&state.db)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            match_error_status(
+                match_id,
+                "end",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to end match: {error}"),
+            )
+        })?;
 
     let auto_action =
         crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
@@ -684,6 +778,18 @@ pub async fn end_match(
     cache::invalidate_division(division).await;
     cache::invalidate_player_stats().await;
     state.live_updates.publish_match_updated(match_id);
+    record_match_info(
+        "match.end",
+        serde_json::json!({
+            "match_id": match_id,
+            "match_type": match_type,
+            "division": division,
+            "actor_user_id": access.user_id,
+            "t1_score": t1_score,
+            "t2_score": t2_score,
+            "auto_action": auto_action,
+        }),
+    );
 
     let (started_at, updated_at, server_time) =
         load_match_timing_snapshot(&state.db, match_id).await?;
@@ -708,20 +814,51 @@ pub async fn record_event(
 
     // Validate event_type (0=goal, 1=assist, 2=block, 3=turnover)
     if payload.event_type < 0 || payload.event_type > 3 {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
+        return Err(match_error_status(
+            match_id,
+            "record_event",
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid event type",
+        ));
     }
 
     let match_info: Option<(i64, i64, i64, i64, Option<i64>)> = sqlx::query_as(
         "SELECT t1_id, t2_id, t1_score, t2_score, possession FROM matches WHERE id = ? AND deleted_at IS NULL"
     ).bind(match_id).fetch_optional(&state.db).await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load match before event: {error}"),
+            )
+        })?;
 
     let (t1_id, t2_id, mut t1_score, mut t2_score, possession) =
-        match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        match_info.ok_or_else(|| {
+            match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::NOT_FOUND,
+                "match not found",
+            )
+        })?;
 
-    let current_pos = possession.ok_or(axum::http::StatusCode::CONFLICT)?;
+    let current_pos = possession.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "record_event",
+            axum::http::StatusCode::CONFLICT,
+            "match has not started",
+        )
+    })?;
     if current_pos >= 3 {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Err(match_error_status(
+            match_id,
+            "record_event",
+            axum::http::StatusCode::CONFLICT,
+            "match already finalized",
+        ));
     }
 
     let mut new_pos = current_pos;
@@ -741,19 +878,43 @@ pub async fn record_event(
 
         let player_team_id = player_team
             .map(|t| t.0)
-            .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+            .ok_or_else(|| {
+                match_error_status(
+                    match_id,
+                    "record_event",
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "player not found or not active",
+                )
+            })?;
         if player_team_id != t1_id && player_team_id != t2_id {
-            return Err(axum::http::StatusCode::BAD_REQUEST);
+            return Err(match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::BAD_REQUEST,
+                "player team does not match fixture",
+            ));
         }
 
         let expected_team_id = match payload.event_type {
             0 | 1 | 3 => offense_team_id,
             2 => defense_team_id,
-            _ => return Err(axum::http::StatusCode::BAD_REQUEST),
+            _ => {
+                return Err(match_error_status(
+                    match_id,
+                    "record_event",
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "invalid event type",
+                ));
+            }
         };
 
         if player_team_id != expected_team_id {
-            return Err(axum::http::StatusCode::BAD_REQUEST);
+            return Err(match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::BAD_REQUEST,
+                "event team does not match current possession context",
+            ));
         }
 
         sqlx::query("INSERT INTO match_events (match_id, player_id, team_id, event_type, actor_user_id) VALUES (?, ?, ?, ?, ?)")
@@ -762,7 +923,12 @@ pub async fn record_event(
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     } else {
         if payload.event_type == 2 {
-            return Err(axum::http::StatusCode::BAD_REQUEST);
+            return Err(match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::BAD_REQUEST,
+                "team-level block events are not allowed",
+            ));
         }
 
         // Team-level event (without player)
@@ -807,6 +973,19 @@ pub async fn record_event(
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
         cache::invalidate_player_stats().await;
+        record_match_info(
+            "match.inprogress",
+            serde_json::json!({
+                "match_id": match_id,
+                "division": division,
+                "actor_user_id": actor_user_id,
+                "event_type": payload.event_type,
+                "player_id": payload.player_id,
+                "t1_score": t1_score,
+                "t2_score": t2_score,
+                "possession": new_pos,
+            }),
+        );
     }
 
     state.live_updates.publish_match_updated(match_id);
@@ -834,12 +1013,38 @@ pub async fn switch_possession(
             .bind(match_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|error| {
+                match_error_status(
+                    match_id,
+                    "switch_possession",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load match before possession switch: {error}"),
+                )
+            })?;
 
-    let (t1_id, possession) = match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
-    let current_pos = possession.ok_or(axum::http::StatusCode::CONFLICT)?;
+    let (t1_id, possession) = match_info.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "switch_possession",
+            axum::http::StatusCode::NOT_FOUND,
+            "match not found",
+        )
+    })?;
+    let current_pos = possession.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "switch_possession",
+            axum::http::StatusCode::CONFLICT,
+            "match has not started",
+        )
+    })?;
     if current_pos >= 3 {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Err(match_error_status(
+            match_id,
+            "switch_possession",
+            axum::http::StatusCode::CONFLICT,
+            "match already finalized",
+        ));
     }
 
     let new_pos = if current_pos == 1 { 2 } else { 1 };
@@ -860,6 +1065,16 @@ pub async fn switch_possession(
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
         cache::invalidate_division(division).await;
+        record_match_info(
+            "match.inprogress",
+            serde_json::json!({
+                "match_id": match_id,
+                "division": division,
+                "actor_user_id": access.user_id,
+                "action": "switch_possession",
+                "possession": new_pos,
+            }),
+        );
     }
 
     state.live_updates.publish_match_updated(match_id);
@@ -889,14 +1104,33 @@ pub async fn undo_event(
     .bind(match_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|error| {
+        match_error_status(
+            match_id,
+            "undo_event",
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load match before undo: {error}"),
+        )
+    })?;
 
     let (t1_id, _t2_id, mut t1_score, mut t2_score, possession) =
-        match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        match_info.ok_or_else(|| {
+            match_error_status(
+                match_id,
+                "undo_event",
+                axum::http::StatusCode::NOT_FOUND,
+                "match not found",
+            )
+        })?;
 
     let mut current_pos = possession.unwrap_or(1);
     if current_pos >= 3 {
-        return Err(axum::http::StatusCode::CONFLICT);
+        return Err(match_error_status(
+            match_id,
+            "undo_event",
+            axum::http::StatusCode::CONFLICT,
+            "match already finalized",
+        ));
     }
 
     // Get latest event
@@ -971,6 +1205,18 @@ pub async fn undo_event(
         if let Some((division,)) = division {
             sorting::refresh_intermediate_standings_cache(&state.db, division).await;
             cache::invalidate_player_stats().await;
+            record_match_info(
+                "match.inprogress",
+                serde_json::json!({
+                    "match_id": match_id,
+                    "division": division,
+                    "actor_user_id": access.user_id,
+                    "action": "undo_event",
+                    "t1_score": t1_score,
+                    "t2_score": t2_score,
+                    "possession": current_pos,
+                }),
+            );
         }
 
         state.live_updates.publish_match_updated(match_id);

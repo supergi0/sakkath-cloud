@@ -34,3 +34,7 @@ sshkey.pub
 
 backups/
 logs/
+
+.venv
+
+analyze_cutline_opponents.py

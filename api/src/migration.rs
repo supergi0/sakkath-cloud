@@ -677,6 +677,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             memory_percent REAL,
             method VARCHAR(16),
             path TEXT,
+            details TEXT,
             ip_address VARCHAR(64),
             status_code INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -710,6 +711,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_telemetry_logs_request_path_created_at ON telemetry_logs(path, created_at)")
         .execute(pool)
         .await?;
+
+    if !table_has_column(pool, "telemetry_logs", "details").await? {
+        sqlx::query("ALTER TABLE telemetry_logs ADD COLUMN details TEXT")
+            .execute(pool)
+            .await?;
+    }
 
     if !table_has_column(pool, "teams", "abbreviation").await? {
         sqlx::query("ALTER TABLE teams ADD COLUMN abbreviation VARCHAR(5)")

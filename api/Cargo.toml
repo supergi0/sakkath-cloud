@@ -9,8 +9,13 @@ name = "sakkath-api"
 path = "src/main.rs"
 
 [[test]]
-name = "mod"
+name = "tournament"
 path = "tests/mod.rs"
+harness = false
+
+[[test]]
+name = "iterations"
+path = "tests/iterations.rs"
 harness = false
 
 [dependencies]

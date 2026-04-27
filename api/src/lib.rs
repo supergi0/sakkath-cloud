@@ -1,6 +1,7 @@
 use axum::Router;
 use sqlx::SqlitePool;
 
+pub mod config;
 pub mod controllers;
 pub mod helpers;
 pub mod middleware;

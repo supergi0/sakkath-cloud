@@ -17,6 +17,14 @@ const PLAYOFF_BREAK_MINUTES: i64 = 15;
 const ROW_OVERRIDE_CACHE_KEY: &str = "schedule:row_overrides";
 const ROW_OVERRIDE_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 
+fn record_schedule_info(key: &'static str, details: serde_json::Value) {
+    crate::telemetry::record_info(key, details.to_string());
+}
+
+fn record_schedule_error(details: serde_json::Value) {
+    crate::telemetry::record_error("schedule.error", details.to_string());
+}
+
 #[derive(Serialize)]
 pub struct TournamentState {
     pub division: i64,
@@ -235,13 +243,36 @@ pub async fn auto_advance_division_if_ready(
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
-            if generate_next_round_internal(db, division, round)
-                .await
-                .is_ok()
-            {
-                return Some(format!("generated_round_{round}"));
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss"
+                }),
+            );
+            if let Err(error) = generate_next_round_internal(db, division, round).await {
+                record_schedule_error(serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "message": error.to_string()
+                }));
+                return None;
             }
-            return None;
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "action": format!("generated_round_{round}")
+                }),
+            );
+            return Some(format!("generated_round_{round}"));
         }
 
         if total == 0 {
@@ -253,15 +284,70 @@ pub async fn auto_advance_division_if_ready(
         }
     }
 
-    if create_playoffs_if_needed(db, division)
-        .await
-        .unwrap_or(false)
-    {
-        return Some("generated_playoff_1".to_string());
+    match create_playoffs_if_needed(db, division).await {
+        Ok(true) => {
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_1"
+                }),
+            );
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_1",
+                    "action": "generated_playoff_1"
+                }),
+            );
+            return Some("generated_playoff_1".to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "auto_advance",
+                "division": division,
+                "stage": "playoff_1",
+                "message": error.to_string()
+            }));
+            return None;
+        }
     }
 
-    if create_finals_if_needed(db, division).await.unwrap_or(false) {
-        return Some("generated_playoff_2".to_string());
+    match create_finals_if_needed(db, division).await {
+        Ok(true) => {
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_2"
+                }),
+            );
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_2",
+                    "action": "generated_playoff_2"
+                }),
+            );
+            return Some("generated_playoff_2".to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "auto_advance",
+                "division": division,
+                "stage": "playoff_2",
+                "message": error.to_string()
+            }));
+            return None;
+        }
     }
 
     None
@@ -308,7 +394,37 @@ async fn generate_r1_from_seeding(db: &sqlx::SqlitePool, division: i64) -> Resul
         });
     }
 
-    insert_pairings_into_slots(db, division, 1, &pairings).await
+    record_schedule_info(
+        "schedule.start",
+        serde_json::json!({
+            "source": "startup",
+            "division": division,
+            "round": 1,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
+    let result = insert_pairings_into_slots(db, division, 1, &pairings).await;
+    match &result {
+        Ok(()) => record_schedule_info(
+            "schedule.end",
+            serde_json::json!({
+                "source": "startup",
+                "division": division,
+                "round": 1,
+                "stage": "swiss",
+                "matches_created": pairings.len()
+            }),
+        ),
+        Err(error) => record_schedule_error(serde_json::json!({
+            "source": "startup",
+            "division": division,
+            "round": 1,
+            "stage": "swiss",
+            "message": error.to_string()
+        })),
+    }
+    result
 }
 
 pub async fn read_tournament_state(
@@ -762,6 +878,14 @@ pub async fn generate_next_round(
     .unwrap_or(1);
 
     if next_round > total_rounds {
+        record_schedule_info(
+            "schedule.inprogress",
+            serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "reason": "all_swiss_rounds_complete"
+            }),
+        );
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "All swiss rounds complete"
@@ -781,6 +905,15 @@ pub async fn generate_next_round(
         .unwrap_or((1,));
 
         if prev_incomplete.0 > 0 {
+            record_schedule_info(
+                "schedule.inprogress",
+                serde_json::json!({
+                    "source": "manual_generate",
+                    "division": division,
+                    "round": next_round,
+                    "reason": "previous_round_incomplete"
+                }),
+            );
             return Ok(Json(serde_json::json!({
                 "success": false,
                 "message": "Previous round incomplete"
@@ -800,6 +933,15 @@ pub async fn generate_next_round(
     .unwrap_or((0,));
 
     if existing.0 > 0 {
+        record_schedule_info(
+            "schedule.inprogress",
+            serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "reason": "round_already_generated"
+            }),
+        );
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "Round already generated"
@@ -809,6 +951,12 @@ pub async fn generate_next_round(
     let history = rounds::fetch_match_history(&state.db, division).await;
     let sorted = sorting::get_sorted_standings(&state.db, division).await;
     if sorted.len() % 2 != 0 {
+        record_schedule_error(serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "message": "odd number of teams; cannot generate pairings"
+        }));
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "Odd number of teams; cannot generate pairings"
@@ -817,17 +965,54 @@ pub async fn generate_next_round(
 
     let pairings = rounds::generate_round_pairings(&sorted, &history, next_round);
     if pairings.len() * 2 != sorted.len() {
+        record_schedule_error(serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "message": "could not generate complete non-overlapping pairings"
+        }));
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "Could not generate complete non-overlapping pairings"
         })));
     }
 
+    record_schedule_info(
+        "schedule.start",
+        serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
+
     insert_pairings_into_slots(&state.db, division, next_round, &pairings)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "stage": "swiss",
+                "message": error.to_string()
+            }));
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     cache::invalidate_all().await;
+
+    record_schedule_info(
+        "schedule.end",
+        serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -883,8 +1068,39 @@ pub async fn check_and_populate_gates(
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
-            let _ = generate_next_round_internal(&state.db, division, round).await;
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss"
+                }),
+            );
+            if let Err(error) = generate_next_round_internal(&state.db, division, round).await {
+                record_schedule_error(serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "message": error.to_string()
+                }));
+                return Json(serde_json::json!({
+                    "action": "error",
+                    "next_gate": format!("round_{}_generation_failed", round),
+                }));
+            }
             cache::invalidate_all().await;
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "action": format!("generated_round_{round}")
+                }),
+            );
             return Json(serde_json::json!({
                 "action": format!("generated_round_{round}"),
                 "next_gate": if round < total_rounds {
