@@ -1,25 +1,25 @@
 # Tournament Format
 
-This summary explains how the tournament format works.
+This summary explains the tournament format.
 
 ## Overview
 
 Each division has:
 
 - 6 Swiss draw rounds
-- then placement/playoff games after Swiss
+- then placement or playoff games after Swiss
 
-The system is built to do three things at the same time:
+The Swiss system is trying to do three things at once:
 
 - keep teams playing others with a similar record
-- avoid repeat matchups as much as possible
-- still produce a full round with no team left out
+- avoid Swiss rematches completely
+- make the late rounds more useful around the important cut lines
 
 ## Round 1
 
 Round 1 is seeded from the starting ranking.
 
-All teams are split into a top half and a bottom half, then paired across that split.
+The field is split into a top half and a bottom half, and teams are paired across that split.
 
 For example, in a 10-team division:
 
@@ -29,223 +29,269 @@ For example, in a 10-team division:
 - 4 plays 9
 - 5 plays 10
 
-So Round 1 is not based on Swiss points yet. It is based on the starting seed.
-
 ## Rounds 2 to 6
 
-From Round 2 onward, the pairings are based on Swiss points.
+From Round 2 onward, the draw uses Swiss standings.
 
-The points system is:
+The Swiss points system is:
 
 - win = 2 points
 - draw = 1 point
 - loss = 0 points
 
-## How the Swiss grouping works
-
-After each completed round, teams are sorted into the current standings.
-
-The standings use these ideas in order:
+After every completed round, teams are sorted in the standings by:
 
 1. Swiss points
-2. Head-to-head if only 2 teams are tied on points
+2. Head-to-head, but only if exactly 2 teams are tied on points
 3. Median Buchholz
 4. Point difference
 5. Points scored
-6. Momentum score (WWWLLL > LLLWWW)
+6. Momentum
 7. Starting seed
 
-Then the Swiss draw groups teams by equal points.
+## How the pairing search works now
 
-Example:
+Instead of locking the whole round into rigid score brackets, the system works from the full standings list.
 
-- Group A: teams on 8 points
-- Group B: teams on 6 points
-- Group C: teams on 4 points
+It asks one question first:
 
-Inside each group, teams stay in standings order.
+- what is the smallest points gap that allows a complete round with no rematches?
 
-## What happens if a group has an odd number of teams
+It starts with the strictest version:
 
-Swiss rounds need even groups so everyone can be paired.
+- only allow teams to play opponents on the same points
 
-If a points group has an odd number of teams, the last team in that group is moved down into the next group.
+If a full rematch-free round is impossible, it widens gently:
 
-This is a simple balancing step.
+- allow a 1-point gap
+- then a 2-point gap
+- then a 3-point gap
+- and so on, only as far as needed
 
-Example:
+So the draw widens only enough to make a full no-rematch round exist.
 
-- 8-point group: seeds 1, 2, 3
-- 6-point group: seeds 4, 5, 6, 7
+## What it prefers inside that search
 
-The 8-point group has 3 teams, so it cannot be paired cleanly.
+Once the smallest workable gap is found, the system still tries to stay close to natural Swiss pairings.
 
-The system moves the last team from that group down:
+Its preference order is roughly:
 
-- 8-point group becomes: 1, 2
-- 6-point group becomes: 3, 4, 5, 6, 7
+1. more same-points pairings
+2. smaller points gaps
+3. smaller standings-rank gaps
+4. more natural neighbour-style pairings from the standings list
 
-If the next group is then odd as well, the same balancing idea continues until the groups become pairable.
+## Round 4, 5, and 6 behaviour
 
-So the draw mostly stays within the same score band, but it can float one team down when needed.
+Round 4 adds a mild cut-line bias.
 
-## How pairing inside a group works
+That means if two valid no-rematch choices are otherwise very similar, the system leans a little toward pairings near the important borders such as:
 
-Once a group has an even number of teams, it is split into:
+- 4v5
+- 8v9
+- 12v13
+- 16v17
 
-- a top half
-- a bottom half
+## Late-round pipeline
 
-The natural Swiss pairing is then:
+In Rounds 5 and 6, the system works in four layers:
 
-- first team in the top half vs first team in the bottom half
-- second team in the top half vs second team in the bottom half
-- and so on
+1. viable set
+2. exploration
+3. candidates
+4. simulation and probability scoring
 
-For a 6-team group:
+### 1. Viable set
 
-- group order: 3, 4, 5, 6, 7, 8
-- top half: 3, 4, 5
-- bottom half: 6, 7, 8
-- natural pairs: 3v6, 4v7, 5v8
+First, it finds the smallest points-gap rule that allows a full round with no Swiss rematches.
 
-That is the first thing the system tries.
+That creates the viable set of legal pairings for that round.
 
-## How the backtracking works
+### 2. Exploration
 
-Backtracking is the part that tries to avoid rematches.
+From that viable set, the system explores up to 384 full no-rematch round candidates.
 
-It works in a this order:
+Those explored rounds are still ordered by Swiss logic first, which means the search still prefers:
 
-1. take the first team from the top half
-2. try its natural opponent first
-3. check if they have already played
-4. if they have not played, temporarily accept that pair
-5. move to the next team and do the same
-6. if later the system gets stuck, it goes back, removes the last temporary choice, and tries the next available opponent
+- same-points pairings
+- smaller points gaps
+- smaller rank gaps
+- natural neighbour-style pairings
 
-So it keeps a small memory of:
+In late rounds, the Swiss score also gives extra weight to pairings that cross the important cut lines.
 
-- which teams have already been paired in this round
-- who each team has already played in earlier rounds
-- which trial pairings are currently being tested
+### 3. Candidates
 
-In simple terms, it says:
+From the explored rounds, the system keeps the top 192 candidates.
 
-- try the clean Swiss pair first
-- if that causes a repeat game or blocks the rest of the group, step back and try the next option
+This is the favourite set that survives into lookahead.
 
-## What does it check first, second, and so on
+The reason for keeping a larger set is simple:
 
-For the normal Swiss pairing search, the order is:
+- some rounds look slightly less natural by plain Swiss shape
+- but are much better for the important equal-points boundaries later
 
-1. keep teams inside the same points group if possible
-2. try the natural top-half vs bottom-half pairing first
-3. reject any pairing that is a repeat of an earlier Swiss game
-4. if that choice makes the rest of the group impossible, go back and try the next opponent
+So the shortlist is deliberately wide enough to keep those options alive.
 
-For rounds 5 and 6, there is one extra preference.
+### 4. Simulation and probability scoring
 
-The system still avoids rematches first, but among all valid no-rematch options it now prefers cut-line games such as:
+Each kept candidate is then simulated through the remaining Swiss future.
+
+Both Round 5 and Round 6 now run 36 deterministic future scenarios per kept candidate.
+
+After those futures are played out, the system checks the four reported boundary pairs:
+
+- 4v5
+- 3v6
+- 8v9
+- 7v10
+
+For each pair, it asks:
+
+- did those two teams finish on the same Swiss points?
+- if yes, had Swiss already made them play each other?
+
+That produces the probability that a boundary finishes as a `same-points miss` (4 and 5 at same points but didn't play).
+
+The late-round chooser then prefers the candidate with the lowest worst-case `same-points miss` probability, and only after that falls back to the normal Swiss-style tie-breaks.
+
+## What the lookahead is trying to improve
+
+The late-round lookahead is trying to improve the important seed-border games by the end of Swiss.
+
+Examples:
 
 - 4v5 and 3v6
 - 8v9 and 7v10
-- 12v13 and 11v14
-- 16v17 and 15v18
-- 20v21 and 19v22
 
-So late in Swiss, the draw tries harder to create meaningful placement games near the important seed lines.
+## Example Runthrough
 
-## Simple example
+Imagine a 10-team division with starting seeds 1 to 10.
 
-Here is a small example with 10 teams after some rounds.
+### Round 1
 
-Current standings by Swiss points:
+Round 1 is the only round driven directly by the starting seed.
 
-- 1: 8 points
-- 2: 8 points
-- 3: 6 points
-- 4: 6 points
-- 5: 6 points
-- 6: 6 points
-- 7: 4 points
-- 8: 4 points
-- 9: 2 points
-- 10: 2 points
+The field is split into a top half and a bottom half:
 
-### Step 1: Build score groups
+- 1 plays 6
+- 2 plays 7
+- 3 plays 8
+- 4 plays 9
+- 5 plays 10
 
-- 8-point group: 1, 2
-- 6-point group: 3, 4, 5, 6
-- 4-point group: 7, 8
-- 2-point group: 9, 10
+### Round 2
 
-All groups are even, so no balancing is needed.
+Now the event switches to Swiss standings.
 
-### Step 2: Split each group into halves
+Teams are paired by Swiss points first.
 
-In the 6-point group:
+If a score group has an odd number of teams, one team floats the minimum amount needed to complete the round with no rematch.
 
-- top half: 3, 4
-- bottom half: 5, 6
+So if five teams are sitting on 2 points, the round might look like:
 
-Natural Swiss pairings would be:
+- 1 plays 2
+- 3 plays 4
+- 5 floats to the nearest legal opponent on the next score line
 
-- 3v5
-- 4v6
+The key point is that the system widens only as much as needed.
 
-### Step 3: Check for repeats
+### Round 3
 
-Suppose 3 has already played 5 in an earlier round.
+The same Swiss rule continues.
 
-Then the system tries:
+If the most natural same-points pairing would repeat a match that already happened in Swiss, the system does not allow it.
 
-- 3v5 -> reject, repeat game
-- 3v6 -> accept for now
+Instead, it looks for the smallest possible widening that still gives a full legal round.
 
-Now only 4v5 is left, so if that is also new, the group becomes:
+### Round 4
 
-- 3v6
-- 4v5
+Round 4 is still a normal Swiss round first.
 
-That is the backtracking idea in action.
-
-### Step 4: Late-round crossover preference
-
-If this is Round 5 or Round 6, the system looks at all valid no-repeat options and prefers the one that better tests the cut line.
-
-So in this same group it would prefer:
+But now there is a mild extra preference for games, such as:
 
 - 4v5
+- 8v9
+
+That does not mean Round 4 forces those games.
+
+It means that if two legal no-rematch rounds are otherwise very close, the system leans toward the one that is more useful around those cut lines.
+
+### Round 5
+
+Round 5 starts the late-round lookahead.
+
+The system does this in order:
+
+1. explore up to 384 legal full-round candidates, starting from 0 to n point gap.
+2. keep the best 192 Swiss-shaped candidates
+3. simulate 36 deterministic futures for each kept candidate
+
+Those simulations ask a practical question:
+
+- if two teams finish on the same Swiss points around an important boundary such as 4v5 or 3v6, did Swiss actually make them play each other?
+
+That is why a Round 5 pairing can beat a slightly more natural-looking alternative if it gives a better late-round boundary outcome.
+
+### Round 6
+
+Round 6 uses the same late-round pipeline again.
+
+Because this is the final Swiss round, the choice is even more direct.
+
+Among the legal no-rematch options, the system prefers the round that best reduces same-points misses at the reported boundaries:
+
+- 4v5
 - 3v6
+- 8v9
+- 7v10
 
-over a less useful placement combination, as long as no rematch is created.
+So by Round 6, the draw is still Swiss-like, but it is also deliberately trying to make the important equal-points borders more meaningful.
 
-### Step 5: If a group is odd
+### What this example is showing
 
-Now imagine the standings instead were:
+The exact pairings will depend on results, standings, and rematch history.
 
-- 8-point group: 1, 2, 3
-- 6-point group: 4, 5, 6, 7
-- 4-point group: 8, 9
-- 2-point group: 10
+What stays consistent is the order of decisions:
 
-The 8-point group is odd, so team 3 is floated down.
+- Round 1 uses the starting seed
+- Rounds 2 and 3 use normal Swiss standings with minimal widening
+- Round 4 adds a mild border bias
+- Rounds 5 and 6 add bounded lookahead on top of the Swiss search
 
-That becomes:
+## After Swiss
 
-- 8-point group: 1, 2
-- 6-point group: 3, 4, 5, 6, 7
+After Round 6, the event stops being Swiss.
 
-Which balances to:
+Teams are then split into seed-order brackets.
 
-- 8-point group: 1, 2
-- 6-point group: 3, 4, 5, 6
-- 4-point group: 7, 8, 9
+In a 10-team division, that means:
 
-Which balances to:
+- seeds 1 to 4 form the top bracket
+- seeds 5 to 8 form the next bracket
+- seeds 9 and 10 form a 2-team bracket
 
-- 8-point group: 1, 2
-- 6-point group: 3, 4, 5, 6
-- 4-point group: 7, 8
-- 2-point group: 9, 10
+For each 4-team bracket, the playoff round is:
+
+- 1 plays 4
+- 2 plays 3
+
+For a 2-team bracket, there is one direct playoff game:
+
+- 9 plays 10
+
+After that, the finals round is built from the current seed holders inside each 4-team bracket.
+
+If a lower seed upsets a higher seed, it takes over that seed line inside the bracket.
+
+Example in the top bracket:
+
+- Swiss ends with seeds 1, 2, 3, 4
+- the playoff pairings are 1v4 and 2v3
+- if seed 4 beats seed 1, team 4 takes over the number-1 seed line
+- if seed 2 beats seed 3, team 2 keeps the number-2 seed line
+- the finals round for that bracket then becomes 4v2 for the higher placing game and 3v1 for the lower placing game
+
+So rematches are allowed after Swiss.
+
+The no-rematch rule applies to Swiss rounds only, not to the post-Swiss placement structure.
