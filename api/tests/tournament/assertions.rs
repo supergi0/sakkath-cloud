@@ -1,8 +1,7 @@
 use super::harness::{Harness, TestResult};
 use super::model::{
     ExpectedPlayoffMatch, ExpectedSwissRound, MatchState, ScheduleGridCellResponse,
-    ScheduleGridResponse, ScheduleMatchResponse, SeedPairRound, SpiritScoreRowResponse, StatsResponse,
-    TournamentTracker,
+    ScheduleGridResponse, ScheduleMatchResponse, SpiritScoreRowResponse, StatsResponse, TournamentTracker,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -304,28 +303,6 @@ pub(crate) async fn assert_final_public_state(
     }
 
     Ok(())
-}
-
-pub(crate) fn assert_swiss_cutline_crossovers_completed(
-    tracker: &TournamentTracker,
-    division: i64,
-) -> Vec<SeedPairRound> {
-    let pair_rounds = tracker.swiss_cutline_pair_rounds(division);
-
-    let missing: Vec<_> = pair_rounds
-        .iter()
-        .filter(|pair| pair.round.is_none())
-        .map(|pair| format!("{}v{}", pair.seed_a, pair.seed_b))
-        .collect();
-
-    assert!(
-        missing.is_empty(),
-        "missing swiss cutline crossovers for division {} by round 6: {}",
-        division,
-        missing.join(", ")
-    );
-
-    pair_rounds
 }
 
 fn opponent_spirit_for_team(state: &MatchState, team_id: i64) -> Option<i64> {

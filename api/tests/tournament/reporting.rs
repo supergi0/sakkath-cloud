@@ -256,6 +256,7 @@ impl ReportWriter {
     }
 
     fn sync_files(&self) -> TestResult {
+        fs::create_dir_all(&self.config.log_dir)?;
         fs::write(self.matches_path(), self.matches_lines.join("\n"))?;
         fs::write(self.standings_path(), self.standings_lines.join("\n"))?;
         fs::write(self.tournament_path(), self.tournament_lines.join("\n"))?;

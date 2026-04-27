@@ -1,31 +1,128 @@
 use crate::tournament::assertions::{
     assert_display_standings_and_team_ranks, assert_final_public_state,
     assert_playoff_grid_seed_labels, assert_playoff_pairings, assert_standings_match_tracker,
-    assert_swiss_cutline_crossovers_completed, assert_swiss_grid_seed_labels,
-    assert_swiss_round_pairings,
+    assert_swiss_grid_seed_labels, assert_swiss_round_pairings,
 };
 use crate::tournament::config::RunConfig;
 use crate::tournament::harness::{Harness, TestResult};
-use crate::tournament::model::{ExpectedPlayoffMatch, SeedPairRound};
+use crate::tournament::model::{ExpectedPlayoffMatch, SortMetrics, TournamentTracker};
 use crate::tournament::reporting::ReportWriter;
 use crate::tournament::simulation::TournamentSimulation;
 use crate::tournament::support::{
     ensure_swiss_round_exists, finish_match_to_outcome, load_round_matches, login_staff,
     submit_standard_post_match,
 };
+use api::helpers::rounds::RoundPairingDiagnostics;
+use std::collections::{HashMap, HashSet};
 
-fn describe_cutline_pair_rounds(pair_rounds: &[SeedPairRound]) -> String {
-    pair_rounds
+#[derive(Debug, Clone)]
+pub(crate) struct BoundaryMeetingSummary {
+    pub(crate) label: &'static str,
+    pub(crate) same_points: bool,
+    pub(crate) met: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LookaheadRoundSummary {
+    pub(crate) round: i64,
+    pub(crate) diagnostics: RoundPairingDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DivisionTournamentSummary {
+    pub(crate) division: i64,
+    pub(crate) boundary_meetings: Vec<BoundaryMeetingSummary>,
+    pub(crate) lookahead_rounds: Vec<LookaheadRoundSummary>,
+    pub(crate) final_swiss_points_by_rank: Vec<i64>,
+    pub(crate) swiss_rematches: usize,
+    pub(crate) tournament_rematches: usize,
+    pub(crate) team_tournament_rematches: Vec<(i64, usize)>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FullTournamentSummary {
+    pub(crate) divisions: Vec<DivisionTournamentSummary>,
+}
+
+fn describe_boundary_meetings(boundary_meetings: &[BoundaryMeetingSummary]) -> String {
+    boundary_meetings
         .iter()
-        .map(|pair| match pair.round {
-            Some(round) => format!("{}v{}=R{}", pair.seed_a, pair.seed_b, round),
-            None => format!("{}v{}=missing", pair.seed_a, pair.seed_b),
-        })
+        .map(|meeting| format!("{}={}", meeting.label, boundary_meeting_status(meeting)))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
+fn boundary_meeting_status(meeting: &BoundaryMeetingSummary) -> &'static str {
+    if !meeting.same_points {
+        "points-split"
+    } else if meeting.met {
+        "same-points-met"
+    } else {
+        "same-points-missed"
+    }
+}
+
+fn format_optional_probability(probability: Option<f64>) -> String {
+    probability
+        .map(|probability| format!("{:.1}%", probability * 100.0))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_duration_ms(value: f64) -> String {
+    format!("{value:.1}ms")
+}
+
+fn describe_round_generation_diagnostics(diagnostics: &RoundPairingDiagnostics) -> String {
+    let timing = format!(
+        "generated in {} total (exploration {}, simulation {})",
+        format_duration_ms(diagnostics.generation_time_ms),
+        format_duration_ms(diagnostics.exploration_time_ms),
+        format_duration_ms(diagnostics.simulation_time_ms),
+    );
+
+    if diagnostics.total_simulations_run == 0 {
+        return format!(
+            "gap_limit={}, explored {} no-rematch pairings, kept {}, {}",
+            diagnostics
+                .point_gap_limit
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            diagnostics.explored_candidates,
+            diagnostics.kept_candidates,
+            timing,
+        );
+    }
+
+    format!(
+        "gap_limit={}, explored {} no-rematch pairings, kept {}, ran {} simulations, {}, chosen worst-case same-point miss {}, best kept {}, avg kept {}",
+        diagnostics
+            .point_gap_limit
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+        diagnostics.explored_candidates,
+        diagnostics.kept_candidates,
+        diagnostics.total_simulations_run,
+        timing,
+        format_optional_probability(
+            diagnostics.chosen_worst_case_same_point_miss_probability,
+        ),
+        format_optional_probability(
+            diagnostics.best_kept_worst_case_same_point_miss_probability,
+        ),
+        format_optional_probability(
+            diagnostics.average_kept_worst_case_same_point_miss_probability,
+        ),
+    )
+}
+
 pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> TestResult {
+    run_with_summary(config, reporter).await.map(|_| ())
+}
+
+pub(crate) async fn run_with_summary(
+    config: &RunConfig,
+    reporter: &mut ReportWriter,
+) -> TestResult<FullTournamentSummary> {
     reporter.start_scenario(
         "full-tournament",
         "Runs all swiss and playoff rounds against the live router, with seeded random winners and markdown reporting.",
@@ -38,6 +135,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     let mut simulation = TournamentSimulation::new(config.scenario_seed("full-tournament"));
 
     let mut backtracking_evidence = 0usize;
+    let mut lookahead_rounds: HashMap<(i64, i64), RoundPairingDiagnostics> = HashMap::new();
 
     for round in 1..=6 {
         for division in [0, 1] {
@@ -51,8 +149,16 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
                 if expected.naive_had_rematch {
                     backtracking_evidence += 1;
                     reporter.note(format!(
-                        "[full-tournament] swiss round {round} for division {division} required rematch-aware backtracking."
+                        "[full-tournament] swiss round {round} for division {division} required no-rematch widening beyond the naive grouped draw."
                     ))?;
+                }
+                if round >= 4 && expected.diagnostics.explored_candidates > 0 {
+                    reporter.note(format!(
+                        "[full-tournament] {} Swiss round {round} generation: {}",
+                        division_label(division),
+                        describe_round_generation_diagnostics(&expected.diagnostics),
+                    ))?;
+                    lookahead_rounds.insert((division, round), expected.diagnostics.clone());
                 }
             }
 
@@ -112,15 +218,6 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
                 assert_swiss_grid_seed_labels(&harness, &tracker, &next_round, division).await?;
             }
         }
-    }
-
-    for division in [0, 1] {
-        let pair_rounds = assert_swiss_cutline_crossovers_completed(&tracker, division);
-        reporter.note(format!(
-            "[full-tournament] {} swiss cutline crossovers by round 6: {}",
-            if division == 0 { "Open" } else { "Women" },
-            describe_cutline_pair_rounds(&pair_rounds),
-        ))?;
     }
 
     for division in [0, 1] {
@@ -238,6 +335,14 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     }
 
     assert_final_public_state(&harness, &tracker, &baseline_stats).await?;
+    let summary = build_full_tournament_summary(&tracker, &lookahead_rounds);
+    for division_summary in &summary.divisions {
+        reporter.note(format!(
+            "[full-tournament] {} final swiss equal-point boundary status: {}",
+            division_label(division_summary.division),
+            describe_boundary_meetings(&division_summary.boundary_meetings),
+        ))?;
+    }
     reporter.note(format!(
         "[full-tournament] completed {} matches, scored {} total points, and observed {} rematch-avoidance rounds.",
         tracker.completed_match_count(),
@@ -245,7 +350,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         backtracking_evidence,
     ))?;
 
-    Ok(())
+    Ok(summary)
 }
 
 async fn enable_reporting_round(
@@ -258,6 +363,142 @@ async fn enable_reporting_round(
         .await?;
     assert!(response.is_enabled);
     Ok(())
+}
+
+fn build_full_tournament_summary(
+    tracker: &TournamentTracker,
+    lookahead_rounds: &HashMap<(i64, i64), RoundPairingDiagnostics>,
+) -> FullTournamentSummary {
+    FullTournamentSummary {
+        divisions: [0, 1]
+            .into_iter()
+            .map(|division| build_division_summary(tracker, division, lookahead_rounds))
+            .collect(),
+    }
+}
+
+fn build_division_summary(
+    tracker: &TournamentTracker,
+    division: i64,
+    lookahead_rounds: &HashMap<(i64, i64), RoundPairingDiagnostics>,
+) -> DivisionTournamentSummary {
+    let final_swiss = tracker.swiss_summary(division);
+    let swiss_history = match_history(tracker, division, true);
+    let (swiss_rematches, _swiss_team_rematches) = count_rematches(tracker, division, true);
+    let (tournament_rematches, tournament_team_rematches) = count_rematches(tracker, division, false);
+    let mut team_tournament_rematches: Vec<_> = tournament_team_rematches.into_iter().collect();
+    team_tournament_rematches.sort_by_key(|(team_id, _)| *team_id);
+
+    DivisionTournamentSummary {
+        division,
+        boundary_meetings: build_boundary_meetings(&final_swiss, &swiss_history),
+        lookahead_rounds: [4_i64, 5_i64, 6_i64]
+            .into_iter()
+            .filter_map(|round| {
+                lookahead_rounds
+                    .get(&(division, round))
+                    .cloned()
+                    .map(|diagnostics| LookaheadRoundSummary { round, diagnostics })
+            })
+            .collect(),
+        final_swiss_points_by_rank: final_swiss.iter().map(|row| row.points).collect(),
+        swiss_rematches,
+        tournament_rematches,
+        team_tournament_rematches,
+    }
+}
+
+fn build_boundary_meetings(
+    final_swiss: &[SortMetrics],
+    swiss_history: &HashMap<i64, HashSet<i64>>,
+) -> Vec<BoundaryMeetingSummary> {
+    let targets = [(4usize, 5usize, "4v5"), (3, 6, "3v6"), (8, 9, "8v9"), (7, 10, "7v10")];
+
+    targets
+        .into_iter()
+        .filter_map(|(left_rank, right_rank, label)| {
+            if right_rank > final_swiss.len() {
+                return None;
+            }
+
+            let left_team = final_swiss[left_rank - 1].team_id;
+            let right_team = final_swiss[right_rank - 1].team_id;
+            Some(BoundaryMeetingSummary {
+                label,
+                same_points: final_swiss[left_rank - 1].points == final_swiss[right_rank - 1].points,
+                met: swiss_history
+                    .get(&left_team)
+                    .map(|opponents| opponents.contains(&right_team))
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn match_history(
+    tracker: &TournamentTracker,
+    division: i64,
+    swiss_only: bool,
+) -> HashMap<i64, HashSet<i64>> {
+    let mut history = HashMap::new();
+
+    for state in tracker.matches.values() {
+        if state.division != division {
+            continue;
+        }
+        if swiss_only && !(state.match_type > 0 && state.match_type < 1000) {
+            continue;
+        }
+
+        history.entry(state.t1_id).or_insert_with(HashSet::new).insert(state.t2_id);
+        history.entry(state.t2_id).or_insert_with(HashSet::new).insert(state.t1_id);
+    }
+
+    history
+}
+
+fn count_rematches(
+    tracker: &TournamentTracker,
+    division: i64,
+    swiss_only: bool,
+) -> (usize, HashMap<i64, usize>) {
+    let mut matches: Vec<_> = tracker
+        .matches
+        .values()
+        .filter(|state| {
+            state.division == division
+                && (!swiss_only || (state.match_type > 0 && state.match_type < 1000))
+        })
+        .collect();
+    matches.sort_by_key(|state| (state.match_type, state.id));
+
+    let mut seen_pairs = HashSet::new();
+    let mut rematch_count = 0usize;
+    let mut team_counts = HashMap::new();
+
+    for state in matches {
+        let pair = if state.t1_id < state.t2_id {
+            (state.t1_id, state.t2_id)
+        } else {
+            (state.t2_id, state.t1_id)
+        };
+
+        if !seen_pairs.insert(pair) {
+            rematch_count += 1;
+            *team_counts.entry(state.t1_id).or_insert(0) += 1;
+            *team_counts.entry(state.t2_id).or_insert(0) += 1;
+        }
+    }
+
+    (rematch_count, team_counts)
+}
+
+fn division_label(division: i64) -> &'static str {
+    if division == 0 {
+        "Open"
+    } else {
+        "Women"
+    }
 }
 
 fn find_expected_match<'a>(

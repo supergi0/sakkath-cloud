@@ -10,6 +10,14 @@ pub(crate) struct RunConfig {
 }
 
 impl RunConfig {
+    pub(crate) fn from_itr(itr: u64) -> TestResult<Self> {
+        if itr == 0 {
+            return Err("itr must be greater than zero".into());
+        }
+
+        Ok(Self::build(itr))
+    }
+
     pub(crate) fn from_process_args<I>(args: I) -> TestResult<Self>
     where
         I: IntoIterator<Item = String>,
@@ -42,12 +50,7 @@ impl RunConfig {
             }
         }
 
-        let seed = 0x5A_CC_A7_u64 ^ itr.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let log_dir = Self::repo_root()
-            .join("logs")
-            .join(format!("test_tournament_itr{itr}"));
-
-        Ok(Self { itr, seed, log_dir })
+        Ok(Self::build(itr))
     }
 
     pub(crate) fn repo_root() -> PathBuf {
@@ -65,6 +68,15 @@ impl RunConfig {
         scenario.bytes().fold(self.seed, |seed, byte| {
             seed.rotate_left(5) ^ u64::from(byte)
         })
+    }
+
+    fn build(itr: u64) -> Self {
+        let seed = 0x5A_CC_A7_u64 ^ itr.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let log_dir = Self::repo_root()
+            .join("logs")
+            .join(format!("test_tournament_itr{itr}"));
+
+        Self { itr, seed, log_dir }
     }
 }
 
