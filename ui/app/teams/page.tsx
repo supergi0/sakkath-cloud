@@ -66,12 +66,16 @@ interface TeamSeedTimelinePoint {
 }
 
 type TabType = 'matches' | 'players' | 'timeline';
-type PlayerSortField = 'goals' | 'assists' | 'blocks' | 'turnovers';
+type PlayerSortField = 'total' | 'goals' | 'assists' | 'blocks' | 'turnovers';
 interface TeamsPreferences {
   activeTab: TabType;
 }
 
 const TEAMS_PREFS_KEY = 'sakkath:teams:preferences';
+
+function getTotalStat(player: Pick<PlayerStat, 'goals' | 'assists' | 'blocks' | 'turnovers'>) {
+  return player.goals + player.assists + player.blocks - player.turnovers;
+}
 
 function getInitialActiveTab(): TabType {
   if (typeof window === 'undefined') {
@@ -103,7 +107,7 @@ function TeamContent() {
   const [seedTimeline, setSeedTimeline] = useState<TeamSeedTimelinePoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>(getInitialActiveTab);
-  const [playerSortField, setPlayerSortField] = useState<PlayerSortField>('goals');
+  const [playerSortField, setPlayerSortField] = useState<PlayerSortField>('total');
   const [playerSortDir, setPlayerSortDir] = useState<'asc' | 'desc'>('desc');
   const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
   const teamId = searchParams.get('team_id') || '1';
@@ -437,6 +441,7 @@ function TeamContent() {
                   <tr className="border-b border-gray-200 dark:border-slate-700">
                     <th className="w-[168px] py-3 px-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
                     {([
+                      ['total', 'Tot'],
                       ['goals', 'Gls'],
                       ['assists', 'Ast'],
                       ['blocks', 'Blk'],
@@ -468,7 +473,7 @@ function TeamContent() {
                 <tbody>
                   {[...playerStats]
                     .sort((a, b) => {
-                      const diff = a[playerSortField] - b[playerSortField];
+                      const diff = (playerSortField === 'total' ? getTotalStat(a) : a[playerSortField]) - (playerSortField === 'total' ? getTotalStat(b) : b[playerSortField]);
                       return playerSortDir === 'asc' ? diff : -diff;
                     })
                     .map((player) => (
@@ -484,6 +489,7 @@ function TeamContent() {
                           {player.is_spirit_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-purple-500 text-white text-xs font-bold">SC</span>}
                         </div>
                       </td>
+                      <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{getTotalStat(player)}</Text></td>
                       <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.goals}</Text></td>
                       <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.assists}</Text></td>
                       <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.blocks}</Text></td>

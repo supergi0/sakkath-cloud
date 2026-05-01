@@ -1,3 +1,0 @@
-[alias]
-tournament = ["test", "--manifest-path", "api/Cargo.toml", "--test", "tournament", "--"]
-iterations = ["test", "--manifest-path", "api/Cargo.toml", "--test", "iterations", "--"]

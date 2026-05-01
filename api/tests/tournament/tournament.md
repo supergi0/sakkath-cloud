@@ -22,7 +22,7 @@ Supported forms:
 - `--itr=1`
 - `itr=1`
 
-`itr` changes the seeded random winners used during swiss and playoff play while remaining reproducible for the same value. Swiss simulation also injects a deterministic `20%` draw chance, so the same `itr` reproduces the same drawn matches too.
+`itr` changes the seeded random winners used during swiss and elimination play while remaining reproducible for the same value. Swiss simulation also injects a deterministic `20%` draw chance, so the same `itr` reproduces the same drawn matches too.
 
 ## Logging And Artifacts
 
@@ -62,11 +62,13 @@ The harness copies `sakkath.db` and its WAL file into a temp directory for each 
 - Loads all swiss rounds across both divisions
 - Uses seeded randomness to decide winners and a deterministic `20%` swiss draw rate
 - Validates standings and rematch-aware swiss pairings after each round
-- Runs playoff rounds `1001` and `1002`
+- Runs Open playoff rounds `1001` and `1002`, while Women goes straight from swiss standings to direct `1002` placement finals
 - Verifies final public stats, team match histories, grid seed labels, and standings state
 - Verifies `/v1/standings` reflects playoff seed-holder swaps after round `1001` and final placement swaps after round `1002`
 - Verifies `/v1/teams/:id` `current_rank` matches the same API-visible final placement order
 - Verifies elimination matches contribute to displayed `wins`, `losses`, `points_for`, `points_against`, `games_played`, and all-match spirit average while placement order still follows seed swapping instead of swiss sorting
+- Reports per-division mean/median/lowest/highest time gaps between same-day consecutive games in both the single-run log and the iterations summary, normalized to the current published slot layout instead of any legacy match times copied from `sakkath.db`
+- Reports a ground-distribution randomness score too: each team gets a per-tournament MSD across `Ground 1`-`Ground 4` versus its ideal even split, the tournament score is the mean of those team MSD values, and the iterations summary reports the mean tournament score across runs
 
 ## Design Rules
 

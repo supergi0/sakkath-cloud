@@ -156,6 +156,8 @@ struct VolunteerAccess {
 
 type LegacySpiritMatchInfo = (i64, i64, Option<i64>, Option<i64>, Option<i64>);
 
+const INDIA_UTC_OFFSET_SECONDS: i32 = 5 * 60 * 60 + 30 * 60;
+
 fn reporting_round_label(match_type: i64) -> &'static str {
     match match_type {
         1 => "Round 1",
@@ -180,6 +182,15 @@ fn map_reporting_round_setting(row: ReportingRoundSettingRow) -> ReportingRoundS
 
 fn record_match_info(key: &'static str, details: serde_json::Value) {
     crate::telemetry::record_info(key, details.to_string());
+}
+
+fn india_now_rfc3339() -> String {
+    chrono::Utc::now()
+        .with_timezone(
+            &chrono::FixedOffset::east_opt(INDIA_UTC_OFFSET_SECONDS)
+                .expect("valid India timezone offset"),
+        )
+        .to_rfc3339()
 }
 
 fn match_error_status(
@@ -210,11 +221,11 @@ async fn load_match_timing_snapshot(
         SELECT
             CASE
                 WHEN started_at IS NULL THEN NULL
-                ELSE strftime('%Y-%m-%dT%H:%M:%SZ', started_at)
+                ELSE strftime('%Y-%m-%dT%H:%M:%S', started_at, '+5 hours', '+30 minutes') || '+05:30'
             END AS started_at,
             COALESCE(
-                strftime('%Y-%m-%dT%H:%M:%SZ', updated_at),
-                strftime('%Y-%m-%dT%H:%M:%SZ', created_at),
+                strftime('%Y-%m-%dT%H:%M:%S', updated_at, '+5 hours', '+30 minutes') || '+05:30',
+                strftime('%Y-%m-%dT%H:%M:%S', created_at, '+5 hours', '+30 minutes') || '+05:30',
                 ''
             ) AS updated_at
         FROM matches
@@ -227,7 +238,7 @@ async fn load_match_timing_snapshot(
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let (started_at, updated_at) = timing.ok_or(axum::http::StatusCode::NOT_FOUND)?;
-    Ok((started_at, updated_at, chrono::Utc::now().to_rfc3339()))
+    Ok((started_at, updated_at, india_now_rfc3339()))
 }
 
 pub async fn get_reporting_round_settings(
@@ -269,7 +280,7 @@ pub async fn stream_live_updates(
         if let Some(object) = event_data.as_object_mut() {
             object.insert(
                 "server_time".to_string(),
-                serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+                serde_json::Value::String(india_now_rfc3339()),
             );
         }
 
@@ -398,7 +409,10 @@ pub async fn get_match_events(
                COALESCE(me.team_id, u.team_id) as team_id, 
                me.event_type, 
              me.actor_user_id,
-               COALESCE(me.created_at, '') as created_at
+             COALESCE(
+                 strftime('%Y-%m-%dT%H:%M:%S', me.created_at, '+5 hours', '+30 minutes') || '+05:30',
+                 ''
+             ) as created_at
         FROM match_events me
         LEFT JOIN users u ON u.id = me.player_id
         WHERE me.match_id = ?
@@ -423,8 +437,15 @@ pub async fn get_match_detail(
                m.t1_spirit, m.t2_spirit, t1.division, t2.division, t1.small_logo, t2.small_logo, m.possession,
                m.type, COALESCE(rrs.is_enabled, 0) as reporting_enabled,
              COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time, m.stream_url,
-             CASE WHEN m.started_at IS NULL THEN NULL ELSE strftime('%Y-%m-%dT%H:%M:%SZ', m.started_at) END as started_at,
-             COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', m.updated_at), strftime('%Y-%m-%dT%H:%M:%SZ', m.created_at), '') as updated_at
+                         CASE
+                                 WHEN m.started_at IS NULL THEN NULL
+                                 ELSE strftime('%Y-%m-%dT%H:%M:%S', m.started_at, '+5 hours', '+30 minutes') || '+05:30'
+                         END as started_at,
+                         COALESCE(
+                                 strftime('%Y-%m-%dT%H:%M:%S', m.updated_at, '+5 hours', '+30 minutes') || '+05:30',
+                                 strftime('%Y-%m-%dT%H:%M:%S', m.created_at, '+5 hours', '+30 minutes') || '+05:30',
+                                 ''
+                         ) as updated_at
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
@@ -511,7 +532,7 @@ pub async fn get_match_detail(
         ),
     };
 
-    let server_time = chrono::Utc::now().to_rfc3339();
+    let server_time = india_now_rfc3339();
 
     let players = sqlx::query_as::<_, MatchPlayer>(
         "SELECT id, name, common_name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
@@ -524,7 +545,10 @@ pub async fn get_match_detail(
                COALESCE(me.team_id, u.team_id) as team_id, 
                me.event_type,
              me.actor_user_id,
-               COALESCE(me.created_at, '') as created_at
+             COALESCE(
+                 strftime('%Y-%m-%dT%H:%M:%S', me.created_at, '+5 hours', '+30 minutes') || '+05:30',
+                 ''
+             ) as created_at
         FROM match_events me 
         LEFT JOIN users u ON u.id = me.player_id
         WHERE me.match_id = ? ORDER BY me.created_at ASC

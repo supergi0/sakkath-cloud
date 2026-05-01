@@ -186,37 +186,32 @@ export function HomeContent() {
     <div className="min-h-screen px-4 py-4 md:px-0">
       <div className="mx-auto max-w-7xl">
         <div className="mb-5 rounded-sm bg-white p-6 dark:bg-slate-900">
-          <div className="md:grid md:grid-cols-[minmax(260px,320px)_1fr_minmax(220px,280px)] md:items-stretch md:gap-6">
-            <div className="mb-6 flex w-full items-stretch justify-between gap-4 md:hidden">
-              <Link href="/" className="flex min-w-0 flex-1 items-center justify-center p-2">
-                <div className="relative h-[112px] w-full max-w-[260px] transition-opacity hover:opacity-80">
+          <div className="md:grid md:grid-cols-[minmax(360px,1.35fr)_minmax(320px,1fr)] md:items-center md:gap-8">
+            <div className="mb-6 md:hidden">
+              <Link href="/" className="flex w-full items-center justify-center p-2">
+                <div className="relative h-[148px] w-full max-w-[420px] transition-opacity hover:opacity-80">
                   {mounted && (
                     <Image src="/sakkath.png" alt="Sakkath Ultimate Open" fill className="object-contain" priority />
                   )}
                 </div>
               </Link>
-              <div className="flex w-[132px] items-center justify-center rounded-sm border border-gray-200 bg-gray-100 p-4 text-center dark:border-slate-700 dark:bg-slate-800">
-                <Text variant="secondary" className="text-sm font-medium leading-snug">
-                  Title Sponsor
-                </Text>
-              </div>
             </div>
 
-            <div className="hidden min-h-[220px] items-center justify-center p-2 md:flex">
-              <Link href="/" className="relative h-[210px] w-full transition-opacity hover:opacity-80">
+            <div className="hidden min-h-[230px] items-center justify-center p-2 md:flex">
+              <Link href="/" className="relative h-[150px] w-full transition-opacity hover:opacity-80">
                 {mounted && (
                   <Image src="/sakkath.png" alt="Sakkath Ultimate Open" fill className="object-contain" priority />
                 )}
               </Link>
             </div>
 
-            <div className="min-w-0 text-center">
-              <Link href="/" className="inline-block transition-colors hover:text-gray-700 dark:hover:text-gray-200">
-                <Text as="h1" variant="primary" className="mb-2 text-center text-2xl font-semibold">
+            <div className="min-w-0 text-center md:flex md:flex-col md:justify-center md:text-left">
+              <Link href="/" className="inline-block transition-colors hover:text-gray-700 dark:hover:text-gray-200 md:self-start">
+                <Text as="h1" variant="primary" className="mb-2 text-center text-2xl font-semibold md:text-left md:text-3xl">
                   Sakkath Ultimate Open 2026
                 </Text>
               </Link>
-              <div className="flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm">
+              <div className="flex flex-wrap justify-center gap-x-4 gap-y-2 text-sm md:justify-start">
                 <Text variant="secondary" className="flex items-center justify-center gap-1">
                   <Calendar className="h-4 w-4" />
                   May 22 - May 24, 2026
@@ -231,8 +226,8 @@ export function HomeContent() {
                 </Text>
               </div>
 
-              <div className="mt-6 flex flex-wrap justify-center gap-3 border-t border-gray-200 pt-6 dark:border-slate-700">
-                <div className="hidden w-full flex-wrap justify-center gap-3 sm:flex">
+              <div className="mt-6 flex flex-wrap justify-center gap-3 border-t border-gray-200 pt-6 dark:border-slate-700 md:justify-start">
+                <div className="hidden w-full flex-wrap justify-center gap-3 sm:flex md:justify-start">
                   {[
                     { icon: Users, value: stats.teams.toString(), label: 'Teams' },
                     { icon: Users, value: stats.players.toString(), label: 'Players' },
@@ -288,14 +283,6 @@ export function HomeContent() {
                   </div>
                 </div>
               </div>
-
-
-            </div>
-
-            <div className="hidden min-h-[220px] items-center justify-center rounded-sm border border-gray-200 bg-gray-100 p-6 text-center dark:border-slate-700 dark:bg-slate-800 md:flex">
-              <Text variant="secondary" className="text-xl font-medium leading-snug">
-                Title Sponsor
-              </Text>
             </div>
           </div>
         </div>

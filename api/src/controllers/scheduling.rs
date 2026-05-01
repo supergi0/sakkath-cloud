@@ -3,17 +3,14 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::helpers::{cache, rounds, sorting};
 
 const FIELD_COUNT: usize = 4;
-const SWISS_MATCH_MINUTES: i64 = 60;
-const SWISS_BREAK_MINUTES: i64 = 15;
-const PLAYOFF_MATCH_MINUTES: i64 = 75;
-const PLAYOFF_BREAK_MINUTES: i64 = 15;
 const ROW_OVERRIDE_CACHE_KEY: &str = "schedule:row_overrides";
 const ROW_OVERRIDE_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 
@@ -160,6 +157,7 @@ struct RowTimeOverride {
 struct SlotTemplate {
     field_index: usize,
     division: i64,
+    match_type: i64,
     slot_code: String,
 }
 
@@ -169,7 +167,6 @@ struct RowTemplate {
     day_key: &'static str,
     day_label: &'static str,
     label: String,
-    match_type: i64,
     date: NaiveDate,
     day_start: NaiveTime,
     day_end: NaiveTime,
@@ -723,14 +720,25 @@ pub async fn update_schedule_row(
     let old_time = row.start_at.format("%Y-%m-%d %H:%M:%S").to_string();
     let new_time = new_start_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let field_ids: Vec<i64> = fields.iter().map(|field| field.id).collect();
+    let field_ids: Vec<i64> = row
+        .slots
+        .iter()
+        .filter_map(|slot| {
+            fields
+                .iter()
+                .find(|field| field.label == format!("G{}", slot.field_index))
+                .map(|field| field.id)
+        })
+        .collect();
+    if field_ids.is_empty() {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
     let placeholders = vec!["?"; field_ids.len()].join(",");
     let query = format!(
-        "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND type = ? AND time = ? AND field_id IN ({placeholders})"
+        "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND time = ? AND field_id IN ({placeholders})"
     );
     let mut update_query = sqlx::query(&query)
         .bind(&new_time)
-        .bind(row.match_type)
         .bind(&old_time);
     for field_id in field_ids {
         update_query = update_query.bind(field_id);
@@ -787,15 +795,15 @@ pub async fn move_schedule_match(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let target_slot = target_row
+    target_row
         .slots
         .iter()
-        .find(|slot| slot.field_index == field_index && slot.division == division)
+        .find(|slot| {
+            slot.field_index == field_index
+                && slot.division == division
+                && slot.match_type == match_type
+        })
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
-
-    if target_row.match_type != match_type || target_slot.division != division {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
 
     let target_time = target_row.start_at.format("%Y-%m-%d %H:%M:%S").to_string();
     let source_time = source_time.ok_or(axum::http::StatusCode::CONFLICT)?;
@@ -1235,6 +1243,10 @@ async fn create_playoffs_if_needed(
     db: &sqlx::SqlitePool,
     division: i64,
 ) -> Result<bool, sqlx::Error> {
+    if division == 1 {
+        return Ok(false);
+    }
+
     let existing_playoffs: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL",
     )
@@ -1306,27 +1318,32 @@ async fn create_finals_if_needed(
         return Ok(false);
     }
 
-    let playoff_stats: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m
-           JOIN teams t ON m.t1_id = t.id
-           WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(db)
-    .await?;
-
-    if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
-        return Ok(false);
-    }
-
     let sorted = sorting::get_sorted_standings(db, division).await;
-    let playoff_results = fetch_completed_playoff_results(db, division).await?;
-    if playoff_results.len() as i64 != playoff_stats.0 {
-        return Ok(false);
-    }
-    let final_pairings =
-        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
+    let final_pairings = if division == 1 {
+        rounds::build_direct_final_pairings(&sorted)
+    } else {
+        let playoff_stats: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
+               FROM matches m
+               JOIN teams t ON m.t1_id = t.id
+               WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#,
+        )
+        .bind(division)
+        .fetch_one(db)
+        .await?;
+
+        if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
+            return Ok(false);
+        }
+
+        let playoff_results = fetch_completed_playoff_results(db, division).await?;
+        if playoff_results.len() as i64 != playoff_stats.0 {
+            return Ok(false);
+        }
+
+        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results)
+    };
+
     if final_pairings.is_empty() {
         return Ok(false);
     }
@@ -1350,7 +1367,12 @@ async fn insert_pairings_into_slots(
         )));
     }
 
-    for (pairing, (field_id, start_time)) in pairings.iter().zip(slots.iter()) {
+    let scheduled_pairings = {
+        let mut rng = rand::rng();
+        arrange_pairings_for_slots(pairings, match_type, &mut rng)
+    };
+
+    for (pairing, (field_id, start_time)) in scheduled_pairings.iter().zip(slots.iter()) {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, ?)",
         )
@@ -1367,6 +1389,18 @@ async fn insert_pairings_into_slots(
     Ok(())
 }
 
+fn arrange_pairings_for_slots<R: rand::Rng + ?Sized>(
+    pairings: &[rounds::Pairing],
+    match_type: i64,
+    rng: &mut R,
+) -> Vec<rounds::Pairing> {
+    let mut scheduled_pairings = pairings.to_vec();
+    if match_type < 1000 {
+        scheduled_pairings.shuffle(rng);
+    }
+    scheduled_pairings
+}
+
 async fn get_slot_assignments(
     db: &sqlx::SqlitePool,
     division: i64,
@@ -1381,8 +1415,12 @@ async fn get_slot_assignments(
     }
 
     let mut slots = Vec::new();
-    for row in rows.iter().filter(|row| row.match_type == match_type) {
-        for slot in row.slots.iter().filter(|slot| slot.division == division) {
+    for row in &rows {
+        for slot in row
+            .slots
+            .iter()
+            .filter(|slot| slot.division == division && slot.match_type == match_type)
+        {
             let field = fields
                 .iter()
                 .find(|field| field.label == format!("G{}", slot.field_index))
@@ -1407,14 +1445,549 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     let saturday = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
     let sunday = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
 
-    let mut rows = Vec::new();
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 1));
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 2));
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 3));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 4));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 5));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 6));
-    rows.extend(build_playoff_rows("sun", "Sunday", sunday));
+    let friday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
+    let friday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
+    let saturday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
+    let saturday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
+    let sunday_start = NaiveTime::from_hms_opt(6, 30, 0).unwrap();
+    let sunday_end = NaiveTime::from_hms_opt(18, 5, 0).unwrap();
+
+    let mut rows = vec![
+        build_row(
+            "fri-r1-a",
+            "fri",
+            "Friday",
+            "Round 1 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "06:00",
+            "07:00",
+            vec![
+                open_slot(1, 1, 1),
+                open_slot(2, 1, 2),
+                open_slot(3, 1, 3),
+                open_slot(4, 1, 4),
+            ],
+        ),
+        build_row(
+            "fri-r1-b",
+            "fri",
+            "Friday",
+            "Round 1 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "07:15",
+            "08:15",
+            vec![
+                open_slot(1, 1, 5),
+                open_slot(2, 1, 6),
+                open_slot(3, 1, 7),
+                women_slot(4, 1, 1),
+            ],
+        ),
+        build_row(
+            "fri-r1-c",
+            "fri",
+            "Friday",
+            "Round 1 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "08:30",
+            "09:45",
+            vec![
+                women_slot(1, 1, 2),
+                women_slot(2, 1, 3),
+                women_slot(3, 1, 4),
+                women_slot(4, 1, 5),
+            ],
+        ),
+        build_row(
+            "fri-r1-d",
+            "fri",
+            "Friday",
+            "Round 1 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "10:00",
+            "11:00",
+            vec![
+                open_slot(1, 1, 8),
+                open_slot(2, 1, 9),
+                open_slot(3, 1, 10),
+                open_slot(4, 1, 11),
+            ],
+        ),
+        build_row(
+            "fri-r2-a",
+            "fri",
+            "Friday",
+            "Round 2 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "11:15",
+            "12:30",
+            vec![
+                women_slot(1, 2, 1),
+                women_slot(2, 2, 2),
+                women_slot(3, 2, 3),
+                women_slot(4, 2, 4),
+            ],
+        ),
+        build_row(
+            "fri-r2-b",
+            "fri",
+            "Friday",
+            "Round 2 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "12:45",
+            "13:45",
+            vec![
+                open_slot(1, 2, 1),
+                open_slot(2, 2, 2),
+                women_slot(3, 2, 5),
+                open_slot(4, 2, 3),
+            ],
+        ),
+        build_row(
+            "fri-r2-c",
+            "fri",
+            "Friday",
+            "Round 2 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "14:00",
+            "15:00",
+            vec![
+                open_slot(1, 2, 4),
+                open_slot(2, 2, 5),
+                open_slot(3, 2, 6),
+                open_slot(4, 2, 7),
+            ],
+        ),
+        build_row(
+            "fri-r2-d",
+            "fri",
+            "Friday",
+            "Round 2 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "15:15",
+            "16:15",
+            vec![
+                open_slot(1, 2, 8),
+                open_slot(2, 2, 9),
+                open_slot(3, 2, 10),
+                open_slot(4, 2, 11),
+            ],
+        ),
+        build_row(
+            "fri-r3-a",
+            "fri",
+            "Friday",
+            "Round 3 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "16:30",
+            "17:45",
+            vec![
+                women_slot(1, 3, 1),
+                women_slot(2, 3, 2),
+                women_slot(3, 3, 3),
+                women_slot(4, 3, 4),
+            ],
+        ),
+        build_row(
+            "fri-r3-b",
+            "fri",
+            "Friday",
+            "Round 3 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "18:00",
+            "19:00",
+            vec![
+                open_slot(1, 3, 1),
+                women_slot(2, 3, 5),
+                open_slot(3, 3, 2),
+                open_slot(4, 3, 3),
+            ],
+        ),
+        build_row(
+            "fri-r3-c",
+            "fri",
+            "Friday",
+            "Round 3 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "19:15",
+            "20:15",
+            vec![
+                open_slot(1, 3, 4),
+                open_slot(2, 3, 5),
+                open_slot(3, 3, 6),
+                open_slot(4, 3, 7),
+            ],
+        ),
+        build_row(
+            "fri-r3-d",
+            "fri",
+            "Friday",
+            "Round 3 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "20:30",
+            "21:30",
+            vec![
+                open_slot(1, 3, 8),
+                open_slot(2, 3, 9),
+                open_slot(3, 3, 10),
+                open_slot(4, 3, 11),
+            ],
+        ),
+        build_row(
+            "sat-r4-a",
+            "sat",
+            "Saturday",
+            "Round 4 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "06:00",
+            "07:00",
+            vec![
+                open_slot(1, 4, 1),
+                open_slot(2, 4, 2),
+                open_slot(3, 4, 3),
+                open_slot(4, 4, 4),
+            ],
+        ),
+        build_row(
+            "sat-r4-b",
+            "sat",
+            "Saturday",
+            "Round 4 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "07:15",
+            "08:15",
+            vec![
+                women_slot(1, 4, 1),
+                open_slot(2, 4, 5),
+                open_slot(3, 4, 6),
+                open_slot(4, 4, 7),
+            ],
+        ),
+        build_row(
+            "sat-r4-c",
+            "sat",
+            "Saturday",
+            "Round 4 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "08:30",
+            "09:45",
+            vec![
+                women_slot(1, 4, 2),
+                women_slot(2, 4, 3),
+                women_slot(3, 4, 4),
+                women_slot(4, 4, 5),
+            ],
+        ),
+        build_row(
+            "sat-r4-d",
+            "sat",
+            "Saturday",
+            "Round 4 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "10:00",
+            "11:00",
+            vec![
+                open_slot(1, 4, 8),
+                open_slot(2, 4, 9),
+                open_slot(3, 4, 10),
+                open_slot(4, 4, 11),
+            ],
+        ),
+        build_row(
+            "sat-r5-a",
+            "sat",
+            "Saturday",
+            "Round 5 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "11:15",
+            "12:30",
+            vec![
+                women_slot(1, 5, 1),
+                women_slot(2, 5, 2),
+                women_slot(3, 5, 3),
+                women_slot(4, 5, 4),
+            ],
+        ),
+        build_row(
+            "sat-r5-b",
+            "sat",
+            "Saturday",
+            "Round 5 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "12:45",
+            "13:45",
+            vec![
+                open_slot(1, 5, 1),
+                women_slot(2, 5, 5),
+                open_slot(3, 5, 2),
+                open_slot(4, 5, 3),
+            ],
+        ),
+        build_row(
+            "sat-r5-c",
+            "sat",
+            "Saturday",
+            "Round 5 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "14:00",
+            "15:00",
+            vec![
+                open_slot(1, 5, 4),
+                open_slot(2, 5, 5),
+                open_slot(3, 5, 6),
+                open_slot(4, 5, 7),
+            ],
+        ),
+        build_row(
+            "sat-r5-d",
+            "sat",
+            "Saturday",
+            "Round 5 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "15:15",
+            "16:15",
+            vec![
+                open_slot(1, 5, 8),
+                open_slot(2, 5, 9),
+                open_slot(3, 5, 10),
+                open_slot(4, 5, 11),
+            ],
+        ),
+        build_row(
+            "sat-r6-a",
+            "sat",
+            "Saturday",
+            "Round 6 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "16:30",
+            "17:45",
+            vec![
+                women_slot(1, 6, 1),
+                women_slot(2, 6, 2),
+                women_slot(3, 6, 3),
+                women_slot(4, 6, 4),
+            ],
+        ),
+        build_row(
+            "sat-r6-b",
+            "sat",
+            "Saturday",
+            "Round 6 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "18:00",
+            "19:00",
+            vec![
+                open_slot(1, 6, 1),
+                open_slot(2, 6, 2),
+                women_slot(3, 6, 5),
+                open_slot(4, 6, 3),
+            ],
+        ),
+        build_row(
+            "sat-r6-c",
+            "sat",
+            "Saturday",
+            "Round 6 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "19:15",
+            "20:15",
+            vec![
+                open_slot(1, 6, 4),
+                open_slot(2, 6, 5),
+                open_slot(3, 6, 6),
+                open_slot(4, 6, 7),
+            ],
+        ),
+        build_row(
+            "sat-r6-d",
+            "sat",
+            "Saturday",
+            "Round 6 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "20:30",
+            "21:30",
+            vec![
+                open_slot(1, 6, 8),
+                open_slot(2, 6, 9),
+                open_slot(3, 6, 10),
+                open_slot(4, 6, 11),
+            ],
+        ),
+        build_row(
+            "sun-p1-a",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row A",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "06:30",
+            "07:45",
+            vec![
+                playoff_open_slot(1, 1, 5),
+                playoff_open_slot(2, 1, 6),
+                playoff_open_slot(3, 1, 7),
+                playoff_open_slot(4, 1, 8),
+            ],
+        ),
+        build_row(
+            "sun-p1-b",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row B",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "08:00",
+            "09:15",
+            vec![
+                playoff_open_slot(1, 1, 3),
+                playoff_open_slot(2, 1, 4),
+                playoff_open_slot(3, 1, 9),
+                playoff_open_slot(4, 1, 10),
+            ],
+        ),
+        build_row(
+            "sun-p1-c",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row C",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "09:30",
+            "10:45",
+            vec![
+                playoff_open_slot(1, 1, 1),
+                playoff_open_slot(2, 1, 2),
+                playoff_open_slot(3, 1, 11),
+                playoff_women_slot(4, 2, 5),
+            ],
+        ),
+        build_row(
+            "sun-p2-a",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row A",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "11:00",
+            "12:15",
+            vec![
+                playoff_open_slot(1, 2, 4),
+                playoff_open_slot(2, 2, 5),
+                playoff_women_slot(3, 2, 4),
+                playoff_open_slot(4, 2, 6),
+            ],
+        ),
+        build_row(
+            "sun-p2-b",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row B",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "12:30",
+            "13:45",
+            vec![
+                playoff_open_slot(1, 2, 3),
+                playoff_women_slot(2, 2, 3),
+                playoff_open_slot(3, 2, 7),
+                playoff_open_slot(4, 2, 8),
+            ],
+        ),
+        build_row(
+            "sun-p2-c",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row C",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "14:00",
+            "15:15",
+            vec![
+                playoff_women_slot(1, 2, 2),
+                playoff_open_slot(2, 2, 2),
+                playoff_open_slot(3, 2, 9),
+                playoff_open_slot(4, 2, 10),
+            ],
+        ),
+        build_row(
+            "sun-p2-d",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row D",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "15:30",
+            "16:45",
+            vec![playoff_open_slot(1, 2, 1)],
+        ),
+        build_row(
+            "sun-p2-e",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row E",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "16:50",
+            "18:05",
+            vec![playoff_women_slot(1, 2, 1)],
+        ),
+    ];
 
     for row in &mut rows {
         if let Some(override_value) = overrides.get(&row.key) {
@@ -1436,179 +2009,33 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     rows
 }
 
-fn build_swiss_rows(
+fn build_row(
+    key: &str,
     day_key: &'static str,
     day_label: &'static str,
+    label: &str,
     date: NaiveDate,
-    round: i64,
-) -> Vec<RowTemplate> {
-    let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
-    let round_offset =
-        Duration::minutes(round_offset(round) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
+    day_start: NaiveTime,
+    day_end: NaiveTime,
+    start_time: &str,
+    end_time: &str,
+    slots: Vec<SlotTemplate>,
+) -> RowTemplate {
+    let start_at = NaiveDateTime::new(date, parse_clock(start_time).expect("valid row start"));
+    let end_at = NaiveDateTime::new(date, parse_clock(end_time).expect("valid row end"));
 
-    let mut rows = Vec::new();
-    for row_index in 0..4 {
-        let start_at = base
-            + round_offset
-            + Duration::minutes((row_index as i64) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
-        let end_at = start_at + Duration::minutes(SWISS_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-r{round}-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Round {round} · Row {}", row_name(row_index)),
-            match_type: round,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
-            duration_minutes: SWISS_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: swiss_row_slots(round, row_index),
-        });
-    }
-    rows
-}
-
-fn build_playoff_rows(
-    day_key: &'static str,
-    day_label: &'static str,
-    date: NaiveDate,
-) -> Vec<RowTemplate> {
-    let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
-    let mut rows = Vec::new();
-
-    for row_index in 0..4 {
-        let start_at = base
-            + Duration::minutes(
-                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
-            );
-        let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-p1-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Playoff 1 · Row {}", row_name(row_index)),
-            match_type: 1001,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(18, 30, 0).unwrap(),
-            duration_minutes: PLAYOFF_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: playoff_one_row_slots(row_index),
-        });
-    }
-
-    let playoff_two_base =
-        base + Duration::minutes(4 * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
-    for row_index in 0..4 {
-        let start_at = playoff_two_base
-            + Duration::minutes(
-                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
-            );
-        let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-p2-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Playoff 2 · Row {}", row_name(row_index)),
-            match_type: 1002,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(18, 30, 0).unwrap(),
-            duration_minutes: PLAYOFF_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: playoff_two_row_slots(row_index),
-        });
-    }
-
-    rows
-}
-
-fn swiss_row_slots(round: i64, row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            open_slot(1, round, 1),
-            open_slot(2, round, 2),
-            open_slot(3, round, 3),
-            open_slot(4, round, 4),
-        ],
-        1 => vec![
-            open_slot(1, round, 5),
-            open_slot(2, round, 6),
-            open_slot(3, round, 7),
-            open_slot(4, round, 8),
-        ],
-        2 => vec![
-            open_slot(1, round, 9),
-            open_slot(2, round, 10),
-            open_slot(3, round, 11),
-            women_slot(4, round, 1),
-        ],
-        _ => vec![
-            women_slot(1, round, 2),
-            women_slot(2, round, 3),
-            women_slot(3, round, 4),
-            women_slot(4, round, 5),
-        ],
-    }
-}
-
-fn playoff_one_row_slots(row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            playoff_open_slot(1, 1, 1),
-            playoff_open_slot(2, 1, 2),
-            playoff_open_slot(3, 1, 3),
-            playoff_open_slot(4, 1, 4),
-        ],
-        1 => vec![
-            playoff_open_slot(1, 1, 5),
-            playoff_open_slot(2, 1, 6),
-            playoff_open_slot(3, 1, 7),
-            playoff_open_slot(4, 1, 8),
-        ],
-        2 => vec![
-            playoff_open_slot(1, 1, 9),
-            playoff_open_slot(2, 1, 10),
-            playoff_open_slot(3, 1, 11),
-            playoff_women_slot(4, 1, 1),
-        ],
-        _ => vec![
-            playoff_women_slot(1, 1, 2),
-            playoff_women_slot(2, 1, 3),
-            playoff_women_slot(3, 1, 4),
-            playoff_women_slot(4, 1, 5),
-        ],
-    }
-}
-
-fn playoff_two_row_slots(row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            playoff_open_slot(1, 2, 2),
-            playoff_open_slot(2, 2, 3),
-            playoff_open_slot(3, 2, 4),
-            playoff_open_slot(4, 2, 5),
-        ],
-        1 => vec![
-            playoff_open_slot(1, 2, 6),
-            playoff_open_slot(2, 2, 7),
-            playoff_open_slot(3, 2, 8),
-            playoff_women_slot(4, 2, 2),
-        ],
-        2 => vec![
-            playoff_open_slot(1, 2, 1),
-            playoff_women_slot(2, 2, 3),
-            playoff_women_slot(3, 2, 4),
-        ],
-        _ => vec![
-            playoff_women_slot(1, 2, 1),
-            playoff_open_slot(2, 2, 9),
-            playoff_open_slot(3, 2, 10),
-        ],
+    RowTemplate {
+        key: key.to_string(),
+        day_key,
+        day_label,
+        label: label.to_string(),
+        date,
+        day_start,
+        day_end,
+        duration_minutes: minutes_between(start_at.time(), end_at.time()),
+        start_at,
+        end_at,
+        slots,
     }
 }
 
@@ -1616,6 +2043,7 @@ fn open_slot(field_index: usize, round: i64, slot_number: usize) -> SlotTemplate
     SlotTemplate {
         field_index,
         division: 0,
+        match_type: round,
         slot_code: format!("O R{round}-{slot_number:02}"),
     }
 }
@@ -1624,6 +2052,7 @@ fn women_slot(field_index: usize, round: i64, slot_number: usize) -> SlotTemplat
     SlotTemplate {
         field_index,
         division: 1,
+        match_type: round,
         slot_code: format!("W R{round}-{slot_number:02}"),
     }
 }
@@ -1632,6 +2061,7 @@ fn playoff_open_slot(field_index: usize, playoff_round: i64, slot_number: usize)
     SlotTemplate {
         field_index,
         division: 0,
+        match_type: if playoff_round == 1 { 1001 } else { 1002 },
         slot_code: format!("O P{playoff_round}-{slot_number:02}"),
     }
 }
@@ -1640,37 +2070,8 @@ fn playoff_women_slot(field_index: usize, playoff_round: i64, slot_number: usize
     SlotTemplate {
         field_index,
         division: 1,
+        match_type: if playoff_round == 1 { 1001 } else { 1002 },
         slot_code: format!("W P{playoff_round}-{slot_number:02}"),
-    }
-}
-
-fn round_offset(round: i64) -> i64 {
-    match round {
-        1 => 0,
-        2 => 4,
-        3 => 8,
-        4 => 0,
-        5 => 4,
-        6 => 8,
-        _ => 0,
-    }
-}
-
-fn row_suffix(row_index: usize) -> &'static str {
-    match row_index {
-        0 => "a",
-        1 => "b",
-        2 => "c",
-        _ => "d",
-    }
-}
-
-fn row_name(row_index: usize) -> &'static str {
-    match row_index {
-        0 => "A",
-        1 => "B",
-        2 => "C",
-        _ => "D",
     }
 }
 
@@ -1694,12 +2095,12 @@ async fn build_schedule_rank_snapshots(
     let mut needed_final_snapshots = HashSet::new();
     for row in rows {
         for slot in &row.slots {
-            if row.match_type == 1002 {
+            if slot.match_type == 1002 {
                 needed_final_snapshots.insert(slot.division);
             } else {
                 needed_snapshots.insert((
                     slot.division,
-                    standings_round_for_match_type(slot.division, row.match_type),
+                    standings_round_for_match_type(slot.division, slot.match_type),
                 ));
             }
         }
@@ -1803,12 +2204,12 @@ fn materialize_grid(
                 .iter()
                 .find(|slot| slot.field_index == field_index);
             let rank_snapshot_key = slot_template.map(|slot| {
-                if row.match_type == 1002 {
+                if slot.match_type == 1002 {
                     (slot.division, 1002)
                 } else {
                     (
                         slot.division,
-                        standings_round_for_match_type(slot.division, row.match_type),
+                        standings_round_for_match_type(slot.division, slot.match_type),
                     )
                 }
             });
@@ -1819,7 +2220,7 @@ fn materialize_grid(
                         Some(record)
                     } else {
                         fallback_matches
-                            .get_mut(&(slot.division, row.match_type))
+                            .get_mut(&(slot.division, slot.match_type))
                             .and_then(|records| pop_unassigned(records, &row_time, field.id))
                     }
                 }
@@ -1848,7 +2249,7 @@ fn materialize_grid(
                     .unwrap_or_else(|| format!("G{field_index}")),
                 slot_code: slot_template.map(|slot| slot.slot_code.clone()),
                 division: slot_template.map(|slot| slot.division),
-                match_type: slot_template.map(|_| row.match_type),
+                match_type: slot_template.map(|slot| slot.match_type),
                 match_id: matched.as_ref().map(|record| record.id),
                 data: matched.as_ref().map(|record| {
                     [
@@ -1963,6 +2364,33 @@ fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> 
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct ZeroRng;
+
+    impl rand::RngCore for ZeroRng {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+    }
+
+    fn sample_pairings() -> Vec<rounds::Pairing> {
+        vec![
+            rounds::Pairing { t1: 1, t2: 2 },
+            rounds::Pairing { t1: 3, t2: 4 },
+            rounds::Pairing { t1: 5, t2: 6 },
+            rounds::Pairing { t1: 7, t2: 8 },
+            rounds::Pairing { t1: 9, t2: 10 },
+        ]
+    }
+
     #[test]
     fn swiss_round_rows_fit_open_and_women_team_counts() {
         let rows = build_schedule_rows(&HashMap::new());
@@ -1971,13 +2399,15 @@ mod tests {
             let mut open_slots = 0;
             let mut women_slots = 0;
 
-            for row in rows.iter().filter(|row| row.match_type == round) {
-                for slot in &row.slots {
-                    if slot.division == 0 {
+            for slot in rows
+                .iter()
+                .flat_map(|row| row.slots.iter())
+                .filter(|slot| slot.match_type == round)
+            {
+                if slot.division == 0 {
                         open_slots += 1;
                     } else {
                         women_slots += 1;
-                    }
                 }
             }
 
@@ -1998,33 +2428,29 @@ mod tests {
 
         let playoff_one_open = rows
             .iter()
-            .filter(|row| row.match_type == 1001)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 0)
+            .filter(|slot| slot.match_type == 1001 && slot.division == 0)
             .count();
         let playoff_one_women = rows
             .iter()
-            .filter(|row| row.match_type == 1001)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 1)
+            .filter(|slot| slot.match_type == 1001 && slot.division == 1)
             .count();
         let playoff_two_open = rows
             .iter()
-            .filter(|row| row.match_type == 1002)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 0)
+            .filter(|slot| slot.match_type == 1002 && slot.division == 0)
             .count();
         let playoff_two_women = rows
             .iter()
-            .filter(|row| row.match_type == 1002)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 1)
+            .filter(|slot| slot.match_type == 1002 && slot.division == 1)
             .count();
 
         assert_eq!(playoff_one_open, 11);
-        assert_eq!(playoff_one_women, 5);
+        assert_eq!(playoff_one_women, 0);
         assert_eq!(playoff_two_open, 10);
-        assert_eq!(playoff_two_women, 4);
+        assert_eq!(playoff_two_women, 5);
     }
 
     #[test]
@@ -2034,8 +2460,9 @@ mod tests {
         for round in 1..=6 {
             let slot_divisions: Vec<i64> = rows
                 .iter()
-                .filter(|row| row.match_type == round)
-                .flat_map(|row| row.slots.iter().map(|slot| slot.division))
+                .flat_map(|row| row.slots.iter())
+                .filter(|slot| slot.match_type == round)
+                .map(|slot| slot.division)
                 .collect();
 
             assert_eq!(
@@ -2043,8 +2470,43 @@ mod tests {
                 16,
                 "round {round} should expose 16 total swiss slots"
             );
-            assert!(slot_divisions[..11].iter().all(|division| *division == 0));
-            assert!(slot_divisions[11..].iter().all(|division| *division == 1));
+            assert_eq!(
+                slot_divisions.iter().filter(|division| **division == 0).count(),
+                11
+            );
+            assert_eq!(
+                slot_divisions.iter().filter(|division| **division == 1).count(),
+                5
+            );
         }
+    }
+
+    #[test]
+    fn swiss_pairings_are_shuffled_before_slot_assignment() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 3, &mut rng);
+
+        assert_ne!(scheduled, pairings);
+
+        let original_set: HashSet<(i64, i64)> =
+            pairings.iter().map(|pairing| (pairing.t1, pairing.t2)).collect();
+        let scheduled_set: HashSet<(i64, i64)> = scheduled
+            .iter()
+            .map(|pairing| (pairing.t1, pairing.t2))
+            .collect();
+
+        assert_eq!(scheduled_set, original_set);
+    }
+
+    #[test]
+    fn elimination_pairings_keep_their_original_slot_order() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 1002, &mut rng);
+
+        assert_eq!(scheduled, pairings);
     }
 }

@@ -239,61 +239,78 @@ pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b_mom.cmp(&a_mom)
 }
 
-// C7: Stable final fallback using seed, then team id
-pub fn c7_stable_seed(a: &TeamSortData, b: &TeamSortData) -> Ordering {
-    let a_rank = if a.init_rank > 0 {
-        a.init_rank
-    } else {
-        i64::MAX
-    };
-    let b_rank = if b.init_rank > 0 {
-        b.init_rank
-    } else {
-        i64::MAX
-    };
+// C7: Random coin toss fallback for teams still tied after c1-c6.
+pub fn c7_random_coin_toss() -> i64 {
+    i64::from(rand::random::<bool>())
+}
 
-    a_rank.cmp(&b_rank).then_with(|| a.team_id.cmp(&b.team_id))
+fn c7_random_coin_toss_key() -> (i64, u64) {
+    let toss = c7_random_coin_toss();
+    let mut extra = 0u64;
+
+    // Combine repeated coin tosses into a total-order key so sort stays valid.
+    for _ in 0..63 {
+        extra = (extra << 1) | c7_random_coin_toss() as u64;
+    }
+
+    (toss, extra)
+}
+
+fn compare_teams_through_c6(a: &TeamSortData, b: &TeamSortData, snapshot: &[TeamSortData]) -> Ordering {
+    let mut ord = c1_points(a, b);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    if tied_team_count(a.points, snapshot) == 2 {
+        ord = c2_head_to_head(a, b);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    ord = c3_buchholz(a, b, snapshot);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    ord = c4_point_difference(a, b);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    ord = c5_points_scored(a, b);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    c6_momentum_score(a, b)
+}
+
+fn apply_c7_random_coin_toss(teams: &mut [TeamSortData], snapshot: &[TeamSortData]) {
+    let mut start = 0usize;
+    while start < teams.len() {
+        let mut end = start + 1;
+        while end < teams.len()
+            && compare_teams_through_c6(&teams[start], &teams[end], snapshot) == Ordering::Equal
+        {
+            end += 1;
+        }
+
+        if end - start > 1 {
+            teams[start..end].sort_by_cached_key(|_| c7_random_coin_toss_key());
+        }
+
+        start = end;
+    }
 }
 
 // Master sort: apply all criteria in order c1..c7
 pub fn sort_teams(teams: &mut [TeamSortData]) {
     let snapshot: Vec<TeamSortData> = teams.to_vec();
 
-    teams.sort_by(|a, b| {
-        let mut ord = c1_points(a, b);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-
-        if tied_team_count(a.points, &snapshot) == 2 {
-            ord = c2_head_to_head(a, b);
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-
-        ord = c3_buchholz(a, b, &snapshot);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-
-        ord = c4_point_difference(a, b);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-
-        ord = c5_points_scored(a, b);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-
-        ord = c6_momentum_score(a, b);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-
-        c7_stable_seed(a, b)
-    });
+    teams.sort_by(|a, b| compare_teams_through_c6(a, b, &snapshot));
+    apply_c7_random_coin_toss(teams, &snapshot);
 }
 
 fn tied_team_count(points: i64, teams: &[TeamSortData]) -> usize {
@@ -658,12 +675,24 @@ mod tests {
         third.h2h.insert(1, 1);
         third.h2h.insert(2, -1);
 
-        let mut teams = vec![third, second, first];
-        sort_teams(&mut teams);
+        let teams = vec![third, second, first];
 
-        assert_eq!(teams[0].team_id, 1);
-        assert_eq!(teams[1].team_id, 2);
-        assert_eq!(teams[2].team_id, 3);
+        assert_eq!(
+            compare_teams_through_c6(&teams[2], &teams[1], &teams),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_teams_through_c6(&teams[1], &teams[0], &teams),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn c7_random_coin_toss_returns_binary_values() {
+        for _ in 0..128 {
+            let toss = c7_random_coin_toss();
+            assert!(toss == 0 || toss == 1);
+        }
     }
 
     #[test]

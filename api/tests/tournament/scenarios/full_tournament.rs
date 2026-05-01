@@ -33,6 +33,8 @@ pub(crate) struct DivisionTournamentSummary {
     pub(crate) division: i64,
     pub(crate) boundary_meetings: Vec<BoundaryMeetingSummary>,
     pub(crate) lookahead_rounds: Vec<LookaheadRoundSummary>,
+    pub(crate) game_gap_minutes: Vec<i64>,
+    pub(crate) ground_distribution_score: f64,
     pub(crate) final_swiss_points_by_rank: Vec<i64>,
     pub(crate) swiss_rematches: usize,
     pub(crate) tournament_rematches: usize,
@@ -42,6 +44,7 @@ pub(crate) struct DivisionTournamentSummary {
 #[derive(Debug, Clone)]
 pub(crate) struct FullTournamentSummary {
     pub(crate) divisions: Vec<DivisionTournamentSummary>,
+    pub(crate) ground_distribution_score: f64,
 }
 
 fn describe_boundary_meetings(boundary_meetings: &[BoundaryMeetingSummary]) -> String {
@@ -70,6 +73,21 @@ fn format_optional_probability(probability: Option<f64>) -> String {
 
 fn format_duration_ms(value: f64) -> String {
     format!("{value:.1}ms")
+}
+
+fn describe_gap_stats(gaps: &[i64]) -> String {
+    let Some(lowest) = gaps.iter().min() else {
+        return "mean n/a, median n/a, lowest n/a, highest n/a".to_string();
+    };
+    let highest = gaps.iter().max().expect("non-empty gap sample");
+
+    format!(
+        "mean {:.1} min, median {:.1} min, lowest {} min, highest {} min",
+        mean_i64(gaps),
+        median_i64(gaps),
+        lowest,
+        highest,
+    )
 }
 
 fn describe_round_generation_diagnostics(diagnostics: &RoundPairingDiagnostics) -> String {
@@ -221,73 +239,88 @@ pub(crate) async fn run_with_summary(
     }
 
     for division in [0, 1] {
-        let playoff_round_one = load_round_matches(&harness, &mut tracker, division, 1001).await?;
-        enable_reporting_round(&harness, staff.super_admin.as_str(), 1001).await?;
-        let expected_round_one = tracker.expected_playoff_round_one(division);
-        assert_playoff_pairings(&playoff_round_one, &expected_round_one);
-        assert_playoff_grid_seed_labels(&harness, &playoff_round_one, &expected_round_one).await?;
-        reporter.record_pairings(
-            "full-tournament",
-            division,
-            "Playoff round 1",
-            &playoff_round_one,
-            &tracker,
-        )?;
-
-        for schedule_match in &playoff_round_one {
-            let note = if schedule_match.possession.unwrap_or(0) < 3 {
-                let expected_match = find_expected_match(&expected_round_one, schedule_match);
-                let outcome = simulation.playoff_round_one_outcome(expected_match);
-                finish_match_to_outcome(&harness, &mut tracker, &staff, schedule_match.id, outcome)
-                    .await?;
-                format!("seeded {}", outcome.label())
-            } else {
-                "pre-existing completed match snapshot".to_string()
-            };
-
-            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+        if division == 0 {
+            let playoff_round_one =
+                load_round_matches(&harness, &mut tracker, division, 1001).await?;
+            enable_reporting_round(&harness, staff.super_admin.as_str(), 1001).await?;
+            let expected_round_one = tracker.expected_playoff_round_one(division);
+            assert_playoff_pairings(&playoff_round_one, &expected_round_one);
+            assert_playoff_grid_seed_labels(&harness, &playoff_round_one, &expected_round_one)
                 .await?;
-            reporter.record_match_result(
+            reporter.record_pairings(
                 "full-tournament",
                 division,
                 "Playoff round 1",
-                schedule_match.id,
+                &playoff_round_one,
                 &tracker,
-                &note,
+            )?;
+
+            for schedule_match in &playoff_round_one {
+                let note = if schedule_match.possession.unwrap_or(0) < 3 {
+                    let expected_match = find_expected_match(&expected_round_one, schedule_match);
+                    let outcome = simulation.playoff_round_one_outcome(expected_match);
+                    finish_match_to_outcome(
+                        &harness,
+                        &mut tracker,
+                        &staff,
+                        schedule_match.id,
+                        outcome,
+                    )
+                    .await?;
+                    format!("seeded {}", outcome.label())
+                } else {
+                    "pre-existing completed match snapshot".to_string()
+                };
+
+                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                    .await?;
+                reporter.record_match_result(
+                    "full-tournament",
+                    division,
+                    "Playoff round 1",
+                    schedule_match.id,
+                    &tracker,
+                    &note,
+                )?;
+            }
+
+            let playoff_display_order = tracker.expected_display_order_after_playoffs(division);
+            assert_display_standings_and_team_ranks(
+                &harness,
+                &tracker,
+                division,
+                &playoff_display_order,
+            )
+            .await?;
+            reporter.record_ordered_standings(
+                "full-tournament",
+                division,
+                "after playoff round 1 seed swaps",
+                &tracker,
+                &playoff_display_order,
             )?;
         }
-
-        let playoff_display_order = tracker.expected_display_order_after_playoffs(division);
-        assert_display_standings_and_team_ranks(
-            &harness,
-            &tracker,
-            division,
-            &playoff_display_order,
-        )
-        .await?;
-        reporter.record_ordered_standings(
-            "full-tournament",
-            division,
-            "after playoff round 1 seed swaps",
-            &tracker,
-            &playoff_display_order,
-        )?;
 
         let playoff_round_two = load_round_matches(&harness, &mut tracker, division, 1002).await?;
         enable_reporting_round(&harness, staff.super_admin.as_str(), 1002).await?;
         let expected_round_two = tracker.expected_playoff_round_two(division);
         assert_playoff_pairings(&playoff_round_two, &expected_round_two);
         assert_playoff_grid_seed_labels(&harness, &playoff_round_two, &expected_round_two).await?;
+        let final_stage_label = if division == 0 {
+            "Playoff round 2"
+        } else {
+            "Final round"
+        };
         reporter.record_pairings(
             "full-tournament",
             division,
-            "Playoff round 2",
+            final_stage_label,
             &playoff_round_two,
             &tracker,
         )?;
 
         let final_swiss_order = tracker.swiss_summary(division);
-        if final_swiss_order.len() >= 2 {
+        if division == 0 && final_swiss_order.len() >= 2 {
             let bottom_one = final_swiss_order[final_swiss_order.len() - 2].team_id;
             let bottom_two = final_swiss_order[final_swiss_order.len() - 1].team_id;
             assert!(
@@ -317,7 +350,7 @@ pub(crate) async fn run_with_summary(
             reporter.record_match_result(
                 "full-tournament",
                 division,
-                "Playoff round 2",
+                final_stage_label,
                 schedule_match.id,
                 &tracker,
                 &note,
@@ -342,7 +375,21 @@ pub(crate) async fn run_with_summary(
             division_label(division_summary.division),
             describe_boundary_meetings(&division_summary.boundary_meetings),
         ))?;
+        reporter.note(format!(
+            "[full-tournament] {} time gaps between games: {}",
+            division_label(division_summary.division),
+            describe_gap_stats(&division_summary.game_gap_minutes),
+        ))?;
+        reporter.note(format!(
+            "[full-tournament] {} ground distribution MSD score: {:.4}",
+            division_label(division_summary.division),
+            division_summary.ground_distribution_score,
+        ))?;
     }
+    reporter.note(format!(
+        "[full-tournament] tournament ground distribution MSD score: {:.4}",
+        summary.ground_distribution_score,
+    ))?;
     reporter.note(format!(
         "[full-tournament] completed {} matches, scored {} total points, and observed {} rematch-avoidance rounds.",
         tracker.completed_match_count(),
@@ -370,6 +417,7 @@ fn build_full_tournament_summary(
     lookahead_rounds: &HashMap<(i64, i64), RoundPairingDiagnostics>,
 ) -> FullTournamentSummary {
     FullTournamentSummary {
+        ground_distribution_score: tracker.ground_distribution_score(None),
         divisions: [0, 1]
             .into_iter()
             .map(|division| build_division_summary(tracker, division, lookahead_rounds))
@@ -401,10 +449,35 @@ fn build_division_summary(
                     .map(|diagnostics| LookaheadRoundSummary { round, diagnostics })
             })
             .collect(),
+        game_gap_minutes: tracker.game_gap_minutes(division),
+        ground_distribution_score: tracker.ground_distribution_score(Some(division)),
         final_swiss_points_by_rank: final_swiss.iter().map(|row| row.points).collect(),
         swiss_rematches,
         tournament_rematches,
         team_tournament_rematches,
+    }
+}
+
+fn mean_i64(values: &[i64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<i64>() as f64 / values.len() as f64
+    }
+}
+
+fn median_i64(values: &[i64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) as f64 / 2.0
+    } else {
+        sorted[mid] as f64
     }
 }
 

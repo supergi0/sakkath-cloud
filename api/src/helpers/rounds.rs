@@ -1227,6 +1227,12 @@ pub fn build_seed_order_after_elimination_results(
                 direct_pair.1,
                 &playoff_lookup,
             );
+            apply_seed_swap_for_result(
+                &mut bracket_seed_order,
+                direct_pair.0,
+                direct_pair.1,
+                &final_lookup,
+            );
             seed_order.extend(bracket_seed_order);
             offset += 2;
             continue;
@@ -1257,6 +1263,21 @@ pub fn build_final_pairings_from_playoff_results(
             t2: seed_order[offset + 3],
         });
         offset += 4;
+    }
+
+    finals
+}
+
+pub fn build_direct_final_pairings(sorted_teams: &[TeamSortData]) -> Vec<Pairing> {
+    let mut finals = Vec::new();
+    let mut offset = 0;
+
+    while offset + 1 < sorted_teams.len() {
+        finals.push(Pairing {
+            t1: sorted_teams[offset].team_id,
+            t2: sorted_teams[offset + 1].team_id,
+        });
+        offset += 2;
     }
 
     finals
@@ -1597,35 +1618,32 @@ mod tests {
     }
 
     #[test]
-    fn build_playoff_brackets_handles_ten_teams() {
+    fn build_direct_final_pairings_handles_ten_teams() {
         let teams: Vec<TeamSortData> = (1..=10)
             .map(|team_id| team(team_id, 0, 0, team_id))
             .collect();
 
-        let rounds = build_playoff_brackets(&teams);
-        let playoff_round = rounds
-            .iter()
-            .find(|round| round.name == "playoffs")
-            .expect("playoff round");
-        let final_round = rounds
-            .iter()
-            .find(|round| round.name == "finals")
-            .expect("final round");
+        let finals = build_direct_final_pairings(&teams);
 
-        assert_eq!(playoff_round.matches.len(), 5);
-        assert_eq!(final_round.matches.len(), 4);
-        assert!(
-            playoff_round
-                .matches
-                .iter()
-                .any(|pair| pair.t1 == 9 && pair.t2 == 10)
-        );
-        assert!(
-            !final_round
-                .matches
-                .iter()
-                .any(|pair| [9, 10].contains(&pair.t1) || [9, 10].contains(&pair.t2))
-        );
+        assert_eq!(finals.len(), 5);
+        assert_eq!(finals[0], Pairing { t1: 1, t2: 2 });
+        assert_eq!(finals[4], Pairing { t1: 9, t2: 10 });
+    }
+
+    #[test]
+    fn build_seed_order_after_elimination_results_swaps_direct_final_pair() {
+        let teams: Vec<TeamSortData> = (1..=10)
+            .map(|team_id| team(team_id, 0, 0, team_id))
+            .collect();
+        let final_results = vec![PlayedMatchResult {
+            t1: 9,
+            t2: 10,
+            winner: 10,
+        }];
+
+        let seed_order = build_seed_order_after_elimination_results(&teams, &[], &final_results);
+
+        assert_eq!(&seed_order[8..10], &[10, 9]);
     }
 
     #[test]

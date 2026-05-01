@@ -118,6 +118,8 @@ pub(crate) struct ScheduleMatchResponse {
     pub(crate) id: i64,
     pub(crate) t1_id: i64,
     pub(crate) t2_id: i64,
+    pub(crate) field_name: String,
+    pub(crate) time: String,
     pub(crate) t1_score: i64,
     pub(crate) t2_score: i64,
     pub(crate) t1_spirit: Option<i64>,

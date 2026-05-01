@@ -75,12 +75,16 @@ interface SpiritScoreRow {
 }
 
 type MatchTabType = 'log' | 'chart' | 'stats' | 'spirit';
-type MatchStatsSortField = 'goals' | 'assists' | 'blocks' | 'turnovers';
+type MatchStatsSortField = 'total' | 'goals' | 'assists' | 'blocks' | 'turnovers';
 interface MatchesPreferences {
   activeTab: MatchTabType;
 }
 
 const MATCHES_PREFS_KEY = 'sakkath:matches:preferences';
+
+function getTotalStat(player: Pick<PlayerMatchStat, 'goals' | 'assists' | 'blocks' | 'turnovers'>) {
+  return player.goals + player.assists + player.blocks - player.turnovers;
+}
 
 const fetcher = (url: string) => fetch(url).then(r => r.ok ? r.json() : null);
 
@@ -166,7 +170,7 @@ function MatchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<MatchTabType>('log');
-  const [statsSortField, setStatsSortField] = useState<MatchStatsSortField>('goals');
+  const [statsSortField, setStatsSortField] = useState<MatchStatsSortField>('total');
   const [statsSortDir, setStatsSortDir] = useState<'asc' | 'desc'>('desc');
   const matchId = searchParams.get('match_id');
   const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
@@ -259,7 +263,7 @@ function MatchContent() {
       }
     });
     return Array.from(statsMap.values()).sort((a, b) => {
-      const diff = a[statsSortField] - b[statsSortField];
+      const diff = (statsSortField === 'total' ? getTotalStat(a) : a[statsSortField]) - (statsSortField === 'total' ? getTotalStat(b) : b[statsSortField]);
       return statsSortDir === 'asc' ? diff : -diff;
     });
   };
@@ -561,6 +565,7 @@ function MatchContent() {
                       <tr className="border-b border-gray-200 dark:border-slate-700">
                         <th className="w-[168px] py-3 px-1.5 text-left font-medium text-gray-500 dark:text-gray-400">Player</th>
                         {([
+                          ['total', 'Tot'],
                           ['goals', 'Gls'],
                           ['assists', 'Ast'],
                           ['blocks', 'Blk'],
@@ -591,7 +596,7 @@ function MatchContent() {
                     </thead>
                     <tbody>
                       {playerStats.length === 0 && (
-                        <tr><td colSpan={5} className="py-4 text-center"><Text variant="secondary">No player data</Text></td></tr>
+                        <tr><td colSpan={6} className="py-4 text-center"><Text variant="secondary">No player data</Text></td></tr>
                       )}
                       {playerStats.map((player) => {
                         const commonName = player.common_name?.trim();
@@ -625,6 +630,7 @@ function MatchContent() {
                                 <Text variant="secondary" className="text-[10px] leading-tight truncate" title={teamName}>{teamLabel}</Text>
                               </div>
                             </td>
+                            <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{getTotalStat(player)}</Text></td>
                             <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.goals}</Text></td>
                             <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.assists}</Text></td>
                             <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{player.blocks}</Text></td>

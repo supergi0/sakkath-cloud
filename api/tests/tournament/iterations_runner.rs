@@ -60,6 +60,8 @@ struct DivisionAggregate {
     tournament_rematches_total: u64,
     boundary_stats: HashMap<&'static str, BoundaryAggregate>,
     lookahead_by_round: HashMap<i64, LookaheadAggregate>,
+    game_gap_minutes: Vec<i64>,
+    ground_distribution_score_total: f64,
     rank_points: Vec<Vec<i64>>,
     team_rematch_total: u64,
     team_sample_total: u64,
@@ -69,6 +71,7 @@ struct DivisionAggregate {
 #[derive(Default)]
 struct IterationAggregate {
     division_aggregates: HashMap<i64, DivisionAggregate>,
+    tournament_ground_distribution_score_total: f64,
 }
 
 pub(crate) fn cli_main() -> TestResult {
@@ -119,6 +122,8 @@ pub(crate) fn cli_main() -> TestResult {
 
 impl IterationAggregate {
     fn record(&mut self, summary: &super::scenarios::FullTournamentSummary) {
+        self.tournament_ground_distribution_score_total += summary.ground_distribution_score;
+
         for division_summary in &summary.divisions {
             let aggregate = self
                 .division_aggregates
@@ -188,6 +193,11 @@ impl IterationAggregate {
                     lookahead.average_kept_worst_case_probability_samples += 1;
                 }
             }
+
+            aggregate
+                .game_gap_minutes
+                .extend(division_summary.game_gap_minutes.iter().copied());
+            aggregate.ground_distribution_score_total += division_summary.ground_distribution_score;
 
             if aggregate.rank_points.len() < division_summary.final_swiss_points_by_rank.len() {
                 aggregate
@@ -274,6 +284,45 @@ impl IterationAggregate {
                     aggregate.max_team_rematches,
                 ));
             }
+        }
+
+        lines.push(String::new());
+        lines.push("## Ground Distribution Randomness".to_string());
+        lines.push(String::new());
+        lines.push("| Scope | Mean MSD Score |".to_string());
+        lines.push("| --- | ---: |".to_string());
+        lines.push(format!(
+            "| All divisions | {:.4} |",
+            self.tournament_ground_distribution_score_total / iterations as f64,
+        ));
+        for division in [0, 1] {
+            let Some(aggregate) = self.division_aggregates.get(&division) else {
+                continue;
+            };
+            lines.push(format!(
+                "| {} | {:.4} |",
+                division_label(division),
+                aggregate.ground_distribution_score_total / iterations as f64,
+            ));
+        }
+
+        lines.push(String::new());
+        lines.push("## Game Gap Summary".to_string());
+        lines.push(String::new());
+        lines.push("| Scope | Mean Gap | Median Gap | Lowest Gap | Highest Gap |".to_string());
+        lines.push("| --- | ---: | ---: | ---: | ---: |".to_string());
+        for division in [0, 1] {
+            let Some(aggregate) = self.division_aggregates.get(&division) else {
+                continue;
+            };
+            lines.push(format!(
+                "| {} | {} | {} | {} | {} |",
+                division_label(division),
+                format_gap_value(Some(mean_i64(&aggregate.game_gap_minutes))),
+                format_gap_value(Some(median(&aggregate.game_gap_minutes))),
+                format_gap_value(lowest_gap(&aggregate.game_gap_minutes)),
+                format_gap_value(highest_gap(&aggregate.game_gap_minutes)),
+            ));
         }
 
         for division in [0, 1] {
@@ -474,6 +523,28 @@ fn format_duration_value(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.1}ms"))
         .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_gap_value(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.1} min"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn lowest_gap(values: &[i64]) -> Option<f64> {
+    values.iter().min().map(|value| *value as f64)
+}
+
+fn highest_gap(values: &[i64]) -> Option<f64> {
+    values.iter().max().map(|value| *value as f64)
+}
+
+fn mean_i64(values: &[i64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<i64>() as f64 / values.len() as f64
+    }
 }
 
 fn mean(values: &[i64]) -> f64 {

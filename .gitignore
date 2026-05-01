@@ -38,3 +38,5 @@ logs/
 .venv
 
 analyze_cutline_opponents.py
+
+logs_v1
