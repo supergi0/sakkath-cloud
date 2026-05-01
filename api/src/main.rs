@@ -206,6 +206,10 @@ async fn main() {
         .await
         .unwrap_or_else(|err| exit_with_error(&format!("Failed to verify migrations: {err}")));
 
+    helpers::sorting::initialize_persistent_coin_toss_seed(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to load persistent tiebreak seed: {err}")));
+
     // Init redis cache (non-blocking, works without redis)
     helpers::cache::init_redis().await;
     telemetry::init(db_pool.clone(), telemetry_enabled).await;

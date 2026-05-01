@@ -6,6 +6,7 @@ Both team admins report their own match independently. Each game has two reporte
 
 - Reporting is locked until the round officially opens. You can view upcoming games but they won't be reportable yet.
 - Once reporting is enabled, you can begin from the **My Team** section.
+- There is a mock match available in MyTeam. Familiarize yourself with the reporting flow by completing it.
 - During the toss, point out to the other team who will be keeping stats for most of the game.
 
 ## During the game

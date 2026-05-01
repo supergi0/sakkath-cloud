@@ -70,7 +70,7 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         .expect_status(
             Method::POST,
             &format!("/v1/admin/matches/{}/start", target_match.id),
-            Some(staff.admin_one.as_str()),
+            Some(team_one_poc.as_str()),
             Some(serde_json::json!({ "possession": 1 })),
             StatusCode::FORBIDDEN,
         )

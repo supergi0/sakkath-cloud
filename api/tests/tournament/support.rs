@@ -1,4 +1,4 @@
-use super::harness::{Harness, STAFF_PASSWORD, TestResult};
+use super::harness::{Harness, TestResult};
 use super::model::{
     MatchDetailResponse, MatchPlayerResponse, MutationResponse, ScheduleMatchResponse,
     TournamentTracker,
@@ -23,13 +23,19 @@ impl StaffTokens {
 }
 
 pub(crate) async fn login_staff(harness: &mut Harness) -> TestResult<StaffTokens> {
-    let admin_one_email = harness.credentials.admin_emails[0].clone();
-    let admin_two_email = harness.credentials.admin_emails[1].clone();
-    let super_email = harness.credentials.super_email.clone();
+    let admin_one_credential = harness.credentials.super_admin(0).clone();
+    let admin_two_credential = harness.credentials.super_admin(1).clone();
+    let super_credential = harness.credentials.super_admin(2).clone();
 
-    let admin_one = harness.login(&admin_one_email, STAFF_PASSWORD).await?;
-    let admin_two = harness.login(&admin_two_email, STAFF_PASSWORD).await?;
-    let super_admin = harness.login(&super_email, STAFF_PASSWORD).await?;
+    let admin_one = harness
+        .login(&admin_one_credential.email, &admin_one_credential.password)
+        .await?;
+    let admin_two = harness
+        .login(&admin_two_credential.email, &admin_two_credential.password)
+        .await?;
+    let super_admin = harness
+        .login(&super_credential.email, &super_credential.password)
+        .await?;
 
     Ok(StaffTokens {
         admin_one,
@@ -39,13 +45,8 @@ pub(crate) async fn login_staff(harness: &mut Harness) -> TestResult<StaffTokens
 }
 
 pub(crate) async fn login_poc(harness: &mut Harness, team_id: i64) -> TestResult<String> {
-    let email = harness
-        .credentials
-        .poc_by_team
-        .get(&team_id)
-        .unwrap_or_else(|| panic!("missing poc credential for team {team_id}"))
-        .clone();
-    harness.login(&email, &email).await
+    let credential = harness.credentials.team_admin(team_id).clone();
+    harness.login(&credential.email, &credential.password).await
 }
 
 pub(crate) async fn load_round_matches(

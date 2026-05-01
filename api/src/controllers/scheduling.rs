@@ -22,6 +22,34 @@ fn record_schedule_error(details: serde_json::Value) {
     crate::telemetry::record_error("schedule.error", details.to_string());
 }
 
+async fn stage_progress(db: &sqlx::SqlitePool, division: i64, match_type: i64) -> (i64, i64) {
+    let total: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
+    )
+    .bind(match_type)
+    .bind(division)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0,));
+
+    let completed: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL AND m.possession >= 3"#,
+    )
+    .bind(match_type)
+    .bind(division)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0,));
+
+    (total.0, completed.0)
+}
+
 #[derive(Serialize)]
 pub struct TournamentState {
     pub division: i64,
@@ -211,32 +239,12 @@ pub async fn auto_advance_division_if_ready(
     };
 
     for round in 1..=total_rounds {
-        let stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-               FROM matches m JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-        )
-        .bind(round)
-        .bind(division)
-        .fetch_one(db)
-        .await
-        .unwrap_or((0, 0));
-
-        let (total, completed) = stats;
+        let (total, completed) = stage_progress(db, division, round).await;
 
         if total == 0
             && (round == 1
                 || {
-                    let prev: (i64, i64) = sqlx::query_as(
-                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-                       FROM matches m JOIN teams t ON m.t1_id = t.id
-                       WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-                )
-                .bind(round - 1)
-                .bind(division)
-                .fetch_one(db)
-                .await
-                .unwrap_or((0, 0));
+                    let prev = stage_progress(db, division, round - 1).await;
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
@@ -371,24 +379,9 @@ pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
 }
 
 async fn generate_r1_from_seeding(db: &sqlx::SqlitePool, division: i64) -> Result<(), sqlx::Error> {
-    let teams: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT id, init_rank FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC",
-    )
-    .bind(division)
-    .fetch_all(db)
-    .await?;
-
-    if teams.is_empty() {
+    let pairings = build_seeded_round_one_pairings(db, division).await?;
+    if pairings.is_empty() {
         return Ok(());
-    }
-
-    let half = teams.len() / 2;
-    let mut pairings = Vec::with_capacity(half);
-    for index in 0..half {
-        pairings.push(rounds::Pairing {
-            t1: teams[index].0,
-            t2: teams[index + half].0,
-        });
     }
 
     record_schedule_info(
@@ -424,6 +417,48 @@ async fn generate_r1_from_seeding(db: &sqlx::SqlitePool, division: i64) -> Resul
     result
 }
 
+async fn load_seeded_round_one_team_ids(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let teams: Vec<(i64,)> = sqlx::query_as(
+        "SELECT id FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC, id ASC",
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await?;
+
+    Ok(teams.into_iter().map(|team| team.0).collect())
+}
+
+fn seeded_round_one_pairings_from_team_ids(
+    team_ids: &[i64],
+) -> Result<Vec<rounds::Pairing>, &'static str> {
+    if team_ids.len() % 2 != 0 {
+        return Err("odd number of teams; cannot generate pairings");
+    }
+
+    let half = team_ids.len() / 2;
+    let mut pairings = Vec::with_capacity(half);
+    for index in 0..half {
+        pairings.push(rounds::Pairing {
+            t1: team_ids[index],
+            t2: team_ids[index + half],
+        });
+    }
+
+    Ok(pairings)
+}
+
+async fn build_seeded_round_one_pairings(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<Vec<rounds::Pairing>, sqlx::Error> {
+    let team_ids = load_seeded_round_one_team_ids(db, division).await?;
+    seeded_round_one_pairings_from_team_ids(&team_ids)
+        .map_err(|message| sqlx::Error::Protocol(message.into()))
+}
+
 pub async fn read_tournament_state(
     State(state): State<crate::AppState>,
     Query(params): Query<DivisionQuery>,
@@ -437,28 +472,26 @@ pub async fn read_tournament_state(
 
     let mut round_status = Vec::new();
     for round in 1..=total_rounds {
-        let stats: (i64, i64, i64, i64) = sqlx::query_as(
-            r#"SELECT
-                COUNT(*) as total,
-                COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0) as completed,
-                COALESCE(SUM(CASE WHEN possession IS NOT NULL AND possession < 3 THEN 1 ELSE 0 END), 0) as in_progress,
-                COALESCE(SUM(CASE WHEN possession IS NULL THEN 1 ELSE 0 END), 0) as scheduled
-            FROM matches m
-            JOIN teams t1 ON m.t1_id = t1.id
-            WHERE m.type = ? AND t1.division = ? AND m.deleted_at IS NULL"#,
+        let (total, completed) = stage_progress(&state.db, division, round).await;
+        let scheduled: (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*)
+               FROM matches m
+               JOIN teams t1 ON m.t1_id = t1.id
+               WHERE m.type = ? AND t1.division = ? AND m.deleted_at IS NULL AND m.possession IS NULL"#,
         )
         .bind(round)
         .bind(division)
         .fetch_one(&state.db)
         .await
-        .unwrap_or((0, 0, 0, 0));
+        .unwrap_or((0,));
+        let in_progress = (total - completed - scheduled.0).max(0);
 
         round_status.push(RoundStatus {
             round,
-            total: stats.0,
-            completed: stats.1,
-            in_progress: stats.2,
-            scheduled: stats.3,
+            total,
+            completed,
+            in_progress,
+            scheduled: scheduled.0,
         });
     }
 
@@ -468,25 +501,8 @@ pub async fn read_tournament_state(
         .map(|round| round.round)
         .unwrap_or(total_rounds + 1);
 
-    let playoff_one: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m JOIN teams t ON m.t1_id = t.id
-           WHERE m.type = 1001 AND t.division = ? AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or((0, 0));
-
-    let playoff_two: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m JOIN teams t ON m.t1_id = t.id
-           WHERE m.type = 1002 AND t.division = ? AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or((0, 0));
+    let playoff_one = stage_progress(&state.db, division, 1001).await;
+    let playoff_two = stage_progress(&state.db, division, 1002).await;
 
     let phase = if current_round <= total_rounds {
         format!("swiss_R{current_round}")
@@ -901,18 +917,9 @@ pub async fn generate_next_round(
     }
 
     if next_round > 1 {
-        let prev_incomplete: (i64,) = sqlx::query_as(
-            r#"SELECT COUNT(*) FROM matches m
-               JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND (m.possession IS NULL OR m.possession < 3) AND m.deleted_at IS NULL"#,
-        )
-        .bind(next_round - 1)
-        .bind(division)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or((1,));
+        let prev_progress = stage_progress(&state.db, division, next_round - 1).await;
 
-        if prev_incomplete.0 > 0 {
+        if prev_progress.0 == 0 || prev_progress.1 < prev_progress.0 {
             record_schedule_info(
                 "schedule.inprogress",
                 serde_json::json!({
@@ -956,34 +963,57 @@ pub async fn generate_next_round(
         })));
     }
 
-    let history = rounds::fetch_match_history(&state.db, division).await;
-    let sorted = sorting::get_sorted_standings(&state.db, division).await;
-    if sorted.len() % 2 != 0 {
-        record_schedule_error(serde_json::json!({
-            "source": "manual_generate",
-            "division": division,
-            "round": next_round,
-            "message": "odd number of teams; cannot generate pairings"
-        }));
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Odd number of teams; cannot generate pairings"
-        })));
-    }
+    let pairings = if next_round == 1 {
+        let team_ids = load_seeded_round_one_team_ids(&state.db, division)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        match seeded_round_one_pairings_from_team_ids(&team_ids) {
+            Ok(pairings) => pairings,
+            Err(message) => {
+                record_schedule_error(serde_json::json!({
+                    "source": "manual_generate",
+                    "division": division,
+                    "round": next_round,
+                    "message": message
+                }));
+                return Ok(Json(serde_json::json!({
+                    "success": false,
+                    "message": "Odd number of teams; cannot generate pairings"
+                })));
+            }
+        }
+    } else {
+        let history = rounds::fetch_match_history(&state.db, division).await;
+        let sorted = sorting::get_generation_standings_for_stage(&state.db, division, next_round).await;
+        if sorted.len() % 2 != 0 {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "message": "odd number of teams; cannot generate pairings"
+            }));
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Odd number of teams; cannot generate pairings"
+            })));
+        }
 
-    let pairings = rounds::generate_round_pairings(&sorted, &history, next_round);
-    if pairings.len() * 2 != sorted.len() {
-        record_schedule_error(serde_json::json!({
-            "source": "manual_generate",
-            "division": division,
-            "round": next_round,
-            "message": "could not generate complete non-overlapping pairings"
-        }));
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Could not generate complete non-overlapping pairings"
-        })));
-    }
+        let pairings = rounds::generate_round_pairings(&sorted, &history, next_round);
+        if pairings.len() * 2 != sorted.len() {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "message": "could not generate complete non-overlapping pairings"
+            }));
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Could not generate complete non-overlapping pairings"
+            })));
+        }
+
+        pairings
+    };
 
     record_schedule_info(
         "schedule.start",
@@ -1048,31 +1078,11 @@ pub async fn check_and_populate_gates(
     };
 
     for round in 1..=total_rounds {
-        let stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-               FROM matches m JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-        )
-        .bind(round)
-        .bind(division)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or((0, 0));
-
-        let (total, completed) = stats;
+        let (total, completed) = stage_progress(&state.db, division, round).await;
         if total == 0
             && (round == 1
                 || {
-                    let prev: (i64, i64) = sqlx::query_as(
-                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-                       FROM matches m JOIN teams t ON m.t1_id = t.id
-                       WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-                )
-                .bind(round - 1)
-                .bind(division)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or((0, 0));
+                    let prev = stage_progress(&state.db, division, round - 1).await;
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
@@ -1138,20 +1148,26 @@ async fn generate_next_round_internal(
     division: i64,
     round: i64,
 ) -> Result<(), sqlx::Error> {
-    let sorted = sorting::get_sorted_standings(db, division).await;
-    if sorted.len() % 2 != 0 {
-        return Err(sqlx::Error::Protocol(
-            "odd number of teams; cannot generate pairings".into(),
-        ));
-    }
+    let pairings = if round == 1 {
+        build_seeded_round_one_pairings(db, division).await?
+    } else {
+        let sorted = sorting::get_generation_standings_for_stage(db, division, round).await;
+        if sorted.len() % 2 != 0 {
+            return Err(sqlx::Error::Protocol(
+                "odd number of teams; cannot generate pairings".into(),
+            ));
+        }
 
-    let history = rounds::fetch_match_history(db, division).await;
-    let pairings = rounds::generate_round_pairings(&sorted, &history, round);
-    if pairings.len() * 2 != sorted.len() {
-        return Err(sqlx::Error::Protocol(
-            "incomplete pairings generated".into(),
-        ));
-    }
+        let history = rounds::fetch_match_history(db, division).await;
+        let pairings = rounds::generate_round_pairings(&sorted, &history, round);
+        if pairings.len() * 2 != sorted.len() {
+            return Err(sqlx::Error::Protocol(
+                "incomplete pairings generated".into(),
+            ));
+        }
+
+        pairings
+    };
 
     insert_pairings_into_slots(db, division, round, &pairings).await
 }
@@ -1258,7 +1274,7 @@ async fn create_playoffs_if_needed(
         return Ok(false);
     }
 
-    let sorted = sorting::get_sorted_standings(db, division).await;
+    let sorted = sorting::get_generation_standings_for_stage(db, division, 1001).await;
     if sorted.len() < 2 {
         return Ok(false);
     }
@@ -1287,20 +1303,21 @@ async fn fetch_completed_playoff_results(
     .fetch_all(db)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
-            if t1_score == t2_score {
-                return None;
-            }
+    let mut results = Vec::new();
 
-            Some(rounds::PlayedMatchResult {
-                t1: t1_id,
-                t2: t2_id,
-                winner: if t1_score > t2_score { t1_id } else { t2_id },
-            })
-        })
-        .collect())
+    for (t1_id, t2_id, t1_score, t2_score) in rows {
+        if t1_score == t2_score {
+            continue;
+        }
+
+        results.push(rounds::PlayedMatchResult {
+            t1: t1_id,
+            t2: t2_id,
+            winner: if t1_score > t2_score { t1_id } else { t2_id },
+        });
+    }
+
+    Ok(results)
 }
 
 async fn create_finals_if_needed(
@@ -1318,19 +1335,11 @@ async fn create_finals_if_needed(
         return Ok(false);
     }
 
-    let sorted = sorting::get_sorted_standings(db, division).await;
+    let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
     let final_pairings = if division == 1 {
         rounds::build_direct_final_pairings(&sorted)
     } else {
-        let playoff_stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-               FROM matches m
-               JOIN teams t ON m.t1_id = t.id
-               WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#,
-        )
-        .bind(division)
-        .fetch_one(db)
-        .await?;
+        let playoff_stats = stage_progress(db, division, 1001).await;
 
         if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
             return Ok(false);
@@ -1395,7 +1404,7 @@ fn arrange_pairings_for_slots<R: rand::Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<rounds::Pairing> {
     let mut scheduled_pairings = pairings.to_vec();
-    if match_type < 1000 {
+    if (2..1000).contains(&match_type) {
         scheduled_pairings.shuffle(rng);
     }
     scheduled_pairings
@@ -2119,7 +2128,7 @@ async fn build_schedule_rank_snapshots(
     }
 
     for division in needed_final_snapshots {
-        let standings = sorting::get_sorted_standings(db, division).await;
+        let standings = sorting::get_generation_standings_for_stage(db, division, 1002).await;
         let playoff_results = fetch_completed_playoff_results(db, division)
             .await
             .unwrap_or_default();
@@ -2482,7 +2491,17 @@ mod tests {
     }
 
     #[test]
-    fn swiss_pairings_are_shuffled_before_slot_assignment() {
+    fn round_one_pairings_keep_their_original_slot_order() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 1, &mut rng);
+
+        assert_eq!(scheduled, pairings);
+    }
+
+    #[test]
+    fn later_swiss_pairings_are_shuffled_before_slot_assignment() {
         let pairings = sample_pairings();
         let mut rng = ZeroRng;
 
@@ -2498,6 +2517,20 @@ mod tests {
             .collect();
 
         assert_eq!(scheduled_set, original_set);
+    }
+
+    #[test]
+    fn seeded_round_one_pairings_use_top_half_vs_bottom_half() {
+        let pairings = seeded_round_one_pairings_from_team_ids(&[1, 2, 3, 4, 5, 6]).unwrap();
+
+        assert_eq!(
+            pairings,
+            vec![
+                rounds::Pairing { t1: 1, t2: 4 },
+                rounds::Pairing { t1: 2, t2: 5 },
+                rounds::Pairing { t1: 3, t2: 6 },
+            ]
+        );
     }
 
     #[test]

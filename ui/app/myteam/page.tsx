@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp, ArrowLeftRight, ChevronLeft, RotateCcw } from "lucide-react";
 import { Text } from "../components/Text";
 import { useAuth } from "../auth-provider";
 import { apiUrl } from "../lib/api";
@@ -98,11 +98,63 @@ interface PostMatchForm {
   selfSpirit: WfdfSpirit;
 }
 
+interface MockMatchPlayer {
+  id: number;
+  name: string;
+  team_id: number;
+}
+
+interface MockMatchEvent {
+  id: number;
+  player_id: number | null;
+  player_name: string;
+  team_id: number;
+  event_type: number;
+  created_at: string;
+  action_group: number;
+}
+
+interface MockMatchState {
+  id: number;
+  t1_id: number;
+  t2_id: number;
+  t1_name: string;
+  t2_name: string;
+  t1_abbreviation: string | null;
+  t2_abbreviation: string | null;
+  t1_score: number;
+  t2_score: number;
+  possession: number | null;
+  initial_possession: 1 | 2 | null;
+  field_name: string;
+  time_label: string;
+  players: MockMatchPlayer[];
+  events: MockMatchEvent[];
+}
+
+type MockMode = 'idle' | 'choose-possession' | 'live' | 'post-match';
+type MockPanelKey = 't1' | 'log' | 't2';
+type MockConfirmAction = 'start' | 'save' | 'undo' | 'end';
+
 type FeedbackState = { type: 'error' | 'success'; message: string } | null;
 
 const MAX_TEAM_PLAYERS = 22;
 const TEAM_EDITS_ROUND_KEY = 10001;
 const TEAM_EDITS_LOCKED_MESSAGE = 'Team edits are currently locked by the super admin.';
+const MOCK_MATCH_ID = -1;
+const MOCK_TEST_TEAM_ID = -99;
+const MOCK_EVENT_LABELS = ['Score', 'Assist', 'Block', 'Turnover'];
+const MOCK_EVENT_COLORS = ['text-green-500', 'text-sky-400', 'text-violet-400', 'text-amber-400'];
+const MOCK_TEST_PLAYERS = [
+  'Test One',
+  'Test Two',
+  'Test Three',
+  'Test Four',
+  'Test Five',
+  'Test Six',
+  'Test Seven',
+  'Test Eight',
+];
 type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain';
 const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain'];
 
@@ -160,6 +212,69 @@ function getHeaderTeamName(name: string, abbreviation?: string | null) {
 }
 
 const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null, notes: '' });
+
+function buildMockOpponentPlayers(): MockMatchPlayer[] {
+  return MOCK_TEST_PLAYERS.map((name, index) => ({
+    id: 10000 + index,
+    name,
+    team_id: MOCK_TEST_TEAM_ID,
+  }));
+}
+
+function buildInitialMockMatch(team: Team, players: Player[]): MockMatchState {
+  const teamPlayers = players.map((player) => ({ id: player.id, name: player.name, team_id: team.id }));
+  return {
+    id: MOCK_MATCH_ID,
+    t1_id: team.id,
+    t2_id: MOCK_TEST_TEAM_ID,
+    t1_name: team.name,
+    t2_name: 'Test Team',
+    t1_abbreviation: team.abbreviation,
+    t2_abbreviation: 'TEST',
+    t1_score: 0,
+    t2_score: 0,
+    possession: null,
+    initial_possession: null,
+    field_name: 'Mock Field',
+    time_label: 'Mock Match',
+    players: [...teamPlayers, ...buildMockOpponentPlayers()],
+    events: [],
+  };
+}
+
+function recomputeMockMatchState(match: MockMatchState, events: MockMatchEvent[]): Pick<MockMatchState, 't1_score' | 't2_score' | 'possession'> {
+  let t1Score = 0;
+  let t2Score = 0;
+  let possession = match.initial_possession;
+
+  for (const event of events) {
+    if (possession === null) {
+      break;
+    }
+
+    if (event.event_type === 0) {
+      if (possession === 1) {
+        t1Score += 1;
+      } else {
+        t2Score += 1;
+      }
+      possession = possession === 1 ? 2 : 1;
+    } else if (event.event_type === 2 || event.event_type === 3) {
+      possession = possession === 1 ? 2 : 1;
+    }
+  }
+
+  return { t1_score: t1Score, t2_score: t2Score, possession };
+}
+
+function formatMockLogTime(timestamp: string) {
+  return new Date(timestamp).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
   return (
@@ -287,6 +402,19 @@ export default function MyTeamPage() {
   const [submittedSelfSpirits, setSubmittedSelfSpirits] = useState<Set<number>>(new Set());
   const [otherTeamSpirits, setOtherTeamSpirits] = useState<Set<number>>(new Set());
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
+  const [mockMode, setMockMode] = useState<MockMode>('idle');
+  const [mockMatch, setMockMatch] = useState<MockMatchState | null>(null);
+  const [mockPanel, setMockPanel] = useState<MockPanelKey>('log');
+  const [mockPostForm, setMockPostForm] = useState<PostMatchForm | null>(null);
+  const [mockConfirmAction, setMockConfirmAction] = useState<MockConfirmAction | null>(null);
+  const [mockErrorMessage, setMockErrorMessage] = useState<string | null>(null);
+  const [pendingMockPossession, setPendingMockPossession] = useState<1 | 2 | null>(null);
+  const [mockPendingScorerId, setMockPendingScorerId] = useState<number | null>(null);
+  const [mockPendingAssisterId, setMockPendingAssisterId] = useState<number | null>(null);
+  const [mockPendingBlockId, setMockPendingBlockId] = useState<number | null>(null);
+  const [mockPendingTurnover, setMockPendingTurnover] = useState(false);
+  const [mockPendingTurnoverId, setMockPendingTurnoverId] = useState<number | null>(null);
+  const [mockPendingSwitchOnly, setMockPendingSwitchOnly] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [teamEditsEnabled, setTeamEditsEnabled] = useState(true);
@@ -295,6 +423,186 @@ export default function MyTeamPage() {
   const rosterMovesExhausted = !!team && team.roster_moves_remaining <= 0;
   const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
   const teamEditsLocked = !teamEditsEnabled;
+
+  const resetMockComposer = () => {
+    setMockPendingScorerId(null);
+    setMockPendingAssisterId(null);
+    setMockPendingBlockId(null);
+    setMockPendingTurnover(false);
+    setMockPendingTurnoverId(null);
+    setMockPendingSwitchOnly(false);
+    setMockErrorMessage(null);
+  };
+
+  const resetMockState = () => {
+    setMockMode('idle');
+    setMockMatch(null);
+    setMockPostForm(null);
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const ensureMockMatch = () => mockMatch ?? buildInitialMockMatch(team, players);
+
+  const requestMockStart = () => {
+    setMockMatch(buildInitialMockMatch(team, players));
+    setMockMode('choose-possession');
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const startMockReporting = (possession: 1 | 2) => {
+    const nextMatch = ensureMockMatch();
+    setMockMatch({ ...nextMatch, possession, initial_possession: possession, t1_score: 0, t2_score: 0, events: [] });
+    setMockPanel(possession === 1 ? 't1' : 't2');
+    setMockMode('live');
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const saveMockAction = () => {
+    const currentMatch = mockMatch;
+    if (!currentMatch || mockPanel === 'log' || currentMatch.possession === null) return;
+
+    const isOffenseView =
+      (mockPanel === 't1' && currentMatch.possession === 1) ||
+      (mockPanel === 't2' && currentMatch.possession === 2);
+
+    const now = new Date().toISOString();
+    const actionGroup = currentMatch.events.length === 0
+      ? 1
+      : Math.max(...currentMatch.events.map((event) => event.action_group)) + 1;
+    let nextEvents = currentMatch.events.slice();
+    let nextEventId = currentMatch.events.length === 0
+      ? 1
+      : Math.max(...currentMatch.events.map((event) => event.id)) + 1;
+    const eventTeamId = currentMatch.possession === 1 ? currentMatch.t1_id : currentMatch.t2_id;
+    const defenseTeamId = currentMatch.possession === 1 ? currentMatch.t2_id : currentMatch.t1_id;
+    const viewedPlayers = currentMatch.players.filter((player) => player.team_id === (mockPanel === 't1' ? currentMatch.t1_id : currentMatch.t2_id));
+
+    if (mockPendingSwitchOnly) {
+      setMockMatch({
+        ...currentMatch,
+        possession: currentMatch.possession === 1 ? 2 : 1,
+      });
+      resetMockComposer();
+      return;
+    }
+
+    if (isOffenseView && mockPendingTurnover) {
+      nextEvents.push({
+        id: nextEventId,
+        player_id: null,
+        player_name: '',
+        team_id: eventTeamId,
+        event_type: 3,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else if (isOffenseView && mockPendingTurnoverId !== null) {
+      const player = viewedPlayers.find((entry) => entry.id === mockPendingTurnoverId);
+      if (!player) return;
+      nextEvents.push({
+        id: nextEventId,
+        player_id: player.id,
+        player_name: player.name,
+        team_id: eventTeamId,
+        event_type: 3,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else if (isOffenseView && mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId !== mockPendingAssisterId) {
+      const scorer = viewedPlayers.find((entry) => entry.id === mockPendingScorerId);
+      const assister = viewedPlayers.find((entry) => entry.id === mockPendingAssisterId);
+      if (!scorer || !assister) return;
+      nextEvents.push(
+        {
+          id: nextEventId,
+          player_id: assister.id,
+          player_name: assister.name,
+          team_id: eventTeamId,
+          event_type: 1,
+          created_at: now,
+          action_group: actionGroup,
+        },
+        {
+          id: nextEventId + 1,
+          player_id: scorer.id,
+          player_name: scorer.name,
+          team_id: eventTeamId,
+          event_type: 0,
+          created_at: now,
+          action_group: actionGroup,
+        },
+      );
+    } else if (!isOffenseView && mockPendingBlockId !== null) {
+      const blocker = viewedPlayers.find((entry) => entry.id === mockPendingBlockId);
+      if (!blocker) return;
+      nextEvents.push({
+        id: nextEventId,
+        player_id: blocker.id,
+        player_name: blocker.name,
+        team_id: defenseTeamId,
+        event_type: 2,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else {
+      return;
+    }
+
+    const recomputed = recomputeMockMatchState(currentMatch, nextEvents);
+    setMockMatch({ ...currentMatch, ...recomputed, events: nextEvents });
+    resetMockComposer();
+  };
+
+  const undoMockAction = () => {
+    if (!mockMatch || mockMatch.events.length === 0) return;
+    const lastGroup = Math.max(...mockMatch.events.map((event) => event.action_group));
+    const nextEvents = mockMatch.events.filter((event) => event.action_group !== lastGroup);
+    const recomputed = recomputeMockMatchState(mockMatch, nextEvents);
+    setMockMatch({ ...mockMatch, ...recomputed, events: nextEvents });
+    resetMockComposer();
+  };
+
+  const endMockMatch = () => {
+    if (!mockMatch) return;
+    setMockMatch({ ...mockMatch, possession: 3 });
+    setMockPostForm({
+      t1_score: mockMatch.t1_score,
+      t2_score: mockMatch.t2_score,
+      opponentSpirit: defaultSpirit(),
+      selfSpirit: defaultSpirit(),
+    });
+    setMockMode('post-match');
+    setMockConfirmAction(null);
+    resetMockComposer();
+  };
+
+  const handleMockConfirm = () => {
+    if (mockConfirmAction === 'start' && pendingMockPossession) {
+      startMockReporting(pendingMockPossession);
+    } else if (mockConfirmAction === 'save') {
+      saveMockAction();
+    } else if (mockConfirmAction === 'undo') {
+      undoMockAction();
+    } else if (mockConfirmAction === 'end') {
+      endMockMatch();
+    }
+    setMockConfirmAction(null);
+  };
+
+  const submitMockPostMatch = () => {
+    if (!mockPostForm) return;
+    if (countCharacters(mockPostForm.opponentSpirit.notes) > 250) {
+      setMockErrorMessage('Opponent notes must be 250 characters or fewer.');
+      return;
+    }
+    resetMockState();
+  };
 
   useEffect(() => {
     if (isLoading) return;
@@ -571,6 +879,11 @@ export default function MyTeamPage() {
 
   const fetchExistingSpirits = async () => {
     if (!token || !team) return;
+    const nextSubmittedSpirits = new Set<number>();
+    const nextSubmittedSelfSpirits = new Set<number>();
+    const nextOtherTeamSpirits = new Set<number>();
+    const nextConfirmedMatches = new Set<number>();
+
     for (const m of matches.filter(m => m.possession !== null && m.possession >= 3)) {
       try {
         const [spiritRes, confirmRes] = await Promise.all([
@@ -582,21 +895,26 @@ export default function MyTeamPage() {
           const otherTeamId = m.t1_id === team.id ? m.t2_id : m.t1_id;
           // Our submission rating the opponent
           if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === otherTeamId))
-            setSubmittedSpirits(prev => new Set([...prev, m.id]));
+            nextSubmittedSpirits.add(m.id);
           // Our submission rating ourselves
           if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === team.id))
-            setSubmittedSelfSpirits(prev => new Set([...prev, m.id]));
+            nextSubmittedSelfSpirits.add(m.id);
           // Opponent's submission rating us
           if (spirits.some(s => s.submitted_by_team_id === otherTeamId))
-            setOtherTeamSpirits(prev => new Set([...prev, m.id]));
+            nextOtherTeamSpirits.add(m.id);
         }
         if (confirmRes.ok) {
           const confirms: ScoreConfirmRow[] = await confirmRes.json();
           if (confirms.some(c => c.team_id === team.id))
-            setConfirmedMatches(prev => new Set([...prev, m.id]));
+            nextConfirmedMatches.add(m.id);
         }
       } catch {}
     }
+
+    setSubmittedSpirits(nextSubmittedSpirits);
+    setSubmittedSelfSpirits(nextSubmittedSelfSpirits);
+    setOtherTeamSpirits(nextOtherTeamSpirits);
+    setConfirmedMatches(nextConfirmedMatches);
   };
 
   useEffect(() => {
@@ -669,6 +987,465 @@ export default function MyTeamPage() {
 
   if (isLoading || loading) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">Loading...</Text></div></div>;
   if (!team) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">You are not assigned to a team.</Text></div></div>;
+
+  if (mockMode === 'choose-possession' && mockMatch) {
+    return (
+      <div className="min-h-screen px-4 py-4 md:px-0">
+        <div className="mx-auto max-w-lg">
+          {mockConfirmAction === 'start' && pendingMockPossession && (
+            <ConfirmDialog
+              title="Start Match"
+              message={`Set ${pendingMockPossession === 1 ? mockMatch.t1_name : mockMatch.t2_name} as starting on offense? This can be undone later.`}
+              onConfirm={handleMockConfirm}
+              onCancel={() => { setMockConfirmAction(null); setPendingMockPossession(null); }}
+            />
+          )}
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
+            <button
+              onClick={resetMockState}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:hover:text-white"
+            >
+              <ChevronLeft className="h-4 w-4" /> Back
+            </button>
+            <div className="text-lg font-semibold text-gray-900 dark:text-white">{mockMatch.t1_name} vs {mockMatch.t2_name}</div>
+            <div className="text-sm text-gray-500 dark:text-slate-400 mt-1">{mockMatch.time_label} &bull; {mockMatch.field_name}</div>
+            <div className="mt-6 text-sm font-medium text-gray-700 dark:text-slate-300">Who starts on offense?</div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <button
+                onClick={() => { setPendingMockPossession(1); setMockConfirmAction('start'); }}
+                className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10"
+              >
+                {mockMatch.t1_name}
+              </button>
+              <button
+                onClick={() => { setPendingMockPossession(2); setMockConfirmAction('start'); }}
+                className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10"
+              >
+                {mockMatch.t2_name}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (mockMode === 'live' && mockMatch) {
+    const t1Abbr = getTeamAbbreviation(mockMatch.t1_name, mockMatch.t1_abbreviation, 12);
+    const t2Abbr = getTeamAbbreviation(mockMatch.t2_name, mockMatch.t2_abbreviation, 12);
+    const displayT1Name = getHeaderTeamName(mockMatch.t1_name, mockMatch.t1_abbreviation);
+    const displayT2Name = getHeaderTeamName(mockMatch.t2_name, mockMatch.t2_abbreviation);
+    const viewedTeamId = mockPanel === 't1' ? mockMatch.t1_id : mockMatch.t2_id;
+    const viewedPlayers = mockMatch.players
+      .filter((player) => player.team_id === viewedTeamId)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const isOffenseView =
+      (mockPanel === 't1' && mockMatch.possession === 1) ||
+      (mockPanel === 't2' && mockMatch.possession === 2);
+    const saveEnabled = mockPanel !== 'log' && (
+      mockPendingSwitchOnly ||
+      (isOffenseView && mockPendingTurnover) ||
+      (isOffenseView && mockPendingTurnoverId !== null) ||
+      (isOffenseView && mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId !== mockPendingAssisterId) ||
+      (!isOffenseView && mockPendingBlockId !== null)
+    );
+
+    const saveLabel = mockPendingSwitchOnly
+      ? 'Switch'
+      : (mockPendingTurnover || mockPendingTurnoverId !== null)
+        ? 'Save Turnover'
+        : isOffenseView
+          ? 'Save Score'
+          : 'Save Block';
+
+    return (
+      <div className="min-h-screen px-3 py-3 md:px-0">
+        <div className="mx-auto max-w-2xl space-y-3">
+          {mockConfirmAction && (
+            <ConfirmDialog
+              title={mockConfirmAction === 'end' ? 'End Match' : mockConfirmAction === 'undo' ? 'Undo Event' : 'Save Event'}
+              message={
+                mockConfirmAction === 'end'
+                  ? 'Are you sure you want to end this match? This cannot be easily reversed.'
+                  : mockConfirmAction === 'undo'
+                    ? 'Undo the last recorded event?'
+                    : 'Save this event to the match log?'
+              }
+              onConfirm={handleMockConfirm}
+              onCancel={() => setMockConfirmAction(null)}
+            />
+          )}
+
+          <div className="flex items-center justify-between">
+            <button
+              onClick={resetMockState}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-50 dark:hover:bg-slate-800"
+            >
+              <ChevronLeft className="h-4 w-4" /> Back
+            </button>
+            <div className="flex-1 px-3 text-center text-sm font-medium text-gray-500 dark:text-slate-400">Mock Match</div>
+            <button
+              onClick={() => setMockConfirmAction('end')}
+              className="rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
+            >
+              End Match
+            </button>
+          </div>
+
+          {mockErrorMessage && (
+            <div className="rounded-xl border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-2">
+              <Text className="text-sm text-red-700 dark:text-red-200">{mockErrorMessage}</Text>
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <button
+                onClick={() => { setMockPanel('t1'); resetMockComposer(); }}
+                className={`rounded-xl border p-3 text-left transition ${
+                  mockPanel === 't1' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+                }`}
+              >
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={mockMatch.t1_name}>{displayT1Name}</div>
+                <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${mockMatch.possession === 1 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {mockMatch.possession === 1 ? 'OFFENSE' : 'DEFENSE'}
+                </div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{mockMatch.t1_score}</div>
+              </button>
+              <div className="text-lg text-gray-400 dark:text-slate-500 font-light">-</div>
+              <button
+                onClick={() => { setMockPanel('t2'); resetMockComposer(); }}
+                className={`rounded-xl border p-3 text-right transition ${
+                  mockPanel === 't2' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+                }`}
+              >
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={mockMatch.t2_name}>{displayT2Name}</div>
+                <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${mockMatch.possession === 2 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {mockMatch.possession === 2 ? 'OFFENSE' : 'DEFENSE'}
+                </div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{mockMatch.t2_score}</div>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-900 p-1">
+            {([
+              { key: 't1' as MockPanelKey, label: t1Abbr },
+              { key: 'log' as MockPanelKey, label: 'Log' },
+              { key: 't2' as MockPanelKey, label: t2Abbr },
+            ]).map(item => (
+              <button
+                key={item.key}
+                onClick={() => { setMockPanel(item.key); resetMockComposer(); }}
+                className={`truncate rounded-full px-2 py-2 text-sm font-semibold transition ${
+                  mockPanel === item.key
+                    ? 'bg-amber-400 text-gray-900 dark:text-slate-950'
+                    : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-800'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          {mockPanel === 'log' ? (
+            <div className="space-y-1.5">
+              {mockMatch.events.length === 0 && (
+                <Text className="text-sm text-gray-400 dark:text-slate-500 px-1">No events yet</Text>
+              )}
+              {mockMatch.events.slice().reverse().map(event => {
+                const isT1 = event.team_id === mockMatch.t1_id;
+                const playerName = event.player_name || (isT1 ? mockMatch.t1_name : mockMatch.t2_name);
+                return (
+                  <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
+                    <div className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 ${
+                      isT1 ? 'bg-gray-100 dark:bg-slate-800/80' : 'bg-sky-50 dark:bg-sky-500/10'
+                    }`}>
+                      <span className={`text-xs font-bold ${MOCK_EVENT_COLORS[event.event_type]}`}>{MOCK_EVENT_LABELS[event.event_type]}</span>
+                      <span className="text-sm text-gray-900 dark:text-white">{playerName}</span>
+                      <span className="text-[10px] text-gray-400 dark:text-slate-500">{formatMockLogTime(event.created_at)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : isOffenseView ? (
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
+                <button
+                  onClick={() => setMockConfirmAction('undo')}
+                  disabled={mockMatch.events.length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
+                >
+                  <RotateCcw className="h-4 w-4" /> Undo
+                </button>
+                <button
+                  onClick={() => setMockConfirmAction('save')}
+                  disabled={!saveEnabled}
+                  className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-bold transition ${
+                    saveEnabled ? 'bg-amber-400 text-gray-900 hover:bg-amber-300' : 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                  }`}
+                >
+                  <Save className="h-4 w-4" /> {saveLabel}
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_48px_48px_48px] border-b border-gray-200 dark:border-slate-700 px-4 py-2 text-[10px] font-bold tracking-wider text-gray-500 dark:text-slate-500 uppercase">
+                <div>Player</div>
+                <div className="text-center">Score</div>
+                <div className="text-center">Assist</div>
+                <div className="text-center">Turn</div>
+              </div>
+              {viewedPlayers.map(player => {
+                const isScorer = mockPendingScorerId === player.id;
+                const isAssister = mockPendingAssisterId === player.id;
+                const isTurnover = mockPendingTurnoverId === player.id;
+                return (
+                  <div
+                    key={player.id}
+                    className={`grid grid-cols-[1fr_48px_48px_48px] items-center border-b border-gray-100 dark:border-slate-800 px-4 py-2.5 ${
+                      isScorer || isAssister || isTurnover ? 'bg-amber-50 dark:bg-amber-400/5' : ''
+                    }`}
+                  >
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
+                    <button
+                      onClick={() => {
+                        setMockPendingScorerId(prev => prev === player.id ? null : player.id);
+                        setMockPendingTurnover(false);
+                        setMockPendingTurnoverId(null);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isScorer ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-green-100 dark:hover:bg-green-900/30'
+                      }`}
+                    >
+                      {isScorer ? 'S' : ''}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMockPendingAssisterId(prev => prev === player.id ? null : player.id);
+                        setMockPendingTurnover(false);
+                        setMockPendingTurnoverId(null);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isAssister ? 'bg-sky-500 text-white ring-2 ring-sky-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-sky-100 dark:hover:bg-sky-900/30'
+                      }`}
+                    >
+                      {isAssister ? 'A' : ''}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMockPendingTurnoverId(prev => prev === player.id ? null : player.id);
+                        setMockPendingScorerId(null);
+                        setMockPendingAssisterId(null);
+                        setMockPendingTurnover(false);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isTurnover ? 'bg-amber-500 text-white ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-amber-100 dark:hover:bg-amber-900/30'
+                      }`}
+                    >
+                      {isTurnover ? 'T' : ''}
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(false);
+                  setMockPendingTurnover(prev => !prev);
+                }}
+                className={`w-full grid grid-cols-[1fr_48px_48px_48px] items-center px-4 py-2.5 transition text-left border-b border-gray-100 dark:border-slate-800 ${
+                  mockPendingTurnover ? 'bg-amber-100 dark:bg-amber-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingTurnover ? 'text-amber-700 dark:text-amber-300' : 'text-gray-500 dark:text-slate-400'}`}>Turnover (no player)</span>
+                <span /><span />
+                <span className={`mx-auto h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                  mockPendingTurnover ? 'bg-amber-400 text-gray-900 ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                }`}>T</span>
+              </button>
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnover(false);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(prev => !prev);
+                }}
+                className={`w-full flex items-center justify-between px-4 py-3 transition ${
+                  mockPendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingSwitchOnly ? 'text-sky-700 dark:text-sky-300' : 'text-gray-500 dark:text-slate-400'}`}>Don&apos;t Know</span>
+                <ArrowLeftRight className={`h-4 w-4 ${mockPendingSwitchOnly ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400 dark:text-slate-500'}`} />
+              </button>
+              {mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId === mockPendingAssisterId && (
+                <div className="px-4 py-2 text-sm text-red-600 dark:text-red-300">Scorer and assister must be different</div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
+                <button
+                  onClick={() => setMockConfirmAction('undo')}
+                  disabled={mockMatch.events.length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
+                >
+                  <RotateCcw className="h-4 w-4" /> Undo
+                </button>
+                <button
+                  onClick={() => setMockConfirmAction('save')}
+                  disabled={!saveEnabled}
+                  className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-bold transition ${
+                    saveEnabled ? 'bg-amber-400 text-gray-900 hover:bg-amber-300' : 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                  }`}
+                >
+                  <Save className="h-4 w-4" /> {saveLabel}
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_56px] border-b border-gray-200 dark:border-slate-700 px-4 py-2 text-[10px] font-bold tracking-wider text-gray-500 dark:text-slate-500 uppercase">
+                <div>Player</div>
+                <div className="text-center">Block</div>
+              </div>
+              {viewedPlayers.map(player => {
+                const isBlock = mockPendingBlockId === player.id;
+                return (
+                  <div
+                    key={player.id}
+                    className={`grid grid-cols-[1fr_56px] items-center border-b border-gray-100 dark:border-slate-800 px-4 py-2.5 ${
+                      isBlock ? 'bg-violet-50 dark:bg-violet-400/5' : ''
+                    }`}
+                  >
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
+                    <button
+                      onClick={() => {
+                        setMockPendingBlockId(prev => prev === player.id ? null : player.id);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isBlock ? 'bg-violet-500 text-white ring-2 ring-violet-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-violet-100 dark:hover:bg-violet-900/30'
+                      }`}
+                    >
+                      {isBlock ? 'B' : ''}
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnover(false);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(prev => !prev);
+                }}
+                className={`w-full flex items-center justify-between px-4 py-3 transition ${
+                  mockPendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingSwitchOnly ? 'text-sky-700 dark:text-sky-300' : 'text-gray-500 dark:text-slate-400'}`}>Don&apos;t Know</span>
+                <ArrowLeftRight className={`h-4 w-4 ${mockPendingSwitchOnly ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400 dark:text-slate-500'}`} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (mockMode === 'post-match' && mockMatch && mockPostForm) {
+    const myDisplayName = getCompactTeamName(mockMatch.t1_name, mockMatch.t1_abbreviation);
+    const oppDisplayName = getCompactTeamName(mockMatch.t2_name, mockMatch.t2_abbreviation);
+    const opponentPlayers = mockMatch.players.filter((player) => player.team_id === mockMatch.t2_id);
+    const teamPlayers = mockMatch.players.filter((player) => player.team_id === mockMatch.t1_id);
+
+    return (
+      <div className="py-4 px-3 min-h-screen">
+        <div className="max-w-lg mx-auto space-y-3">
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={resetMockState}
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-50 dark:hover:bg-slate-800"
+              >
+                <ChevronLeft className="h-4 w-4" /> Back
+              </button>
+              <Text variant="primary" className="text-sm font-semibold">Mock Post-Match</Text>
+            </div>
+
+            {mockErrorMessage && (
+              <div className="rounded-xl border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-2">
+                <Text className="text-sm text-red-700 dark:text-red-200">{mockErrorMessage}</Text>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <Text variant="secondary" className="text-[11px] mb-1 block break-words">{myDisplayName}</Text>
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={mockPostForm.t1_score}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t1_score: parseInt(e.target.value) || 0 })}
+                    className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                  />
+                </div>
+                <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
+                <div className="flex-1 min-w-0">
+                  <Text variant="secondary" className="text-[11px] mb-1 block break-words">{oppDisplayName}</Text>
+                  <input
+                    type="number"
+                    min="0"
+                    inputMode="numeric"
+                    value={mockPostForm.t2_score}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t2_score: parseInt(e.target.value) || 0 })}
+                    className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <SpiritForm
+              label={`Rate ${oppDisplayName}`}
+              form={mockPostForm.opponentSpirit}
+              onChange={opponentSpirit => setMockPostForm({ ...mockPostForm, opponentSpirit })}
+              playerList={opponentPlayers}
+              playerLabel={oppDisplayName}
+              showNotes
+            />
+
+            <div className="border-t border-gray-200 dark:border-slate-700" />
+
+            <SpiritForm
+              label={`Rate ${myDisplayName} (Self)`}
+              form={mockPostForm.selfSpirit}
+              onChange={selfSpirit => setMockPostForm({ ...mockPostForm, selfSpirit })}
+              playerList={teamPlayers}
+              playerLabel={myDisplayName}
+              showMvpMsp={false}
+            />
+
+            <button
+              onClick={submitMockPostMatch}
+              className="w-full py-2.5 text-sm font-semibold rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 transition"
+            >
+              Submit All
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const headerTeamName = getHeaderTeamName(team.name, team.abbreviation);
 
@@ -1030,6 +1807,43 @@ export default function MyTeamPage() {
               );
             })}
             {players.length === 0 && !isAdding && <Text variant="secondary" className="text-sm text-center py-4">No players added yet</Text>}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+          <div className="mb-2">
+            <Text as="h2" variant="primary" className="text-sm font-bold uppercase tracking-wider">Mock Match</Text>
+          </div>
+          <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800">
+            <div className="p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Text variant="secondary" className="text-[11px]">Mock Match · Mock Field</Text>
+                <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-slate-400">Upcoming</span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">
+                  {getCompactTeamName(team.name, team.abbreviation)}
+                </Text>
+                <div className="shrink-0 flex items-center gap-1">
+                  <Text variant="primary" className="text-xl font-bold tabular-nums">-</Text>
+                  <Text variant="secondary" className="text-sm">:</Text>
+                  <Text variant="primary" className="text-xl font-bold tabular-nums">-</Text>
+                </div>
+                <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">
+                  {getCompactTeamName('Test Team', 'TEST')}
+                </Text>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={requestMockStart}
+                  className="flex-1 rounded-lg bg-amber-400 py-2 text-sm font-semibold text-gray-900 hover:bg-amber-300 transition"
+                >
+                  Start Reporting
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 

@@ -55,6 +55,7 @@ interface MatchDetail {
   possession: number | null;
   match_type: number;
   reporting_enabled: boolean;
+  is_complete: boolean;
   field_name: string;
   time: string;
   started_at?: string | null;
@@ -408,10 +409,13 @@ function AdminContent() {
       setErrorMessage(null);
       await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/end`));
       resetComposer();
-      setActiveMatchId(null);
       await mutateMatches();
       if (isPoc) {
         router.push('/myteam');
+      } else if (isSuperAdmin) {
+        await mutateActiveMatch();
+      } else {
+        setActiveMatchId(null);
       }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to end the match right now.');
@@ -858,9 +862,78 @@ function AdminContent() {
     );
   }
 
+  if (activeMatch && matchStatus === 'ended' && isSuperAdmin && !activeMatch.is_complete) {
+    const displayT1Name = getAdminDisplayTeamName(activeMatch.t1_name, activeMatch.t1_abbreviation);
+    const displayT2Name = getAdminDisplayTeamName(activeMatch.t2_name, activeMatch.t2_abbreviation);
+
+    return (
+      <div className="min-h-screen px-3 py-3 md:px-0">
+        <div className="mx-auto max-w-2xl space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <button
+              onClick={() => setActiveMatchId(null)}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-50 dark:hover:bg-slate-800"
+            >
+              <ChevronLeft className="h-4 w-4" /> Back
+            </button>
+            <button
+              onClick={() => setChoosingPossession(activeMatch.id)}
+              className="rounded-full bg-amber-400 px-5 py-2 text-sm font-semibold text-gray-900 transition hover:bg-amber-300"
+            >
+              Resume Reporting
+            </button>
+          </div>
+
+          <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-400/10 px-4 py-3">
+            <Text className="text-sm text-amber-800 dark:text-amber-200">
+              Match is ended but not complete yet.
+            </Text>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 p-3 text-left">
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={activeMatch.t1_name}>{displayT1Name}</div>
+                <div className="text-[10px] font-bold tracking-widest mt-0.5 text-gray-500 dark:text-slate-400">ENDED</div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{activeMatch.t1_score}</div>
+              </div>
+              <div className="text-lg text-gray-400 dark:text-slate-500 font-light">-</div>
+              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 p-3 text-right">
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={activeMatch.t2_name}>{displayT2Name}</div>
+                <div className="text-[10px] font-bold tracking-widest mt-0.5 text-gray-500 dark:text-slate-400">ENDED</div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{activeMatch.t2_score}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            {activeMatch.events.length === 0 && (
+              <Text className="text-sm text-gray-400 dark:text-slate-500 px-1">No events yet</Text>
+            )}
+            {activeMatch.events.slice().reverse().map(event => {
+              const isT1 = event.team_id === activeMatch.t1_id;
+              const playerName = event.player_name || (isT1 ? activeMatch.t1_name : activeMatch.t2_name);
+              return (
+                <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
+                  <div className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 ${
+                    isT1 ? 'bg-gray-100 dark:bg-slate-800/80' : 'bg-sky-50 dark:bg-sky-500/10'
+                  }`}>
+                    <span className={`text-xs font-bold ${EVENT_COLORS[event.event_type]}`}>{EVENT_LABELS[event.event_type]}</span>
+                    <span className="text-sm text-gray-900 dark:text-white">{playerName}</span>
+                    <span className="text-[10px] text-gray-400 dark:text-slate-500">{formatLogTime(event.created_at)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // POSSESSION CHOOSER
   if (choosingPossession !== null) {
-    const match = matches.find(m => m.id === choosingPossession);
+    const match = matches.find(m => m.id === choosingPossession) ?? (activeMatch?.id === choosingPossession ? activeMatch : null);
     if (match) {
       const reportingLocked = !isSuperAdmin && !match.reporting_enabled;
       return (

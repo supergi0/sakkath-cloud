@@ -453,6 +453,17 @@ fn reporting_round_defaults() -> [(i64, &'static str, bool); 9] {
     ]
 }
 
+async fn seed_persistent_random_state(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO persistent_random_state (name, seed)
+           VALUES ('standings_c7_coin_toss', ABS(RANDOM()))"#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 async fn seed_reporting_round_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     for (round_key, label, is_enabled) in reporting_round_defaults() {
         sqlx::query(
@@ -664,7 +675,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS persistent_random_state (
+            name VARCHAR(64) PRIMARY KEY,
+            seed INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     seed_reporting_round_settings(pool).await?;
+    seed_persistent_random_state(pool).await?;
     normalize_field_names(pool).await?;
 
     sqlx::query(
@@ -916,6 +941,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     seed_reporting_round_settings(pool).await?;
+    seed_persistent_random_state(pool).await?;
     normalize_field_names(pool).await?;
 
     Ok(())

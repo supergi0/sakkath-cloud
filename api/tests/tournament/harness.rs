@@ -8,6 +8,7 @@ use api::{AppState, build_api_only_app, migration};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use rand::random;
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs;
@@ -18,15 +19,49 @@ use tower::ServiceExt;
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 pub type TestResult<T = ()> = Result<T, DynError>;
 
-pub const STAFF_PASSWORD: &str = "helloworld";
-
 static TEST_ENV: Once = Once::new();
 
 #[derive(Debug, Clone)]
+pub struct LoginCredential {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordManifest {
+    #[serde(rename = "super")]
+    super_admins: Vec<PasswordManifestEntry>,
+    opens: Vec<PasswordManifestEntry>,
+    womens: Vec<PasswordManifestEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PasswordManifestEntry {
+    email: String,
+    password: String,
+    team: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Credentials {
-    pub super_email: String,
-    pub admin_emails: Vec<String>,
-    pub poc_by_team: HashMap<i64, String>,
+    super_admins: Vec<LoginCredential>,
+    team_admins_by_team: HashMap<i64, LoginCredential>,
+}
+
+impl Credentials {
+    pub fn super_admin(&self, index: usize) -> &LoginCredential {
+        assert!(
+            !self.super_admins.is_empty(),
+            "expected at least one super-admin credential"
+        );
+        &self.super_admins[index % self.super_admins.len()]
+    }
+
+    pub fn team_admin(&self, team_id: i64) -> &LoginCredential {
+        self.team_admins_by_team
+            .get(&team_id)
+            .unwrap_or_else(|| panic!("missing team-admin credential for team {team_id}"))
+    }
 }
 
 pub struct Harness {
@@ -48,6 +83,7 @@ impl Harness {
         let db = migration::init_db_pool(&database_url, false).await?;
         migration::run_migrations(&db).await?;
         migration::verify_migrations(&db).await?;
+        api::helpers::sorting::initialize_persistent_coin_toss_seed(&db).await?;
 
         let credentials = load_credentials(&db).await?;
         let app = build_api_only_app(AppState {
@@ -400,32 +436,93 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{}", path.display(), suffix))
 }
 
-async fn load_credentials(db: &SqlitePool) -> TestResult<Credentials> {
-    let super_email: (String,) =
-        sqlx::query_as("SELECT email FROM users WHERE role = 0 AND deleted_at IS NULL LIMIT 1")
-            .fetch_one(db)
-            .await?;
+fn password_manifest_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("api crate should have a repo root parent")
+        .join("passwords.json")
+}
 
-    let admin_emails: Vec<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT email FROM users WHERE role = 1 AND deleted_at IS NULL ORDER BY email",
+fn load_password_manifest() -> TestResult<PasswordManifest> {
+    let manifest_path = password_manifest_path();
+    let raw = fs::read_to_string(&manifest_path)?;
+    Ok(serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "failed to parse password manifest at {}: {error}",
+            manifest_path.display()
+        )
+    })?)
+}
+
+async fn load_credentials(db: &SqlitePool) -> TestResult<Credentials> {
+    let manifest = load_password_manifest()?;
+
+    let super_passwords_by_email: HashMap<String, LoginCredential> = manifest
+        .super_admins
+        .into_iter()
+        .map(|entry| {
+            let _ = entry.team.as_deref();
+            (
+                entry.email.clone(),
+                LoginCredential {
+                    email: entry.email,
+                    password: entry.password,
+                },
+            )
+        })
+        .collect();
+
+    let team_passwords_by_email: HashMap<String, LoginCredential> = manifest
+        .opens
+        .into_iter()
+        .chain(manifest.womens.into_iter())
+        .map(|entry| {
+            let _ = entry.team.as_deref();
+            (
+                entry.email.clone(),
+                LoginCredential {
+                    email: entry.email,
+                    password: entry.password,
+                },
+            )
+        })
+        .collect();
+
+    let super_admins = sqlx::query_as::<_, (String,)>(
+        "SELECT email FROM users WHERE role = 0 AND deleted_at IS NULL ORDER BY email",
     )
     .fetch_all(db)
     .await?
     .into_iter()
-    .map(|row| row.0)
-    .collect();
+    .map(|row| {
+        super_passwords_by_email
+            .get(&row.0)
+            .cloned()
+            .ok_or_else(|| format!("missing password manifest entry for super admin {}", row.0))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
-    let poc_by_team: HashMap<i64, String> = sqlx::query_as::<_, (i64, String)>(
+    let team_admins_by_team = sqlx::query_as::<_, (i64, String)>(
         "SELECT team_id, email FROM users WHERE role = 3 AND team_id IS NOT NULL AND deleted_at IS NULL ORDER BY team_id",
     )
     .fetch_all(db)
     .await?
     .into_iter()
-    .collect();
+    .map(|(team_id, email)| {
+        let credential = team_passwords_by_email
+            .get(&email)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "missing password manifest entry for team-admin {email} on team {team_id}"
+                )
+            })?;
+        Ok((team_id, credential))
+    })
+    .collect::<Result<HashMap<_, _>, String>>()?;
 
     Ok(Credentials {
-        super_email: super_email.0,
-        admin_emails,
-        poc_by_team,
+        super_admins,
+        team_admins_by_team,
     })
 }

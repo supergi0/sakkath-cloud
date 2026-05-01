@@ -1,23 +1,47 @@
 use crate::{AppState, build_api_only_app};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
-use chrono::{Duration, Utc};
-use jsonwebtoken::{EncodingKey, Header, encode};
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
+use std::fs;
 use std::io;
+use std::path::PathBuf;
 use tower::ServiceExt;
 
-const ADMIN_ONE_EMAIL: &str = "admin1@sakkath.com";
-const ADMIN_TWO_EMAIL: &str = "admin2@sakkath.com";
-const SUPER_EMAIL: &str = "super@sakkath.com";
 const CLI_JWT_SECRET: &str = "mock-database-cli-secret";
 const MAX_PARTIAL_GAMES: usize = 15;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 type MockResult<T = ()> = Result<T, DynError>;
+
+#[derive(Debug, Deserialize)]
+struct PasswordManifest {
+    #[serde(rename = "super")]
+    super_admins: Vec<PasswordManifestEntry>,
+    opens: Vec<PasswordManifestEntry>,
+    womens: Vec<PasswordManifestEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PasswordManifestEntry {
+    email: String,
+    password: String,
+    team: Option<String>,
+}
+
+#[derive(Clone)]
+struct LoginCredential {
+    email: String,
+    password: String,
+}
+
+struct MockCredentials {
+    super_admin: LoginCredential,
+    team_admins_by_team: HashMap<i64, LoginCredential>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MockRoundTarget {
@@ -221,28 +245,57 @@ impl RouterClient {
         self.request_json(method, path, Some(token), body, StatusCode::OK)
             .await
     }
+
+    async fn login(&self, email: &str, password: &str) -> MockResult<String> {
+        let response: LoginResponse = self
+            .request_json(
+                Method::POST,
+                "/v1/auth/login",
+                None,
+                Some(json!({
+                    "email": email,
+                    "password": password,
+                })),
+                StatusCode::OK,
+            )
+            .await?;
+        Ok(response.token)
+    }
 }
 
 struct StaffTokens {
-    admin_one: String,
-    admin_two: String,
     super_admin: String,
+    team_admins_by_team: HashMap<i64, String>,
 }
 
 impl StaffTokens {
-    fn reporter_token(&self, index: usize) -> &str {
-        if index.is_multiple_of(2) {
-            self.admin_one.as_str()
-        } else {
-            self.admin_two.as_str()
-        }
+    fn team_admin(&self, team_id: i64) -> MockResult<&str> {
+        self.team_admins_by_team
+            .get(&team_id)
+            .map(String::as_str)
+            .ok_or_else(|| error(format!("missing team-admin token for team {team_id}")))
     }
 
-    async fn load(pool: &SqlitePool) -> MockResult<Self> {
+    async fn load(client: &RouterClient, pool: &SqlitePool) -> MockResult<Self> {
+        let credentials = load_credentials(pool).await?;
+        let super_admin = client
+            .login(
+                credentials.super_admin.email.as_str(),
+                credentials.super_admin.password.as_str(),
+            )
+            .await?;
+
+        let mut team_admins_by_team = HashMap::new();
+        for (team_id, credential) in credentials.team_admins_by_team {
+            let token = client
+                .login(credential.email.as_str(), credential.password.as_str())
+                .await?;
+            team_admins_by_team.insert(team_id, token);
+        }
+
         Ok(Self {
-            admin_one: build_staff_token(pool, ADMIN_ONE_EMAIL, 1).await?,
-            admin_two: build_staff_token(pool, ADMIN_TWO_EMAIL, 1).await?,
-            super_admin: build_staff_token(pool, SUPER_EMAIL, 0).await?,
+            super_admin,
+            team_admins_by_team,
         })
     }
 }
@@ -309,15 +362,21 @@ struct MutationResponse {
     possession: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct LoginResponse {
+    token: String,
+}
+
 pub async fn mock_existing_database(
     pool: &SqlitePool,
     request: MockDatabaseRequest,
 ) -> MockResult<MockDatabaseSummary> {
     ensure_cli_jwt_secret();
     validate_existing_progress(pool, request.target).await?;
+    crate::helpers::sorting::initialize_persistent_coin_toss_seed(pool).await?;
 
     let client = RouterClient::new(pool);
-    let staff = StaffTokens::load(pool).await?;
+    let staff = StaffTokens::load(&client, pool).await?;
     let mut rng = StdRng::seed_from_u64(rand::random::<u64>());
 
     let mut summary = MockDatabaseSummary {
@@ -474,7 +533,7 @@ async fn ensure_stage_matches_for_division(
             .mutation(
                 Method::POST,
                 &format!("/v1/admin/schedule/{division}/generate"),
-                staff.admin_one.as_str(),
+                staff.super_admin.as_str(),
                 None,
             )
             .await?;
@@ -566,7 +625,7 @@ async fn finish_match(
     );
 
     let mut possession = detail.possession;
-    let mut reporter_index = match_id as usize;
+    let reporter_token = staff.team_admin(detail.t1_id)?;
 
     if possession.is_none() {
         let first_scoring_team = scoring_sequence.first().copied().ok_or_else(|| {
@@ -584,13 +643,12 @@ async fn finish_match(
             .mutation(
                 Method::POST,
                 &format!("/v1/admin/matches/{match_id}/start"),
-                staff.reporter_token(reporter_index),
+                reporter_token,
                 Some(json!({ "possession": start_possession })),
             )
             .await?;
         ensure_success(&response, &format!("start match {match_id}"))?;
         possession = response.possession;
-        reporter_index += 1;
     }
 
     for scoring_team in scoring_sequence {
@@ -599,7 +657,7 @@ async fn finish_match(
                 .mutation(
                     Method::POST,
                     &format!("/v1/admin/matches/{match_id}/switch-possession"),
-                    staff.reporter_token(reporter_index),
+                    reporter_token,
                     None,
                 )
                 .await?;
@@ -608,7 +666,6 @@ async fn finish_match(
                 &format!("switch possession for match {match_id}"),
             )?;
             possession = response.possession;
-            reporter_index += 1;
         }
 
         let players = if scoring_team == detail.t1_id {
@@ -622,7 +679,7 @@ async fn finish_match(
             .mutation(
                 Method::POST,
                 &format!("/v1/admin/matches/{match_id}/event"),
-                staff.reporter_token(reporter_index),
+                reporter_token,
                 Some(json!({
                     "player_id": assist_player_id,
                     "event_type": 1,
@@ -633,13 +690,12 @@ async fn finish_match(
             &assist_response,
             &format!("record assist for match {match_id}"),
         )?;
-        reporter_index += 1;
 
         let goal_response = client
             .mutation(
                 Method::POST,
                 &format!("/v1/admin/matches/{match_id}/event"),
-                staff.reporter_token(reporter_index),
+                reporter_token,
                 Some(json!({
                     "player_id": goal_player_id,
                     "event_type": 0,
@@ -648,7 +704,6 @@ async fn finish_match(
             .await?;
         ensure_success(&goal_response, &format!("record goal for match {match_id}"))?;
         possession = goal_response.possession;
-        reporter_index += 1;
     }
 
     let final_detail = client.get_match_detail(match_id).await?;
@@ -664,7 +719,7 @@ async fn finish_match(
             .mutation(
                 Method::POST,
                 &format!("/v1/admin/matches/{match_id}/end"),
-                staff.reporter_token(reporter_index),
+                reporter_token,
                 None,
             )
             .await?;
@@ -693,11 +748,12 @@ async fn ensure_post_match_data(
         detail.t1_score,
         detail.t2_score,
     ) {
+        let team_one_token = staff.team_admin(detail.t1_id)?;
         let response = client
             .mutation(
                 Method::POST,
                 &format!("/v1/poc/matches/{match_id}/confirm-score"),
-                staff.admin_one.as_str(),
+                team_one_token,
                 Some(json!({
                     "team_id": detail.t1_id,
                     "t1_score": detail.t1_score,
@@ -718,11 +774,12 @@ async fn ensure_post_match_data(
         detail.t1_score,
         detail.t2_score,
     ) {
+        let team_two_token = staff.team_admin(detail.t2_id)?;
         let response = client
             .mutation(
                 Method::POST,
                 &format!("/v1/poc/matches/{match_id}/confirm-score"),
-                staff.admin_two.as_str(),
+                team_two_token,
                 Some(json!({
                     "team_id": detail.t2_id,
                     "t1_score": detail.t1_score,
@@ -743,11 +800,12 @@ async fn ensure_post_match_data(
 
     if needs_spirit_submission(&spirit_rows, detail.t2_id, detail.t1_id) {
         let payload = build_spirit_payload(match_id, detail.t2_id, detail.t1_id, &t2_players);
+        let team_one_token = staff.team_admin(detail.t1_id)?;
         let response = client
             .mutation(
                 Method::PUT,
                 &format!("/v1/poc/matches/{match_id}/spirit-wfdf"),
-                staff.admin_one.as_str(),
+                team_one_token,
                 Some(payload),
             )
             .await?;
@@ -763,11 +821,12 @@ async fn ensure_post_match_data(
 
     if needs_spirit_submission(&spirit_rows, detail.t1_id, detail.t2_id) {
         let payload = build_spirit_payload(match_id, detail.t1_id, detail.t2_id, &t1_players);
+        let team_two_token = staff.team_admin(detail.t2_id)?;
         let response = client
             .mutation(
                 Method::PUT,
                 &format!("/v1/poc/matches/{match_id}/spirit-wfdf"),
-                staff.admin_two.as_str(),
+                team_two_token,
                 Some(payload),
             )
             .await?;
@@ -830,46 +889,6 @@ async fn validate_existing_progress(pool: &SqlitePool, target: MockRoundTarget) 
     Ok(())
 }
 
-async fn build_staff_token(
-    pool: &SqlitePool,
-    email: &str,
-    expected_role: i64,
-) -> MockResult<String> {
-    let user: Option<(i64, String, i64)> =
-        sqlx::query_as("SELECT id, email, role FROM users WHERE email = ? AND deleted_at IS NULL")
-            .bind(email)
-            .fetch_optional(pool)
-            .await?;
-
-    let (user_id, email, role) = user.ok_or_else(|| {
-        error(format!(
-            "required staff account {email} is missing; seed the default staff before running mock-database"
-        ))
-    })?;
-    if role != expected_role {
-        return Err(error(format!(
-            "staff account {email} has role {role}, expected {expected_role}"
-        )));
-    }
-
-    let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24))
-        .expect("valid timestamp")
-        .timestamp() as usize;
-    let claims = crate::controllers::user::Claims {
-        user_id,
-        email,
-        exp: expiration,
-    };
-    let secret = std::env::var("JWT_SECRET")?;
-
-    Ok(encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_ref()),
-    )?)
-}
-
 fn ensure_cli_jwt_secret() {
     let secret_missing = std::env::var("JWT_SECRET")
         .map(|value| value.trim().is_empty())
@@ -879,6 +898,106 @@ fn ensure_cli_jwt_secret() {
             std::env::set_var("JWT_SECRET", CLI_JWT_SECRET);
         }
     }
+
+    let turnstile_enabled = std::env::var("TURNSTILE_SECRET_KEY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if turnstile_enabled {
+        unsafe {
+            std::env::set_var("TURNSTILE_SECRET_KEY", "");
+        }
+    }
+}
+
+fn password_manifest_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("api crate should have a repo root parent")
+        .join("passwords.json")
+}
+
+fn load_password_manifest() -> MockResult<PasswordManifest> {
+    let manifest_path = password_manifest_path();
+    let raw = fs::read_to_string(&manifest_path)?;
+    match serde_json::from_str(&raw) {
+        Ok(manifest) => Ok(manifest),
+        Err(parse_error) => Err(error(format!(
+            "failed to parse password manifest at {}: {parse_error}",
+            manifest_path.display()
+        ))),
+    }
+}
+
+async fn load_credentials(pool: &SqlitePool) -> MockResult<MockCredentials> {
+    let manifest = load_password_manifest()?;
+
+    let super_passwords_by_email: HashMap<String, LoginCredential> = manifest
+        .super_admins
+        .into_iter()
+        .map(|entry| {
+            let _ = entry.team.as_deref();
+            (
+                entry.email.clone(),
+                LoginCredential {
+                    email: entry.email,
+                    password: entry.password,
+                },
+            )
+        })
+        .collect();
+
+    let team_passwords_by_email: HashMap<String, LoginCredential> = manifest
+        .opens
+        .into_iter()
+        .chain(manifest.womens.into_iter())
+        .map(|entry| {
+            let _ = entry.team.as_deref();
+            (
+                entry.email.clone(),
+                LoginCredential {
+                    email: entry.email,
+                    password: entry.password,
+                },
+            )
+        })
+        .collect();
+
+    let super_admin_email: (String,) = sqlx::query_as(
+        "SELECT email FROM users WHERE role = 0 AND deleted_at IS NULL ORDER BY email LIMIT 1",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let super_admin = super_passwords_by_email
+        .get(&super_admin_email.0)
+        .cloned()
+        .ok_or_else(|| {
+            error(format!(
+                "missing password manifest entry for super admin {}",
+                super_admin_email.0
+            ))
+        })?;
+
+    let team_admins_by_team = sqlx::query_as::<_, (i64, String)>(
+        "SELECT team_id, email FROM users WHERE role = 3 AND team_id IS NOT NULL AND deleted_at IS NULL ORDER BY team_id",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(team_id, email)| {
+        let credential = team_passwords_by_email.get(&email).cloned().ok_or_else(|| {
+            error(format!(
+                "missing password manifest entry for team-admin {email} on team {team_id}"
+            ))
+        })?;
+        Ok((team_id, credential))
+    })
+    .collect::<MockResult<HashMap<_, _>>>()?;
+
+    Ok(MockCredentials {
+        super_admin,
+        team_admins_by_team,
+    })
 }
 
 fn choose_t1_winner(match_type: i64, t1_rank: i64, t2_rank: i64, rng: &mut StdRng) -> bool {

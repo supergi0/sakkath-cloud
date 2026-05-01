@@ -205,7 +205,7 @@ pub(crate) async fn run_with_summary(
                     "pre-existing completed match snapshot".to_string()
                 };
 
-                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, true)
                     .await?;
                 reporter.record_match_result(
                     "full-tournament",
@@ -272,7 +272,7 @@ pub(crate) async fn run_with_summary(
                     "pre-existing completed match snapshot".to_string()
                 };
 
-                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+                submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, true)
                     .await?;
                 reporter.record_match_result(
                     "full-tournament",
@@ -345,7 +345,7 @@ pub(crate) async fn run_with_summary(
                 "pre-existing completed match snapshot".to_string()
             };
 
-            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, false)
+            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, true)
                 .await?;
             reporter.record_match_result(
                 "full-tournament",

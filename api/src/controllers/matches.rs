@@ -87,6 +87,7 @@ pub struct MatchDetail {
     pub possession: Option<i64>,
     pub match_type: i64,
     pub reporting_enabled: bool,
+    pub is_complete: bool,
     pub field_name: String,
     pub time: String,
     pub stream_url: Option<String>,
@@ -533,6 +534,13 @@ pub async fn get_match_detail(
     };
 
     let server_time = india_now_rfc3339();
+    let is_complete = if id > 0 {
+        match_post_match_is_complete(&state.db, match_id)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     let players = sqlx::query_as::<_, MatchPlayer>(
         "SELECT id, name, common_name, team_id FROM users WHERE team_id IN (?, ?) AND role = 2 AND deleted_at IS NULL"
@@ -578,6 +586,7 @@ pub async fn get_match_detail(
         possession,
         match_type,
         reporting_enabled: reporting_enabled != 0,
+        is_complete,
         field_name,
         time,
         stream_url,
@@ -659,8 +668,8 @@ pub async fn start_match(
         ));
     }
 
-    let current: Option<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT possession, type FROM matches WHERE id = ? AND deleted_at IS NULL")
+    let current: Option<(i64, Option<i64>, i64)> =
+        sqlx::query_as("SELECT t1_id, possession, type FROM matches WHERE id = ? AND deleted_at IS NULL")
             .bind(match_id)
             .fetch_optional(&state.db)
             .await
@@ -673,7 +682,7 @@ pub async fn start_match(
                 )
             })?;
 
-    let (current_possession, match_type) = current.ok_or_else(|| {
+    let (t1_id, current_possession, match_type) = current.ok_or_else(|| {
         match_error_status(
             match_id,
             "start",
@@ -681,7 +690,11 @@ pub async fn start_match(
             "match not found",
         )
     })?;
-    if current_possession.is_some() {
+
+    let reopening_ended_match =
+        access.role == 0 && matches!(current_possession, Some(value) if value >= 3);
+
+    if current_possession.is_some() && !reopening_ended_match {
         return Err(match_error_status(
             match_id,
             "start",
@@ -690,19 +703,40 @@ pub async fn start_match(
         ));
     }
 
-    sqlx::query("UPDATE matches SET possession = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-        .bind(possession)
-        .bind(match_id)
-        .execute(&state.db)
-        .await
-        .map_err(|error| {
-            match_error_status(
-                match_id,
-                "start",
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to start match: {error}"),
-            )
-        })?;
+    if reopening_ended_match {
+        clear_post_match_state(&state.db, match_id).await?;
+        sqlx::query("UPDATE matches SET possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(possession)
+            .bind(match_id)
+            .execute(&state.db)
+            .await
+            .map_err(|error| {
+                match_error_status(
+                    match_id,
+                    "start",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to reopen match: {error}"),
+                )
+            })?;
+
+        let division = load_division_for_team(&state.db, t1_id).await?;
+        sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
+    } else {
+        sqlx::query("UPDATE matches SET possession = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(possession)
+            .bind(match_id)
+            .execute(&state.db)
+            .await
+            .map_err(|error| {
+                match_error_status(
+                    match_id,
+                    "start",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to start match: {error}"),
+                )
+            })?;
+    }
 
     state.live_updates.publish_match_updated(match_id);
     record_match_info(
@@ -712,6 +746,7 @@ pub async fn start_match(
             "match_type": match_type,
             "actor_user_id": access.user_id,
             "possession": possession,
+            "reopened": reopening_ended_match,
         }),
     );
 
@@ -796,8 +831,6 @@ pub async fn end_match(
             )
         })?;
 
-    let auto_action =
-        crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
     sorting::refresh_intermediate_standings_cache(&state.db, division).await;
     cache::invalidate_division(division).await;
     cache::invalidate_player_stats().await;
@@ -811,9 +844,14 @@ pub async fn end_match(
             "actor_user_id": access.user_id,
             "t1_score": t1_score,
             "t2_score": t2_score,
-            "auto_action": auto_action,
         }),
     );
+
+    let auto_action = crate::controllers::scheduling::auto_advance_division_if_ready(
+        &state.db,
+        division,
+    )
+    .await;
 
     let (started_at, updated_at, server_time) =
         load_match_timing_snapshot(&state.db, match_id).await?;
@@ -1651,9 +1689,11 @@ pub async fn submit_wfdf_spirit(
         cache::invalidate_division(division).await;
     }
 
+    let (is_complete, auto_action) = settle_match_completion_if_ready(&state, match_id).await?;
+
     state.live_updates.publish_match_updated(match_id);
 
-    Ok(Json(serde_json::json!({"success": true})))
+    Ok(Json(serde_json::json!({"success": true, "is_complete": is_complete, "auto_action": auto_action})))
 }
 
 // Get spirit scores for a match
@@ -1708,11 +1748,12 @@ pub async fn confirm_score(
     let finalized = match_scores_are_finalized(&state.db, match_id)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (is_complete, auto_action) = settle_match_completion_if_ready(&state, match_id).await?;
 
     state.live_updates.publish_match_updated(match_id);
 
     Ok(Json(
-        serde_json::json!({"success": true, "finalized": finalized}),
+        serde_json::json!({"success": true, "finalized": finalized, "is_complete": is_complete, "auto_action": auto_action}),
     ))
 }
 
@@ -1827,11 +1868,82 @@ async fn validate_spirit_player(
     Ok(())
 }
 
+async fn load_division_for_team(
+    db: &sqlx::SqlitePool,
+    team_id: i64,
+) -> Result<i64, axum::http::StatusCode> {
+    let division: Option<(i64,)> =
+        sqlx::query_as("SELECT division FROM teams WHERE id = ? AND deleted_at IS NULL")
+            .bind(team_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    division
+        .map(|row| row.0)
+        .ok_or(axum::http::StatusCode::NOT_FOUND)
+}
+
+async fn clear_post_match_state(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<(), axum::http::StatusCode> {
+    sqlx::query("DELETE FROM score_confirmations WHERE match_id = ?")
+        .bind(match_id)
+        .execute(db)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query("DELETE FROM spirit_scores WHERE match_id = ?")
+        .bind(match_id)
+        .execute(db)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query(
+        "UPDATE matches SET t1_spirit = NULL, t2_spirit = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(match_id)
+    .execute(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(())
+}
+
+async fn settle_match_completion_if_ready(
+    state: &crate::AppState,
+    match_id: i64,
+) -> Result<(bool, Option<String>), axum::http::StatusCode> {
+    let is_complete = match_post_match_is_complete(&state.db, match_id)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !is_complete {
+        return Ok((false, None));
+    }
+
+    let match_row: Option<(i64,)> =
+        sqlx::query_as("SELECT t1_id FROM matches WHERE id = ? AND deleted_at IS NULL")
+            .bind(match_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let t1_id = match_row.ok_or(axum::http::StatusCode::NOT_FOUND)?.0;
+    let division = load_division_for_team(&state.db, t1_id).await?;
+    sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+    cache::invalidate_division(division).await;
+    let auto_action =
+        crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
+
+    Ok((true, auto_action))
+}
+
 async fn ensure_match_not_finalized(
     db: &sqlx::SqlitePool,
     match_id: i64,
 ) -> Result<(), axum::http::StatusCode> {
-    if match_scores_are_finalized(db, match_id)
+    if match_post_match_is_complete(db, match_id)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
     {
@@ -1839,6 +1951,48 @@ async fn ensure_match_not_finalized(
     }
 
     Ok(())
+}
+
+pub async fn match_post_match_is_complete(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let match_row: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT t1_id, t2_id, possession FROM matches WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((t1_id, t2_id, possession)) = match_row else {
+        return Ok(false);
+    };
+
+    if possession.unwrap_or(0) < 3 {
+        return Ok(false);
+    }
+
+    if !match_scores_are_finalized(db, match_id).await? {
+        return Ok(false);
+    }
+
+    for team_id in [t1_id, t2_id] {
+        let spirit_progress: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(*), COUNT(DISTINCT team_id)
+               FROM spirit_scores
+               WHERE match_id = ? AND submitted_by_team_id = ?"#,
+        )
+        .bind(match_id)
+        .bind(team_id)
+        .fetch_one(db)
+        .await?;
+
+        if spirit_progress.0 < 2 || spirit_progress.1 < 2 {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 async fn match_scores_are_finalized(

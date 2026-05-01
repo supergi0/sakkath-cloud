@@ -161,7 +161,8 @@ function getSeedLabel(cell: ScheduleGridCell) {
   if (!cell.seed_ranks) {
     return cell.slot_code ? PLAYOFF_PLACEHOLDER_SEEDS[cell.slot_code] ?? null : null;
   }
-  return `${cell.seed_ranks[0]} v ${cell.seed_ranks[1]}`;
+  const [seedA, seedB] = [...cell.seed_ranks].sort((left, right) => left - right);
+  return `${seedA} v ${seedB}`;
 }
 
 function getRowDurationMinutes(row: ScheduleGridRow) {
