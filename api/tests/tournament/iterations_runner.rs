@@ -435,7 +435,7 @@ where
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--itr" | "itr" | "--iterations" | "iterations" | "-n" => {
+            "--itr" | "itr" | "--iterations" | "iterations" | "-n" | "-N" | "--N" | "N" => {
                 let value = args
                     .next()
                     .ok_or_else(|| "missing value after itr".to_string())?;
@@ -457,8 +457,17 @@ where
             _ if arg.starts_with("iterations=") => {
                 iterations = parse_positive_u64(arg.trim_start_matches("iterations="), "iterations")?;
             }
+            _ if arg.starts_with("--N=") => {
+                iterations = parse_positive_u64(arg.trim_start_matches("--N="), "iterations")?;
+            }
+            _ if arg.starts_with("N=") => {
+                iterations = parse_positive_u64(arg.trim_start_matches("N="), "iterations")?;
+            }
             _ if arg.starts_with("-n=") => {
                 iterations = parse_positive_u64(arg.trim_start_matches("-n="), "iterations")?;
+            }
+            _ if arg.starts_with("-N=") => {
+                iterations = parse_positive_u64(arg.trim_start_matches("-N="), "iterations")?;
             }
             _ => {}
         }

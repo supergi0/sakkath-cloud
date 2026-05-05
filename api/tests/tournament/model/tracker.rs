@@ -2,22 +2,19 @@ use super::api_types::{
     MatchDetailResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse,
     TeamResponse,
 };
+use crate::tournament::config::deterministic_stage_coin_toss_seed;
 use api::helpers::{
     rounds::{
         PlayedMatchResult as LivePlayedMatchResult,
-        build_direct_final_pairings as live_build_direct_final_pairings,
-        build_final_pairings_from_playoff_results as live_build_final_pairings_from_playoff_results,
-        build_playoff_brackets as live_build_playoff_brackets,
         build_seed_order_after_elimination_results as live_build_seed_order_after_elimination_results,
-        build_seed_order_after_playoffs as live_build_seed_order_after_playoffs,
         generate_round_pairings_with_diagnostics as live_generate_round_pairings_with_diagnostics,
     },
     sorting::TeamSortData,
 };
 use chrono::{Duration, NaiveDateTime};
 use super::pairings::{
-    ExpectedPlayoffMatch, ExpectedSwissRound, SortMetrics, build_scoring_groups,
-    naive_pairings, sort_metrics,
+    ExpectedSwissRound, SortMetrics, build_scoring_groups, naive_pairings,
+    sort_metrics_with_seed,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -67,10 +64,11 @@ pub(crate) struct TournamentTracker {
     pub(crate) teams: HashMap<i64, TeamInfo>,
     pub(crate) players: HashMap<i64, PlayerTotals>,
     pub(crate) matches: HashMap<i64, MatchState>,
+    stage_seed_base: u64,
 }
 
 impl TournamentTracker {
-    pub(crate) fn new(teams: &[TeamResponse]) -> Self {
+    pub(crate) fn new(teams: &[TeamResponse], stage_seed_base: u64) -> Self {
         let teams = teams
             .iter()
             .map(|team| {
@@ -90,6 +88,7 @@ impl TournamentTracker {
             teams,
             players: HashMap::new(),
             matches: HashMap::new(),
+            stage_seed_base,
         }
     }
 
@@ -507,9 +506,67 @@ impl TournamentTracker {
             ordered.extend(remaining);
             ordered
         } else {
-            sort_metrics(&mut metrics);
+            sort_metrics_with_seed(&mut metrics, self.current_stage_seed(division));
             metrics
         }
+    }
+
+    fn current_stage_seed(&self, division: i64) -> u64 {
+        deterministic_stage_coin_toss_seed(
+            self.stage_seed_base,
+            division,
+            self.current_stage_key(division),
+        )
+    }
+
+    fn current_stage_key(&self, division: i64) -> i64 {
+        let total_rounds = if division == 0 {
+            api::OPEN_ROUNDS
+        } else {
+            api::WOMEN_ROUNDS
+        };
+
+        let highest_existing = self
+            .matches
+            .values()
+            .filter(|state| state.division == division)
+            .map(|state| state.match_type)
+            .max()
+            .unwrap_or(1);
+
+        if self.stage_is_complete(division, highest_existing) {
+            if highest_existing < total_rounds {
+                return highest_existing + 1;
+            }
+
+            if highest_existing == total_rounds {
+                return if division == 1 { 1002 } else { 1001 };
+            }
+
+            if highest_existing == 1001 {
+                return 1002;
+            }
+        }
+
+        highest_existing
+    }
+
+    fn stage_is_complete(&self, division: i64, stage_key: i64) -> bool {
+        let mut total = 0usize;
+        let mut completed = 0usize;
+
+        for state in self
+            .matches
+            .values()
+            .filter(|state| state.division == division && state.match_type == stage_key)
+        {
+            total += 1;
+            if state.possession.unwrap_or(0) >= 3 {
+                completed += 1;
+            }
+        }
+
+        total > 0 && total == completed
     }
 
     pub(crate) fn standings_rank_map(&self, division: i64) -> HashMap<i64, i64> {
@@ -553,72 +610,6 @@ impl TournamentTracker {
             naive_had_rematch,
             diagnostics: pairing_result.diagnostics,
         }
-    }
-
-    pub(crate) fn expected_playoff_round_one(&self, division: i64) -> Vec<ExpectedPlayoffMatch> {
-        let standings = self.live_swiss_sort_data(division);
-        let playoff_rounds = live_build_playoff_brackets(&standings);
-        let Some(playoff_round) = playoff_rounds.iter().find(|round| round.name == "playoffs") else {
-            return Vec::new();
-        };
-        let rank_by_team = build_rank_map_from_seed_order(
-            &standings.iter().map(|team| team.team_id).collect::<Vec<_>>(),
-        );
-
-        playoff_round
-            .matches
-            .iter()
-            .map(|pairing| ExpectedPlayoffMatch {
-                team_a: pairing.t1,
-                seed_a: *rank_by_team
-                    .get(&pairing.t1)
-                    .expect("missing playoff round one seed for team a"),
-                team_b: pairing.t2,
-                seed_b: *rank_by_team
-                    .get(&pairing.t2)
-                    .expect("missing playoff round one seed for team b"),
-            })
-            .collect()
-    }
-
-    pub(crate) fn expected_playoff_round_two(&self, division: i64) -> Vec<ExpectedPlayoffMatch> {
-        let standings = self.live_swiss_sort_data(division);
-        if division == 1 {
-            let rank_by_team =
-                build_rank_map_from_seed_order(&standings.iter().map(|team| team.team_id).collect::<Vec<_>>());
-
-            return live_build_direct_final_pairings(&standings)
-                .into_iter()
-                .map(|pairing| ExpectedPlayoffMatch {
-                    team_a: pairing.t1,
-                    seed_a: *rank_by_team
-                        .get(&pairing.t1)
-                        .expect("missing direct final seed for team a"),
-                    team_b: pairing.t2,
-                    seed_b: *rank_by_team
-                        .get(&pairing.t2)
-                        .expect("missing direct final seed for team b"),
-                })
-                .collect();
-        }
-
-        let playoff_results = self.completed_playoff_results(division, 1001);
-        let seed_order = live_build_seed_order_after_playoffs(&standings, &playoff_results);
-        let rank_by_team = build_rank_map_from_seed_order(&seed_order);
-
-        live_build_final_pairings_from_playoff_results(&standings, &playoff_results)
-            .into_iter()
-            .map(|pairing| ExpectedPlayoffMatch {
-                team_a: pairing.t1,
-                seed_a: *rank_by_team
-                    .get(&pairing.t1)
-                    .expect("missing playoff round two seed for team a"),
-                team_b: pairing.t2,
-                seed_b: *rank_by_team
-                    .get(&pairing.t2)
-                    .expect("missing playoff round two seed for team b"),
-            })
-            .collect()
     }
 
     pub(crate) fn expected_display_order_after_playoffs(&self, division: i64) -> Vec<i64> {
@@ -839,12 +830,4 @@ fn expand_gap_times(date: &str, times: &[(&str, usize)]) -> Vec<NaiveDateTime> {
     }
 
     expanded
-}
-
-fn build_rank_map_from_seed_order(seed_order: &[i64]) -> HashMap<i64, i64> {
-    seed_order
-        .iter()
-        .enumerate()
-        .map(|(index, team_id)| (*team_id, index as i64 + 1))
-        .collect()
 }

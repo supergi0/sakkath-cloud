@@ -1,5 +1,5 @@
 use api::helpers::rounds::RoundPairingDiagnostics;
-use api::helpers::sorting::{TeamSortData, sort_teams as live_sort_teams};
+use api::helpers::sorting::{TeamSortData, sort_teams_with_seed as live_sort_teams_with_seed};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -25,17 +25,9 @@ pub(crate) struct ExpectedSwissRound {
     pub(crate) diagnostics: RoundPairingDiagnostics,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ExpectedPlayoffMatch {
-    pub(crate) team_a: i64,
-    pub(crate) seed_a: i64,
-    pub(crate) team_b: i64,
-    pub(crate) seed_b: i64,
-}
-
-pub(crate) fn sort_metrics(metrics: &mut [SortMetrics]) {
+pub(crate) fn sort_metrics_with_seed(metrics: &mut [SortMetrics], seed: u64) {
     let mut live_metrics: Vec<TeamSortData> = metrics.iter().map(as_live_sort_data).collect();
-    live_sort_teams(&mut live_metrics);
+    live_sort_teams_with_seed(&mut live_metrics, seed);
 
     let order_by_team: HashMap<i64, usize> = live_metrics
         .iter()

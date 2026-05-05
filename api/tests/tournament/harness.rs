@@ -4,6 +4,9 @@ use super::model::{
     StandingRowResponse, StatsResponse, TeamDetailResponse, TeamMatchResponse, TeamResponse,
     TournamentTracker, UpcomingMatchResponse,
 };
+use super::config::{
+    deterministic_global_coin_toss_seed, deterministic_stage_coin_toss_seed,
+};
 use api::{AppState, build_api_only_app, migration};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
@@ -70,10 +73,11 @@ pub struct Harness {
     pub credentials: Credentials,
     temp_dir: PathBuf,
     tokens: HashMap<String, String>,
+    stage_seed_base: u64,
 }
 
 impl Harness {
-    pub async fn new(label: &str) -> TestResult<Self> {
+    pub async fn new(label: &str, stage_seed_base: u64) -> TestResult<Self> {
         configure_test_env();
 
         let temp_dir = create_temp_dir(label)?;
@@ -83,6 +87,7 @@ impl Harness {
         let db = migration::init_db_pool(&database_url, false).await?;
         migration::run_migrations(&db).await?;
         migration::verify_migrations(&db).await?;
+        seed_deterministic_coin_toss_rows(&db, stage_seed_base).await?;
         api::helpers::sorting::initialize_persistent_coin_toss_seed(&db).await?;
 
         let credentials = load_credentials(&db).await?;
@@ -98,12 +103,13 @@ impl Harness {
             credentials,
             temp_dir,
             tokens: HashMap::new(),
+            stage_seed_base,
         })
     }
 
     pub async fn load_initial_tracker(&self) -> TestResult<TournamentTracker> {
         let teams = self.get_teams().await?;
-        let mut tracker = TournamentTracker::new(&teams);
+        let mut tracker = TournamentTracker::new(&teams, self.stage_seed_base);
 
         for division in [0, 1] {
             let matches = self.get_schedule_matches(division, None, None).await?;
@@ -390,6 +396,38 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.temp_dir);
     }
+}
+
+async fn seed_deterministic_coin_toss_rows(db: &SqlitePool, base_seed: u64) -> TestResult {
+    let global_seed = (deterministic_global_coin_toss_seed(base_seed) & i64::MAX as u64) as i64;
+    sqlx::query(
+        r#"INSERT INTO persistent_random_state (name, seed)
+           VALUES ('standings_c7_coin_toss', ?)
+           ON CONFLICT(name) DO UPDATE SET seed = excluded.seed"#,
+    )
+    .bind(global_seed)
+    .execute(db)
+    .await?;
+
+    for division in [0_i64, 1_i64] {
+        for stage_key in [1_i64, 2, 3, 4, 5, 6, 1001, 1002] {
+            let seed =
+                (deterministic_stage_coin_toss_seed(base_seed, division, stage_key) & i64::MAX as u64)
+                    as i64;
+            let name = format!("standings_c7_coin_toss_division_{division}_stage_{stage_key}");
+            sqlx::query(
+                r#"INSERT INTO persistent_random_state (name, seed)
+                   VALUES (?, ?)
+                   ON CONFLICT(name) DO UPDATE SET seed = excluded.seed"#,
+            )
+            .bind(name)
+            .bind(seed)
+            .execute(db)
+            .await?;
+        }
+    }
+
+    Ok(())
 }
 
 fn configure_test_env() {

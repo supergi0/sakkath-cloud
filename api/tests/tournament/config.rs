@@ -80,6 +80,33 @@ impl RunConfig {
     }
 }
 
+pub(crate) fn deterministic_global_coin_toss_seed(base_seed: u64) -> u64 {
+    mix_seed(base_seed, 0xA11C_E000_0000_0001, 0xC710_BA11_F00D_BA11)
+}
+
+pub(crate) fn deterministic_stage_coin_toss_seed(
+    base_seed: u64,
+    division: i64,
+    stage_key: i64,
+) -> u64 {
+    mix_seed(
+        base_seed,
+        division as u64,
+        (stage_key as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
+}
+
+fn mix_seed(base_seed: u64, left: u64, right: u64) -> u64 {
+    let mut value = base_seed
+        ^ left.wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ right.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
 fn parse_itr(value: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let itr = value.parse::<u64>()?;
     if itr == 0 {

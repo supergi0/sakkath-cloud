@@ -13,7 +13,11 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         "Exercises one full reported match, including visibility checks, score confirmation, and spirit submissions.",
     )?;
 
-    let mut harness = Harness::new(&config.scenario_label("match-flow")).await?;
+    let mut harness = Harness::new(
+        &config.scenario_label("match-flow"),
+        config.scenario_seed("match-flow-stage-seeds"),
+    )
+    .await?;
     let mut tracker = harness.load_initial_tracker().await?;
     let staff = login_staff(&mut harness).await?;
 

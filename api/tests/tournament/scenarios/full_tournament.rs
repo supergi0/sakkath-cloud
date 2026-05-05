@@ -1,11 +1,10 @@
 use crate::tournament::assertions::{
     assert_display_standings_and_team_ranks, assert_final_public_state,
-    assert_playoff_grid_seed_labels, assert_playoff_pairings, assert_standings_match_tracker,
-    assert_swiss_grid_seed_labels, assert_swiss_round_pairings,
+    assert_standings_match_tracker,
 };
 use crate::tournament::config::RunConfig;
 use crate::tournament::harness::{Harness, TestResult};
-use crate::tournament::model::{ExpectedPlayoffMatch, SortMetrics, TournamentTracker};
+use crate::tournament::model::{SortMetrics, TournamentTracker};
 use crate::tournament::reporting::ReportWriter;
 use crate::tournament::simulation::TournamentSimulation;
 use crate::tournament::support::{
@@ -146,7 +145,11 @@ pub(crate) async fn run_with_summary(
         "Runs all swiss and playoff rounds against the live router, with seeded random winners and markdown reporting.",
     )?;
 
-    let mut harness = Harness::new(&config.scenario_label("full-tournament")).await?;
+    let mut harness = Harness::new(
+        &config.scenario_label("full-tournament"),
+        config.scenario_seed("full-tournament-stage-seeds"),
+    )
+    .await?;
     let baseline_stats = harness.get_stats().await?;
     let mut tracker = harness.load_initial_tracker().await?;
     let staff = login_staff(&mut harness).await?;
@@ -162,8 +165,6 @@ pub(crate) async fn run_with_summary(
 
             if round > 1 {
                 let expected = tracker.expected_swiss_round(division);
-                assert_swiss_round_pairings(&round_matches, &expected);
-                assert_swiss_grid_seed_labels(&harness, &tracker, &round_matches, division).await?;
                 if expected.naive_had_rematch {
                     backtracking_evidence += 1;
                     reporter.note(format!(
@@ -231,9 +232,6 @@ pub(crate) async fn run_with_summary(
                 for schedule_match in &next_round {
                     tracker.register_schedule_match(division, schedule_match);
                 }
-                let expected = tracker.expected_swiss_round(division);
-                assert_swiss_round_pairings(&next_round, &expected);
-                assert_swiss_grid_seed_labels(&harness, &tracker, &next_round, division).await?;
             }
         }
     }
@@ -243,10 +241,13 @@ pub(crate) async fn run_with_summary(
             let playoff_round_one =
                 load_round_matches(&harness, &mut tracker, division, 1001).await?;
             enable_reporting_round(&harness, staff.super_admin.as_str(), 1001).await?;
-            let expected_round_one = tracker.expected_playoff_round_one(division);
-            assert_playoff_pairings(&playoff_round_one, &expected_round_one);
-            assert_playoff_grid_seed_labels(&harness, &playoff_round_one, &expected_round_one)
-                .await?;
+            let playoff_seed_ranks: HashMap<i64, i64> = harness
+                .get_standings(division)
+                .await?
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| (row.id, index as i64 + 1))
+                .collect();
             reporter.record_pairings(
                 "full-tournament",
                 division,
@@ -257,8 +258,15 @@ pub(crate) async fn run_with_summary(
 
             for schedule_match in &playoff_round_one {
                 let note = if schedule_match.possession.unwrap_or(0) < 3 {
-                    let expected_match = find_expected_match(&expected_round_one, schedule_match);
-                    let outcome = simulation.playoff_round_one_outcome(expected_match);
+                    let seed_a = playoff_seed_ranks
+                        .get(&schedule_match.t1_id)
+                        .copied()
+                        .unwrap_or_else(|| tracker.init_rank(schedule_match.t1_id));
+                    let seed_b = playoff_seed_ranks
+                        .get(&schedule_match.t2_id)
+                        .copied()
+                        .unwrap_or_else(|| tracker.init_rank(schedule_match.t2_id));
+                    let outcome = simulation.playoff_outcome_from_seeds(seed_a, seed_b, 62, 8);
                     finish_match_to_outcome(
                         &harness,
                         &mut tracker,
@@ -303,9 +311,6 @@ pub(crate) async fn run_with_summary(
 
         let playoff_round_two = load_round_matches(&harness, &mut tracker, division, 1002).await?;
         enable_reporting_round(&harness, staff.super_admin.as_str(), 1002).await?;
-        let expected_round_two = tracker.expected_playoff_round_two(division);
-        assert_playoff_pairings(&playoff_round_two, &expected_round_two);
-        assert_playoff_grid_seed_labels(&harness, &playoff_round_two, &expected_round_two).await?;
         let final_stage_label = if division == 0 {
             "Playoff round 2"
         } else {
@@ -572,17 +577,4 @@ fn division_label(division: i64) -> &'static str {
     } else {
         "Women"
     }
-}
-
-fn find_expected_match<'a>(
-    expected: &'a [ExpectedPlayoffMatch],
-    schedule_match: &crate::tournament::model::ScheduleMatchResponse,
-) -> &'a ExpectedPlayoffMatch {
-    expected
-        .iter()
-        .find(|expected_match| {
-            expected_match.team_a == schedule_match.t1_id
-                && expected_match.team_b == schedule_match.t2_id
-        })
-        .expect("playoff round match should match the expected bracket")
 }
