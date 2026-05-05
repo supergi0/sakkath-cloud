@@ -20,11 +20,11 @@ Standings are driven by Swiss points:
 When teams are tied on points, the following tie-breaker criteria are applied in order:
 
 - `c1`: Head-to-head result between the two tied teams
-- `c2`: Median Buchholz (accounts for the strength of opponents faced)
+- `c2`: Median Buchholz (Strength of opponents faced)
 - `c3`: Goal difference
 - `c4`: Goals scored
 - `c5`: Momentum score (e.g. WWLL ranks higher than LLWW)
-- `c6`: Random coin toss
+- `c6`: Random allocation
 
 ## Playoffs
 

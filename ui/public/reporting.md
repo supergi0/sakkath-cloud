@@ -20,6 +20,7 @@ Only register events for your own team. A simple check: if you don't recognise t
 - **Turn on catcher**: Mark when the catcher had contact with the disc but the offense turns it over.
 - Track every single point events, do not skip any.
 - Events can be undone if needed, and all records are stored for dispute resolution.
+- If match is started with wrong team on offense, consult with other team and select `switch` option.
 
 ### If things go wrong
 

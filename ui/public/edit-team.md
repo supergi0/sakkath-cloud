@@ -26,4 +26,5 @@ The following **do not** count toward the limit:
 - For any queries, post your questions in the Sakkath Q&A
 ## Availability
  
-Team edits will be locked after the given window, make use of it while it's open.
+- Team edits will be locked after the given window, make use of it while it's open.
+- Check edits made throughly before saving, there will be a review process after the window.
