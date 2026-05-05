@@ -278,6 +278,7 @@ function MatchContent() {
     sortedEvents.forEach(event => {
       if (event.event_type === 0) {
         const mins = Math.round((new Date(event.created_at).getTime() - startTime) / 60000);
+        const actorName = event.player_name || (event.team_id === match.t1_id ? match.t1_name : match.t2_name);
         if (event.team_id === match.t1_id) t1++;
         else t2++;
         data.push({ 
@@ -285,7 +286,7 @@ function MatchContent() {
           minutes: mins, 
           t1, 
           t2, 
-          event: `${event.player_name} scored` 
+          event: `${actorName} scored` 
         });
       }
     });
@@ -469,6 +470,7 @@ function MatchContent() {
                   {match.events.length === 0 && <Text variant="secondary">No events recorded</Text>}
                   {match.events.slice().reverse().map((event) => {
                     const isT1 = event.team_id === match.t1_id;
+                    const playerName = event.player_name || (isT1 ? match.t1_name : match.t2_name);
                     const eventTypes = ['Score', 'Assist', 'Defense', 'Turnover'];
                     const eventColors = ['text-green-500', 'text-blue-500', 'text-purple-500', 'text-yellow-500'];
                     const eventTime = formatIndiaTime(event.created_at);
@@ -477,7 +479,7 @@ function MatchContent() {
                       <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
                         <div className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 ${isT1 ? 'bg-gray-100 dark:bg-slate-800' : 'bg-blue-900/10 dark:bg-blue-900/20'}`}>
                           <span className={`font-medium text-xs ${eventColors[event.event_type]}`}>{eventTypes[event.event_type]}</span>
-                          <span className="text-sm text-gray-900 dark:text-white">{event.player_name || 'Unknown'}</span>
+                          <span className="text-sm text-gray-900 dark:text-white">{playerName}</span>
                           <span className="text-[10px] text-gray-500 dark:text-gray-400">{eventTime}</span>
                         </div>
                       </div>

@@ -477,6 +477,10 @@ export default function MyTeamPage() {
   const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
   const teamEditsLocked = !teamEditsEnabled;
 
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  };
+
   const resetMockComposer = () => {
     setMockPendingScorerId(null);
     setMockPendingAssisterId(null);
@@ -510,6 +514,7 @@ export default function MyTeamPage() {
     if (!team) {
       return;
     }
+    scrollToTop();
     setMockMatch(buildInitialMockMatch(team, players));
     setMockMode('choose-possession');
     setMockConfirmAction(null);

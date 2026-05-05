@@ -418,7 +418,6 @@ pub async fn get_match_events(
         FROM match_events me
         LEFT JOIN users u ON u.id = me.player_id
         WHERE me.match_id = ?
-                    AND NOT (me.player_id IS NULL AND me.event_type IN (0, 1))
         ORDER BY me.created_at ASC
         "#,
     )
@@ -561,9 +560,8 @@ pub async fn get_match_detail(
              ) as created_at
         FROM match_events me 
         LEFT JOIN users u ON u.id = me.player_id
-                WHERE me.match_id = ?
-                    AND NOT (me.player_id IS NULL AND me.event_type IN (0, 1))
-                ORDER BY me.created_at ASC
+        WHERE me.match_id = ?
+        ORDER BY me.created_at ASC
         "#,
     )
     .bind(match_id)

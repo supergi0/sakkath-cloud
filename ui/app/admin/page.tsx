@@ -501,6 +501,8 @@ function AdminContent() {
       } else if (isOffView && hasScorerSelection && hasAssisterSelection && !hasDuplicateNamedScorePair) {
         if (pendingAssisterId !== null) {
           await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingAssisterId, event_type: 1 });
+        } else if (pendingNoPlayerAssister) {
+          await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: null, event_type: 1 });
         }
 
         if (pendingScorerId !== null) {
