@@ -547,6 +547,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             password_hash VARCHAR(255),
             is_captain INTEGER DEFAULT 0,
             is_spirit_captain INTEGER DEFAULT 0,
+            is_manager INTEGER DEFAULT 0,
+            is_coach INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             deleted_at TIMESTAMP,
@@ -763,8 +765,26 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .await?;
     }
 
+    if !table_has_column(pool, "users", "is_manager").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN is_manager INTEGER DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
+    if !table_has_column(pool, "users", "is_coach").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN is_coach INTEGER DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
     sqlx::query(
         "UPDATE users SET common_name = name WHERE common_name IS NULL OR TRIM(common_name) = ''",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE users SET is_manager = COALESCE(is_manager, 0), is_coach = COALESCE(is_coach, 0)",
     )
     .execute(pool)
     .await?;
@@ -788,6 +808,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 password_hash VARCHAR(255),
                 is_captain INTEGER DEFAULT 0,
                 is_spirit_captain INTEGER DEFAULT 0,
+                is_manager INTEGER DEFAULT 0,
+                is_coach INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP,
@@ -799,8 +821,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
         sqlx::query(
-            r#"INSERT INTO users_new (id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at)
-                SELECT id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at FROM users"#
+            r#"INSERT INTO users_new (id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, is_manager, is_coach, created_at, updated_at, deleted_at)
+                SELECT id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, is_manager, is_coach, created_at, updated_at, deleted_at FROM users"#
         ).execute(&mut *conn).await?;
 
         sqlx::query("DROP TABLE users").execute(&mut *conn).await?;

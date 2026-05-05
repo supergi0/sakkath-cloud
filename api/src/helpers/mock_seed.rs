@@ -315,6 +315,8 @@ struct StageExecutionSummary {
 #[derive(Deserialize, Clone)]
 struct ScheduleMatchResponse {
     id: i64,
+    time: String,
+    field_name: String,
     possession: Option<i64>,
 }
 
@@ -463,7 +465,9 @@ async fn process_stage(
                 )));
             }
 
-            pending_matches.shuffle(rng);
+            if round_key != 1002 {
+                pending_matches.shuffle(rng);
+            }
             pending_matches.truncate(needed);
             pending_matches
         }
@@ -506,6 +510,8 @@ async fn ensure_stage_matches(
         );
     }
 
+    sort_stage_matches(&mut stage_matches);
+
     if stage_matches.is_empty() {
         return Err(error(format!(
             "no matches available for {} across either division",
@@ -523,6 +529,10 @@ async fn ensure_stage_matches_for_division(
     division: i64,
     round_key: i64,
 ) -> MockResult<Vec<ScheduleMatchResponse>> {
+    if !stage_applies_to_division(round_key, division) {
+        return Ok(Vec::new());
+    }
+
     let mut stage_matches = client.get_schedule_matches(division, round_key).await?;
     if !stage_matches.is_empty() {
         return Ok(stage_matches);
@@ -568,9 +578,26 @@ async fn fetch_stage_matches(
 ) -> MockResult<Vec<ScheduleMatchResponse>> {
     let mut stage_matches = Vec::new();
     for division in [0, 1] {
+        if !stage_applies_to_division(round_key, division) {
+            continue;
+        }
         stage_matches.extend(client.get_schedule_matches(division, round_key).await?);
     }
+    sort_stage_matches(&mut stage_matches);
     Ok(stage_matches)
+}
+
+fn stage_applies_to_division(round_key: i64, division: i64) -> bool {
+    !(round_key == 1001 && division == 1)
+}
+
+fn sort_stage_matches(stage_matches: &mut [ScheduleMatchResponse]) {
+    stage_matches.sort_by(|left, right| {
+        left.time
+            .cmp(&right.time)
+            .then_with(|| left.field_name.cmp(&right.field_name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 async fn enable_reporting_round(

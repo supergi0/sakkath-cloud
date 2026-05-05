@@ -39,6 +39,8 @@ interface PlayerStat {
   turnovers: number;
   is_captain: boolean;
   is_spirit_captain: boolean;
+  is_manager: boolean;
+  is_coach: boolean;
 }
 
 interface TeamMatch {
@@ -75,6 +77,14 @@ const TEAMS_PREFS_KEY = 'sakkath:teams:preferences';
 
 function getTotalStat(player: Pick<PlayerStat, 'goals' | 'assists' | 'blocks' | 'turnovers'>) {
   return player.goals + player.assists + player.blocks - player.turnovers;
+}
+
+function getPlayerRoleLabel(player: Pick<PlayerStat, 'is_captain' | 'is_spirit_captain' | 'is_manager' | 'is_coach'>) {
+  if (player.is_captain) return 'Captain';
+  if (player.is_spirit_captain) return 'Spirit Captain';
+  if (player.is_manager) return 'Manager';
+  if (player.is_coach) return 'Coach';
+  return 'Player';
 }
 
 function getInitialActiveTab(): TabType {
@@ -483,10 +493,11 @@ function TeamContent() {
                       className="hover:opacity-80 border-b border-gray-200 dark:border-slate-700 cursor-pointer"
                     >
                       <td className="w-[168px] py-3 px-1.5">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-col justify-center min-w-0">
                           {renderPlayerName(player)}
-                          {player.is_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-yellow-500 text-white text-xs font-bold">C</span>}
-                          {player.is_spirit_captain && <span className="w-6 h-6 rounded flex items-center justify-center bg-purple-500 text-white text-xs font-bold">SC</span>}
+                          <Text variant="secondary" className="text-[10px] leading-tight truncate">
+                            {getPlayerRoleLabel(player)}
+                          </Text>
                         </div>
                       </td>
                       <td className="w-12 py-3 px-1.5 text-center"><Text variant="primary">{getTotalStat(player)}</Text></td>

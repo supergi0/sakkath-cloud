@@ -26,6 +26,8 @@ interface Player {
   phone: string | null;
   is_captain: boolean;
   is_spirit_captain: boolean;
+  is_manager: boolean;
+  is_coach: boolean;
 }
 
 interface PocMatch {
@@ -40,7 +42,9 @@ interface PocMatch {
   t2_spirit: number | null;
   time: string;
   possession: number | null;
+  match_type: number;
   field_name?: string | null;
+  is_complete: boolean;
 }
 
 interface WfdfSpirit {
@@ -92,8 +96,8 @@ interface ReportingRoundSetting {
 
 // Per-match post-game form: opponent spirit + self spirit + score confirm
 interface PostMatchForm {
-  t1_score: number;
-  t2_score: number;
+  t1_score: string;
+  t2_score: string;
   opponentSpirit: WfdfSpirit;
   selfSpirit: WfdfSpirit;
 }
@@ -155,17 +159,24 @@ const MOCK_TEST_PLAYERS = [
   'Test Seven',
   'Test Eight',
 ];
-type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain';
-const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain'];
+type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain' | 'Manager' | 'Coach';
+const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain', 'Manager', 'Coach'];
 
 function roleFromPlayer(p: Partial<Player>): PlayerRole {
   if (p.is_captain) return 'Captain';
   if (p.is_spirit_captain) return 'Spirit Captain';
+  if (p.is_manager) return 'Manager';
+  if (p.is_coach) return 'Coach';
   return 'Player';
 }
 
 function roleToFlags(role: PlayerRole) {
-  return { is_captain: role === 'Captain', is_spirit_captain: role === 'Spirit Captain' };
+  return {
+    is_captain: role === 'Captain',
+    is_spirit_captain: role === 'Spirit Captain',
+    is_manager: role === 'Manager',
+    is_coach: role === 'Coach',
+  };
 }
 
 function normalizeOptionalText(value?: string | null) {
@@ -181,7 +192,9 @@ function consumesRosterMove(original: Player, draft: Partial<Player>, draftRole:
     || normalizeOptionalText(original.email) !== normalizeOptionalText(draft.email)
     || normalizeOptionalText(original.phone) !== normalizeOptionalText(draft.phone)
     || original.is_captain !== nextFlags.is_captain
-    || original.is_spirit_captain !== nextFlags.is_spirit_captain;
+    || original.is_spirit_captain !== nextFlags.is_spirit_captain
+    || original.is_manager !== nextFlags.is_manager
+    || original.is_coach !== nextFlags.is_coach;
 }
 
 function roleBadge(role: PlayerRole) {
@@ -189,11 +202,18 @@ function roleBadge(role: PlayerRole) {
   const c: Record<string, string> = {
     'Captain': 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300',
     'Spirit Captain': 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300',
+    'Manager': 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300',
+    'Coach': 'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300',
   };
   return <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${c[role] || ''}`}>{role}</span>;
 }
 
 const countCharacters = (value: string) => value.length;
+const sanitizeNumericInput = (value: string) => value.replace(/\D/g, '');
+
+function parseRequiredScore(value: string): number | null {
+  return /^\d+$/.test(value) ? Number(value) : null;
+}
 
 function getCompactTeamName(name: string, abbreviation?: string | null) {
   if (name.length > 6) {
@@ -212,6 +232,37 @@ function getHeaderTeamName(name: string, abbreviation?: string | null) {
 }
 
 const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null, notes: '' });
+
+function buildSpiritFormFromRow(row?: SpiritScoreRow | null): WfdfSpirit {
+  if (!row) {
+    return defaultSpirit();
+  }
+
+  return {
+    rules_knowledge: row.rules_knowledge,
+    fouls_contact: row.fouls_contact,
+    fair_mindedness: row.fair_mindedness,
+    positive_attitude: row.positive_attitude,
+    communication: row.communication,
+    mvp_player_id: row.mvp_player_id,
+    msp_player_id: row.msp_player_id,
+    notes: row.notes ?? '',
+  };
+}
+
+function buildPostMatchForm(
+  match: PocMatch,
+  ownConfirm?: ScoreConfirmRow,
+  ownOpponentSpirit?: SpiritScoreRow,
+  ownSelfSpirit?: SpiritScoreRow,
+): PostMatchForm {
+  return {
+    t1_score: String(ownConfirm?.t1_score ?? match.t1_score),
+    t2_score: String(ownConfirm?.t2_score ?? match.t2_score),
+    opponentSpirit: buildSpiritFormFromRow(ownOpponentSpirit),
+    selfSpirit: buildSpiritFormFromRow(ownSelfSpirit),
+  };
+}
 
 function buildMockOpponentPlayers(): MockMatchPlayer[] {
   return MOCK_TEST_PLAYERS.map((name, index) => ({
@@ -389,7 +440,7 @@ export default function MyTeamPage() {
   const [editForm, setEditForm] = useState<Partial<Player>>({});
   const [editRole, setEditRole] = useState<PlayerRole>('Player');
   const [isAdding, setIsAdding] = useState(false);
-  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false });
   const [newRole, setNewRole] = useState<PlayerRole>('Player');
   const [isEditingLogo, setIsEditingLogo] = useState(false);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
@@ -400,7 +451,9 @@ export default function MyTeamPage() {
   const [confirmedMatches, setConfirmedMatches] = useState<Set<number>>(new Set());
   const [submittedSpirits, setSubmittedSpirits] = useState<Set<number>>(new Set());
   const [submittedSelfSpirits, setSubmittedSelfSpirits] = useState<Set<number>>(new Set());
+  const [otherTeamConfirmedMatches, setOtherTeamConfirmedMatches] = useState<Set<number>>(new Set());
   const [otherTeamSpirits, setOtherTeamSpirits] = useState<Set<number>>(new Set());
+  const [otherTeamSubmittedSelfSpirits, setOtherTeamSubmittedSelfSpirits] = useState<Set<number>>(new Set());
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
   const [mockMode, setMockMode] = useState<MockMode>('idle');
   const [mockMatch, setMockMatch] = useState<MockMatchState | null>(null);
@@ -443,9 +496,20 @@ export default function MyTeamPage() {
     resetMockComposer();
   };
 
-  const ensureMockMatch = () => mockMatch ?? buildInitialMockMatch(team, players);
+  const ensureMockMatch = () => {
+    if (mockMatch) {
+      return mockMatch;
+    }
+    if (!team) {
+      return null;
+    }
+    return buildInitialMockMatch(team, players);
+  };
 
   const requestMockStart = () => {
+    if (!team) {
+      return;
+    }
     setMockMatch(buildInitialMockMatch(team, players));
     setMockMode('choose-possession');
     setMockConfirmAction(null);
@@ -455,6 +519,9 @@ export default function MyTeamPage() {
 
   const startMockReporting = (possession: 1 | 2) => {
     const nextMatch = ensureMockMatch();
+    if (!nextMatch) {
+      return;
+    }
     setMockMatch({ ...nextMatch, possession, initial_possession: possession, t1_score: 0, t2_score: 0, events: [] });
     setMockPanel(possession === 1 ? 't1' : 't2');
     setMockMode('live');
@@ -572,8 +639,8 @@ export default function MyTeamPage() {
     if (!mockMatch) return;
     setMockMatch({ ...mockMatch, possession: 3 });
     setMockPostForm({
-      t1_score: mockMatch.t1_score,
-      t2_score: mockMatch.t2_score,
+      t1_score: String(mockMatch.t1_score),
+      t2_score: String(mockMatch.t2_score),
       opponentSpirit: defaultSpirit(),
       selfSpirit: defaultSpirit(),
     });
@@ -597,6 +664,12 @@ export default function MyTeamPage() {
 
   const submitMockPostMatch = () => {
     if (!mockPostForm) return;
+    const mockT1Score = parseRequiredScore(mockPostForm.t1_score);
+    const mockT2Score = parseRequiredScore(mockPostForm.t2_score);
+    if (mockT1Score === null || mockT2Score === null) {
+      setMockErrorMessage('Please enter a valid score before submitting.');
+      return;
+    }
     if (countCharacters(mockPostForm.opponentSpirit.notes) > 250) {
       setMockErrorMessage('Opponent notes must be 250 characters or fewer.');
       return;
@@ -774,7 +847,7 @@ export default function MyTeamPage() {
           if (res.ok) {
             const data = await res.json();
             setPlayers([...players, { id: data.id, ...payload } as Player]);
-            setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+            setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false });
             setNewRole('Player'); setIsAdding(false);
           } else if (res.status === 403) {
             setTeamEditsEnabled(false);
@@ -808,8 +881,8 @@ export default function MyTeamPage() {
       setPostForms(prev => ({
         ...prev,
         [matchId]: {
-          t1_score: match.t1_score,
-          t2_score: match.t2_score,
+          t1_score: String(match.t1_score),
+          t2_score: String(match.t2_score),
           opponentSpirit: defaultSpirit(),
           selfSpirit: defaultSpirit(),
         },
@@ -825,55 +898,84 @@ export default function MyTeamPage() {
     if (!m) return;
     const isT1 = m.t1_id === team.id;
     const opponentId = isT1 ? m.t2_id : m.t1_id;
+    const submittedT1Score = parseRequiredScore(form.t1_score);
+    const submittedT2Score = parseRequiredScore(form.t2_score);
+    if (submittedT1Score === null || submittedT2Score === null) {
+      setFeedback({ type: 'error', message: 'Please enter both scores using digits only.' });
+      return;
+    }
+    if (m.match_type >= 1000 && submittedT1Score === submittedT2Score) {
+      setFeedback({
+        type: 'error',
+        message: m.match_type === 1001
+          ? 'Playoffs cannot have an equal score.'
+          : 'Finals cannot have an equal score.',
+      });
+      return;
+    }
     if (countCharacters(form.opponentSpirit.notes) > 250) {
       setFeedback({ type: 'error', message: 'Opponent notes must be 250 characters or fewer.' });
       return;
     }
 
+    const otherSideAlreadyDone = otherTeamConfirmedMatches.has(matchId)
+      && otherTeamSpirits.has(matchId)
+      && otherTeamSubmittedSelfSpirits.has(matchId);
+
     try {
       // 1. Confirm score
-      if (!confirmedMatches.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/confirm-score`), {
-          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ t1_score: form.t1_score, t2_score: form.t2_score }),
-        });
-        if (res.ok) setConfirmedMatches(prev => new Set([...prev, matchId]));
-        else throw new Error('confirm-score');
-      }
+      const confirmResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/confirm-score`), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ t1_score: submittedT1Score, t2_score: submittedT2Score }),
+      });
+      if (!confirmResponse.ok) throw new Error('confirm-score');
+      setConfirmedMatches(prev => new Set([...prev, matchId]));
 
       // 2. Submit opponent spirit
-      if (!submittedSpirits.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
-        });
-        if (res.ok) setSubmittedSpirits(prev => new Set([...prev, matchId]));
-        else throw new Error('opponent-spirit');
-      }
+      const opponentSpiritResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
+      });
+      if (!opponentSpiritResponse.ok) throw new Error('opponent-spirit');
+      setSubmittedSpirits(prev => new Set([...prev, matchId]));
 
       // 3. Submit self spirit (no MVP/MSP for self-rating)
-      if (!submittedSelfSpirits.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            rules_knowledge: form.selfSpirit.rules_knowledge,
-            fouls_contact: form.selfSpirit.fouls_contact,
-            fair_mindedness: form.selfSpirit.fair_mindedness,
-            positive_attitude: form.selfSpirit.positive_attitude,
-            communication: form.selfSpirit.communication,
-            mvp_player_id: null,
-            msp_player_id: null,
-            team_id: team.id,
-          }),
-        });
-        if (res.ok) setSubmittedSelfSpirits(prev => new Set([...prev, matchId]));
-        else throw new Error('self-spirit');
-      }
+      const selfSpiritResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          rules_knowledge: form.selfSpirit.rules_knowledge,
+          fouls_contact: form.selfSpirit.fouls_contact,
+          fair_mindedness: form.selfSpirit.fair_mindedness,
+          positive_attitude: form.selfSpirit.positive_attitude,
+          communication: form.selfSpirit.communication,
+          mvp_player_id: null,
+          msp_player_id: null,
+          team_id: team.id,
+        }),
+      });
+      if (!selfSpiritResponse.ok) throw new Error('self-spirit');
+      const selfSpiritData = await selfSpiritResponse.json();
+      setSubmittedSelfSpirits(prev => new Set([...prev, matchId]));
 
-      setExpandedMatch(null);
+      setMatches(prev => prev.map(match => (
+        match.id === matchId
+          ? { ...match, t1_score: submittedT1Score, t2_score: submittedT2Score, is_complete: Boolean(selfSpiritData.is_complete) }
+          : match
+      )));
+      await fetchExistingSpirits();
+
+      if (selfSpiritData.is_complete) {
+        setExpandedMatch(null);
+        setFeedback({ type: 'success', message: 'Post-match finalized.' });
+      } else if (otherSideAlreadyDone) {
+        setFeedback({ type: 'error', message: 'Saved, but the score still disagrees with the other team. Update it to match before the post-match can complete.' });
+      } else {
+        setExpandedMatch(null);
+        setFeedback({ type: 'success', message: 'Post-match submission saved.' });
+      }
     } catch (err) {
       console.error(err);
-      setFeedback({ type: 'error', message: 'Unable to complete the full post-match submission right now.' });
+      setFeedback({ type: 'error', message: 'Unable to save the post-match submission right now.' });
     }
   };
 
@@ -881,8 +983,11 @@ export default function MyTeamPage() {
     if (!token || !team) return;
     const nextSubmittedSpirits = new Set<number>();
     const nextSubmittedSelfSpirits = new Set<number>();
+    const nextOtherTeamConfirmedMatches = new Set<number>();
     const nextOtherTeamSpirits = new Set<number>();
+    const nextOtherTeamSubmittedSelfSpirits = new Set<number>();
     const nextConfirmedMatches = new Set<number>();
+    const nextPostForms: Record<number, PostMatchForm> = {};
 
     for (const m of matches.filter(m => m.possession !== null && m.possession >= 3)) {
       try {
@@ -890,31 +995,71 @@ export default function MyTeamPage() {
           fetch(apiUrl(`/v1/matches/${m.id}/spirits`)),
           fetch(apiUrl(`/v1/matches/${m.id}/score-confirmations`)),
         ]);
+        const otherTeamId = m.t1_id === team.id ? m.t2_id : m.t1_id;
+        let ownOpponentSpiritRow: SpiritScoreRow | undefined;
+        let ownSelfSpiritRow: SpiritScoreRow | undefined;
+        let ownConfirm: ScoreConfirmRow | undefined;
         if (spiritRes.ok) {
           const spirits: SpiritScoreRow[] = await spiritRes.json();
-          const otherTeamId = m.t1_id === team.id ? m.t2_id : m.t1_id;
-          // Our submission rating the opponent
-          if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === otherTeamId))
+          ownOpponentSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === team.id && spirit.team_id === otherTeamId,
+          );
+          ownSelfSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === team.id && spirit.team_id === team.id,
+          );
+          const otherOpponentSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === otherTeamId && spirit.team_id === team.id,
+          );
+          const otherSelfSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === otherTeamId && spirit.team_id === otherTeamId,
+          );
+
+          if (ownOpponentSpiritRow) {
             nextSubmittedSpirits.add(m.id);
-          // Our submission rating ourselves
-          if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === team.id))
+          }
+          if (ownSelfSpiritRow) {
             nextSubmittedSelfSpirits.add(m.id);
-          // Opponent's submission rating us
-          if (spirits.some(s => s.submitted_by_team_id === otherTeamId))
+          }
+          if (otherOpponentSpiritRow) {
             nextOtherTeamSpirits.add(m.id);
+          }
+          if (otherSelfSpiritRow) {
+            nextOtherTeamSubmittedSelfSpirits.add(m.id);
+          }
         }
         if (confirmRes.ok) {
           const confirms: ScoreConfirmRow[] = await confirmRes.json();
-          if (confirms.some(c => c.team_id === team.id))
+          ownConfirm = confirms.find(confirm => confirm.team_id === team.id);
+          const otherConfirm = confirms.find(confirm => confirm.team_id === otherTeamId);
+
+          if (ownConfirm) {
             nextConfirmedMatches.add(m.id);
+          }
+          if (otherConfirm) {
+            nextOtherTeamConfirmedMatches.add(m.id);
+          }
         }
+
+        nextPostForms[m.id] = buildPostMatchForm(m, ownConfirm, ownOpponentSpiritRow, ownSelfSpiritRow);
       } catch {}
     }
 
     setSubmittedSpirits(nextSubmittedSpirits);
     setSubmittedSelfSpirits(nextSubmittedSelfSpirits);
+    setOtherTeamConfirmedMatches(nextOtherTeamConfirmedMatches);
     setOtherTeamSpirits(nextOtherTeamSpirits);
+    setOtherTeamSubmittedSelfSpirits(nextOtherTeamSubmittedSelfSpirits);
     setConfirmedMatches(nextConfirmedMatches);
+    setPostForms(prev => {
+      const merged = { ...prev };
+      for (const [matchId, form] of Object.entries(nextPostForms)) {
+        const numericMatchId = Number(matchId);
+        if (!prev[numericMatchId] || expandedMatch !== numericMatchId) {
+          merged[numericMatchId] = form;
+        }
+      }
+      return merged;
+    });
   };
 
   useEffect(() => {
@@ -1392,11 +1537,11 @@ export default function MyTeamPage() {
                 <div className="flex-1 min-w-0">
                   <Text variant="secondary" className="text-[11px] mb-1 block break-words">{myDisplayName}</Text>
                   <input
-                    type="number"
-                    min="0"
+                    type="text"
                     inputMode="numeric"
+                    pattern="[0-9]*"
                     value={mockPostForm.t1_score}
-                    onChange={e => setMockPostForm({ ...mockPostForm, t1_score: parseInt(e.target.value) || 0 })}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t1_score: sanitizeNumericInput(e.target.value) })}
                     className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
                   />
                 </div>
@@ -1404,11 +1549,11 @@ export default function MyTeamPage() {
                 <div className="flex-1 min-w-0">
                   <Text variant="secondary" className="text-[11px] mb-1 block break-words">{oppDisplayName}</Text>
                   <input
-                    type="number"
-                    min="0"
+                    type="text"
                     inputMode="numeric"
+                    pattern="[0-9]*"
                     value={mockPostForm.t2_score}
-                    onChange={e => setMockPostForm({ ...mockPostForm, t2_score: parseInt(e.target.value) || 0 })}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t2_score: sanitizeNumericInput(e.target.value) })}
                     className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
                   />
                 </div>
@@ -1459,9 +1604,14 @@ export default function MyTeamPage() {
     const s = getMatchStatus(m);
     if (s === 'upcoming') return 'upcoming';
     if (s === 'live') return 'live';
+    if (m.is_complete) return 'done';
     const myDone = submittedSpirits.has(m.id) && submittedSelfSpirits.has(m.id) && confirmedMatches.has(m.id);
+    const otherDone = otherTeamConfirmedMatches.has(m.id)
+      && otherTeamSpirits.has(m.id)
+      && otherTeamSubmittedSelfSpirits.has(m.id);
     if (!myDone) return 'action';
-    if (!otherTeamSpirits.has(m.id)) {
+    if (otherDone) return 'action';
+    if (!otherDone) {
       const isT1 = m.t1_id === team.id;
       return 'waiting:' + getCompactTeamName(isT1 ? m.t2_name : m.t1_name);
     }
@@ -1553,6 +1703,11 @@ export default function MyTeamPage() {
               const form = postForms[match.id];
               const opponents = opponentPlayers[match.id] || [];
               const myDone = confirmedMatches.has(match.id) && submittedSpirits.has(match.id) && submittedSelfSpirits.has(match.id);
+              const otherDone = otherTeamConfirmedMatches.has(match.id)
+                && otherTeamSpirits.has(match.id)
+                && otherTeamSubmittedSelfSpirits.has(match.id);
+              const scoreDisagrees = myDone && otherDone && !match.is_complete;
+              const postMatchLocked = match.is_complete;
 
               const matchDate = match.time
                 ? new Date(match.time).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })
@@ -1608,10 +1763,10 @@ export default function MyTeamPage() {
                           {status === 'live' ? 'Resume Reporting' : 'Start Reporting'}
                         </button>
                       )}
-                      {isEnded && !myDone && (
+                      {isEnded && !postMatchLocked && (
                         <button onClick={() => handleExpandMatch(match.id, match)}
                           className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-cyan-700 py-2 text-sm font-semibold text-white hover:bg-cyan-600 transition">
-                          {isExpanded ? 'Collapse' : 'Complete Post-Match'}{isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                          {isExpanded ? 'Collapse' : myDone ? 'Edit Post-Match' : 'Complete Post-Match'}{isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                         </button>
                       )}
                       <button onClick={() => router.push('/matches?match_id=' + match.id)}
@@ -1624,58 +1779,64 @@ export default function MyTeamPage() {
                   {/* Expanded post-match form */}
                   {isExpanded && isEnded && form && (
                     <div className="border-t border-gray-200 dark:border-slate-700 p-3 space-y-4">
-                      {/* Score confirmation */}
-                      {!confirmedMatches.has(match.id) && (
-                        <div className="space-y-2">
-                          <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
-                          <div className="flex items-center gap-3">
-                            <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t1DisplayName}</Text>
-                              <input type="number" min="0" inputMode="numeric" value={form.t1_score}
-                                onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t1_score: parseInt(e.target.value) || 0 } }))}
-                                className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
-                            </div>
-                            <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
-                            <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t2DisplayName}</Text>
-                              <input type="number" min="0" inputMode="numeric" value={form.t2_score}
-                                onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t2_score: parseInt(e.target.value) || 0 } }))}
-                                className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
-                            </div>
-                          </div>
+                      {myDone && !otherDone && (
+                        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+                          Your submission is saved. You can still edit it until the other team finishes their post-match submission.
                         </div>
                       )}
 
-                      {/* Opponent spirit */}
-                      {!submittedSpirits.has(match.id) && (
-                        <SpiritForm
-                          label={`Rate ${oppDisplayName}`}
-                          form={form.opponentSpirit}
-                          onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
-                          playerList={opponents}
-                          playerLabel={oppDisplayName}
-                          showNotes
-                        />
+                      {scoreDisagrees && (
+                        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
+                          Both teams have submitted, but the confirmed scores still do not match. Update the score and submit again.
+                        </div>
                       )}
 
+                      {/* Score confirmation */}
+                      <div className="space-y-2">
+                        <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t1DisplayName}</Text>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*" value={form.t1_score}
+                              onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t1_score: sanitizeNumericInput(e.target.value) } }))}
+                              className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
+                          </div>
+                          <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
+                          <div className="flex-1 min-w-0">
+                            <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t2DisplayName}</Text>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*" value={form.t2_score}
+                              onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t2_score: sanitizeNumericInput(e.target.value) } }))}
+                              className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Opponent spirit */}
+                      <SpiritForm
+                        label={`Rate ${oppDisplayName}`}
+                        form={form.opponentSpirit}
+                        onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
+                        playerList={opponents}
+                        playerLabel={oppDisplayName}
+                        showNotes
+                      />
+
                       {/* Self spirit */}
-                      {!submittedSelfSpirits.has(match.id) && (
-                        <>
-                          <div className="border-t border-gray-200 dark:border-slate-700" />
-                          <SpiritForm
-                            label={`Rate ${myDisplayName} (Self)`}
-                            form={form.selfSpirit}
-                            onChange={selfSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, selfSpirit } }))}
-                            playerList={players.map(p => ({ id: p.id, name: p.name }))}
-                            playerLabel={myDisplayName}
-                            showMvpMsp={false}
-                          />
-                        </>
-                      )}
+                      <>
+                        <div className="border-t border-gray-200 dark:border-slate-700" />
+                        <SpiritForm
+                          label={`Rate ${myDisplayName} (Self)`}
+                          form={form.selfSpirit}
+                          onChange={selfSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, selfSpirit } }))}
+                          playerList={players.map(p => ({ id: p.id, name: p.name }))}
+                          playerLabel={myDisplayName}
+                          showMvpMsp={false}
+                        />
+                      </>
 
                       <button onClick={() => handleSubmitPostMatch(match.id)}
                         className="w-full py-2.5 text-sm font-semibold rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 transition">
-                        Submit All
+                        {myDone ? 'Update Post-Match' : 'Submit All'}
                       </button>
                     </div>
                   )}
@@ -1731,7 +1892,7 @@ export default function MyTeamPage() {
                   className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold disabled:opacity-50 transition">
                   <Save className="w-3 h-3" /> Add
                 </button>
-                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false }); setNewRole('Player'); }}
+                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false }); setNewRole('Player'); }}
                   className="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 transition">
                   Cancel
                 </button>

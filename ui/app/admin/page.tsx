@@ -137,6 +137,14 @@ function formatElapsed(elapsedSeconds: number) {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
+function sanitizeNumericInput(value: string) {
+  return value.replace(/\D/g, '');
+}
+
+function parseRequiredScore(value: string) {
+  return /^\d+$/.test(value) ? Number(value) : null;
+}
+
 function getElapsedSeconds(startedAt: string, referenceTime?: string) {
   const startedMs = new Date(startedAt).getTime();
   const referenceMs = referenceTime ? new Date(referenceTime).getTime() : Date.now();
@@ -221,6 +229,8 @@ function AdminContent() {
   const [panel, setPanel] = useState<PanelKey>('log');
   const [pendingScorerId, setPendingScorerId] = useState<number | null>(null);
   const [pendingAssisterId, setPendingAssisterId] = useState<number | null>(null);
+  const [pendingNoPlayerScorer, setPendingNoPlayerScorer] = useState(false);
+  const [pendingNoPlayerAssister, setPendingNoPlayerAssister] = useState(false);
   const [pendingBlockId, setPendingBlockId] = useState<number | null>(null);
   const [pendingTurnover, setPendingTurnover] = useState(false);
   const [pendingTurnoverId, setPendingTurnoverId] = useState<number | null>(null);
@@ -231,6 +241,8 @@ function AdminContent() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [pendingPossession, setPendingPossession] = useState<{ matchId: number; possession: 1 | 2 } | null>(null);
   const [savingRoundKey, setSavingRoundKey] = useState<number | null>(null);
+  const [matchSearch, setMatchSearch] = useState('');
+  const [endedScoreDraft, setEndedScoreDraft] = useState<{ t1_score: string; t2_score: string }>({ t1_score: '', t2_score: '' });
 
   useEffect(() => {
     if (isLoading) return;
@@ -317,14 +329,20 @@ function AdminContent() {
     const possession = activeMatch?.possession;
     if (possession === undefined || possession === null || possession >= 3) return;
     setPanel(getDefaultPanel(activeMatch, isPoc, pocTeam?.id ?? null));
-    setPendingScorerId(null);
-    setPendingAssisterId(null);
-    setPendingBlockId(null);
-    setPendingTurnover(false);
-    setPendingTurnoverId(null);
-    setPendingSwitchOnly(false);
-    setErrorMessage(null);
+    resetComposer();
   }, [activeMatch, isPoc, pocTeam?.id]);
+
+  useEffect(() => {
+    if (!activeMatch || getMatchStatus(activeMatch) !== 'ended' || activeMatch.is_complete) {
+      return;
+    }
+
+    setEndedScoreDraft({
+      t1_score: String(activeMatch.t1_score),
+      t2_score: String(activeMatch.t2_score),
+    });
+    setErrorMessage(null);
+  }, [activeMatch]);
 
   useEffect(() => {
     if (!isPoc || !activeMatch || activeMatch.possession === null || activeMatch.possession < 3) return;
@@ -351,6 +369,8 @@ function AdminContent() {
   function resetComposer() {
     setPendingScorerId(null);
     setPendingAssisterId(null);
+    setPendingNoPlayerScorer(false);
+    setPendingNoPlayerAssister(false);
     setPendingBlockId(null);
     setPendingTurnover(false);
     setPendingTurnoverId(null);
@@ -424,11 +444,51 @@ function AdminContent() {
     }
   }
 
+  async function saveEndedScore() {
+    if (!token || !isSuperAdmin || !activeMatchId) return;
+
+    const t1Score = parseRequiredScore(endedScoreDraft.t1_score);
+    const t2Score = parseRequiredScore(endedScoreDraft.t2_score);
+
+    if (t1Score === null || t2Score === null || t1Score < 0 || t2Score < 0) {
+      setErrorMessage('Please enter a valid final score.');
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setErrorMessage(null);
+
+      const response = await fetch(apiUrl(`/v1/super/matches/${activeMatchId}/score`), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ t1_score: t1Score, t2_score: t2Score }),
+      });
+
+      if (response.status === 400) throw new Error('Please enter a valid ended score for this match.');
+      if (response.status === 409) throw new Error('This post-match is already finalized.');
+      if (!response.ok) throw new Error('Unable to save the ended score right now.');
+
+      await mutateActiveMatch();
+      await mutateMatches();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to save the ended score right now.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
   async function saveAction() {
     if (!activeMatchId || !activeMatch || panel === 'log') return;
     const isOffView =
       (panel === 't1' && activeMatch.possession === 1) ||
       (panel === 't2' && activeMatch.possession === 2);
+    const hasScorerSelection = pendingScorerId !== null || pendingNoPlayerScorer;
+    const hasAssisterSelection = pendingAssisterId !== null || pendingNoPlayerAssister;
+    const hasDuplicateNamedScorePair = pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId === pendingAssisterId;
     try {
       setIsSubmitting(true);
       setErrorMessage(null);
@@ -438,9 +498,16 @@ function AdminContent() {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: null, event_type: 3 });
       } else if (isOffView && pendingTurnoverId !== null) {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingTurnoverId, event_type: 3 });
-      } else if (isOffView && pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId !== pendingAssisterId) {
-        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingAssisterId, event_type: 1 });
-        await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingScorerId, event_type: 0 });
+      } else if (isOffView && hasScorerSelection && hasAssisterSelection && !hasDuplicateNamedScorePair) {
+        if (pendingAssisterId !== null) {
+          await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingAssisterId, event_type: 1 });
+        }
+
+        if (pendingScorerId !== null) {
+          await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingScorerId, event_type: 0 });
+        } else {
+          await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: null, event_type: 0 });
+        }
       } else if (!isOffView && pendingBlockId !== null) {
         await postAction(apiUrl(`/v1/admin/matches/${activeMatchId}/event`), { player_id: pendingBlockId, event_type: 2 });
       }
@@ -486,11 +553,13 @@ function AdminContent() {
   function handlePlayerTap(playerId: number, action: 'scorer' | 'assister' | 'block' | 'turnover') {
     if (action === 'scorer') {
       setPendingScorerId(prev => prev === playerId ? null : playerId);
+      setPendingNoPlayerScorer(false);
       setPendingTurnover(false);
       setPendingTurnoverId(null);
       setPendingSwitchOnly(false);
     } else if (action === 'assister') {
       setPendingAssisterId(prev => prev === playerId ? null : playerId);
+      setPendingNoPlayerAssister(false);
       setPendingTurnover(false);
       setPendingTurnoverId(null);
       setPendingSwitchOnly(false);
@@ -501,14 +570,34 @@ function AdminContent() {
       setPendingTurnoverId(prev => prev === playerId ? null : playerId);
       setPendingScorerId(null);
       setPendingAssisterId(null);
+      setPendingNoPlayerScorer(false);
+      setPendingNoPlayerAssister(false);
       setPendingTurnover(false);
       setPendingSwitchOnly(false);
     }
   }
 
+  function activateNoPlayerScorer() {
+    setPendingScorerId(null);
+    setPendingTurnover(false);
+    setPendingTurnoverId(null);
+    setPendingSwitchOnly(false);
+    setPendingNoPlayerScorer(prev => !prev);
+  }
+
+  function activateNoPlayerAssister() {
+    setPendingAssisterId(null);
+    setPendingTurnover(false);
+    setPendingTurnoverId(null);
+    setPendingSwitchOnly(false);
+    setPendingNoPlayerAssister(prev => !prev);
+  }
+
   function activateTurnover() {
     setPendingScorerId(null);
     setPendingAssisterId(null);
+    setPendingNoPlayerScorer(false);
+    setPendingNoPlayerAssister(false);
     setPendingBlockId(null);
     setPendingTurnoverId(null);
     setPendingSwitchOnly(false);
@@ -518,6 +607,8 @@ function AdminContent() {
   function toggleSwitchOnly() {
     setPendingScorerId(null);
     setPendingAssisterId(null);
+    setPendingNoPlayerScorer(false);
+    setPendingNoPlayerAssister(false);
     setPendingBlockId(null);
     setPendingTurnover(false);
     setPendingTurnoverId(null);
@@ -540,11 +631,14 @@ function AdminContent() {
     (panel === 't2' && activeMatch.possession === 2)
   );
   const activeMatchReportingLocked = !!activeMatch && !isSuperAdmin && !activeMatch.reporting_enabled;
+  const hasScorerSelection = pendingScorerId !== null || pendingNoPlayerScorer;
+  const hasAssisterSelection = pendingAssisterId !== null || pendingNoPlayerAssister;
+  const hasDuplicateNamedScorePair = pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId === pendingAssisterId;
   const saveEnabled = !!activeMatch && panel !== 'log' && !isSubmitting && !activeMatchReportingLocked && (
     pendingSwitchOnly ||
     (isOffenseView && pendingTurnover) ||
     (isOffenseView && pendingTurnoverId !== null) ||
-    (isOffenseView && pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId !== pendingAssisterId) ||
+    (isOffenseView && hasScorerSelection && hasAssisterSelection && !hasDuplicateNamedScorePair) ||
     (!isOffenseView && pendingBlockId !== null)
   );
 
@@ -766,20 +860,43 @@ function AdminContent() {
                   </div>
                 );
               })}
-              {/* No-player turnover */}
-              <button
-                onClick={activateTurnover}
-                disabled={activeMatchReportingLocked}
-                className={`w-full grid grid-cols-[1fr_48px_48px_48px] items-center px-4 py-2.5 transition text-left border-b border-gray-100 dark:border-slate-800 ${
-                  pendingTurnover ? 'bg-amber-100 dark:bg-amber-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+              {/* No-player row */}
+              <div
+                className={`grid grid-cols-[1fr_48px_48px_48px] items-center px-4 py-2.5 transition text-left border-b border-gray-100 dark:border-slate-800 ${
+                  pendingNoPlayerScorer || pendingNoPlayerAssister || pendingTurnover
+                    ? 'bg-amber-100 dark:bg-amber-400/10'
+                    : 'hover:bg-gray-50 dark:hover:bg-slate-800'
                 }`}
               >
-                <span className={`text-sm font-medium ${pendingTurnover ? 'text-amber-700 dark:text-amber-300' : 'text-gray-500 dark:text-slate-400'}`}>Turnover (no player)</span>
-                <span /><span />
-                <span className={`mx-auto h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold ${
-                  pendingTurnover ? 'bg-amber-400 text-gray-900 ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
-                }`}>T</span>
-              </button>
+                <span className={`text-sm font-medium ${pendingNoPlayerScorer || pendingNoPlayerAssister || pendingTurnover ? 'text-amber-700 dark:text-amber-300' : 'text-gray-500 dark:text-slate-400'}`}>No Player</span>
+                <button
+                  onClick={activateNoPlayerScorer}
+                  disabled={activeMatchReportingLocked}
+                  className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                    pendingNoPlayerScorer ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-green-100 dark:hover:bg-green-900/30'
+                  }`}
+                >
+                  {pendingNoPlayerScorer ? 'S' : ''}
+                </button>
+                <button
+                  onClick={activateNoPlayerAssister}
+                  disabled={activeMatchReportingLocked}
+                  className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                    pendingNoPlayerAssister ? 'bg-sky-500 text-white ring-2 ring-sky-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-sky-100 dark:hover:bg-sky-900/30'
+                  }`}
+                >
+                  {pendingNoPlayerAssister ? 'A' : ''}
+                </button>
+                <button
+                  onClick={activateTurnover}
+                  disabled={activeMatchReportingLocked}
+                  className={`mx-auto h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                    pendingTurnover ? 'bg-amber-400 text-gray-900 ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-amber-100 dark:hover:bg-amber-900/30'
+                  }`}
+                >
+                  {pendingTurnover ? 'T' : ''}
+                </button>
+              </div>
               {/* Switch possession */}
               <button
                 onClick={toggleSwitchOnly}
@@ -791,7 +908,7 @@ function AdminContent() {
                 <span className={`text-sm font-medium ${pendingSwitchOnly ? 'text-sky-700 dark:text-sky-300' : 'text-gray-500 dark:text-slate-400'}`}>Don&apos;t Know</span>
                 <ArrowLeftRight className={`h-4 w-4 ${pendingSwitchOnly ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400 dark:text-slate-500'}`} />
               </button>
-              {pendingScorerId !== null && pendingAssisterId !== null && pendingScorerId === pendingAssisterId && (
+              {hasDuplicateNamedScorePair && (
                 <div className="px-4 py-2 text-sm text-red-600 dark:text-red-300">Scorer and assister must be different</div>
               )}
             </div>
@@ -876,21 +993,15 @@ function AdminContent() {
             >
               <ChevronLeft className="h-4 w-4" /> Back
             </button>
-            <button
-              onClick={() => setChoosingPossession(activeMatch.id)}
-              className="rounded-full bg-amber-400 px-5 py-2 text-sm font-semibold text-gray-900 transition hover:bg-amber-300"
-            >
-              Resume Reporting
-            </button>
           </div>
 
           <div className="rounded-xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-400/10 px-4 py-3">
             <Text className="text-sm text-amber-800 dark:text-amber-200">
-              Match is ended but not complete yet.
+              Match is ended but not complete yet. Scores stay editable here until the post-match flow is finalized.
             </Text>
           </div>
 
-          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-4">
             <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
               <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 p-3 text-left">
                 <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={activeMatch.t1_name}>{displayT1Name}</div>
@@ -904,6 +1015,40 @@ function AdminContent() {
                 <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{activeMatch.t2_score}</div>
               </div>
             </div>
+
+            <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-3">
+              <div>
+                <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-slate-400">{displayT1Name}</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={endedScoreDraft.t1_score}
+                  onChange={(event) => setEndedScoreDraft(prev => ({ ...prev, t1_score: sanitizeNumericInput(event.target.value) }))}
+                  className="w-full rounded-xl border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-4 py-3 text-center text-2xl font-black text-gray-900 dark:text-white"
+                />
+              </div>
+              <div className="pb-3 text-lg font-light text-gray-400 dark:text-slate-500">-</div>
+              <div>
+                <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-right text-gray-500 dark:text-slate-400">{displayT2Name}</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  value={endedScoreDraft.t2_score}
+                  onChange={(event) => setEndedScoreDraft(prev => ({ ...prev, t2_score: sanitizeNumericInput(event.target.value) }))}
+                  className="w-full rounded-xl border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 px-4 py-3 text-center text-2xl font-black text-gray-900 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={saveEndedScore}
+              disabled={isSubmitting}
+              className="w-full rounded-xl bg-amber-400 px-4 py-3 text-sm font-semibold text-gray-900 transition hover:bg-amber-300 disabled:opacity-60"
+            >
+              Save Scores
+            </button>
           </div>
 
           <div className="space-y-1.5">
@@ -1000,6 +1145,19 @@ function AdminContent() {
   const reporterHeading = adminView === 'allow-reporting'
     ? 'Allow Reporting'
     : isPoc ? 'Team Reporting' : 'Start Reporting';
+  const normalizedMatchSearch = matchSearch.trim().toLowerCase();
+  const visibleMatches = isSuperAdmin && adminView === 'reporting' && normalizedMatchSearch
+    ? matches.filter(match => {
+        const fields = [
+          match.t1_name,
+          match.t2_name,
+          match.t1_abbreviation ?? '',
+          match.t2_abbreviation ?? '',
+        ];
+
+        return fields.some(value => value.toLowerCase().includes(normalizedMatchSearch));
+      })
+    : matches;
   
 
   return (
@@ -1089,8 +1247,17 @@ function AdminContent() {
             </div>
           ) : (
             <div className="space-y-2">
-            {matches.length === 0 && <Text className="text-sm text-gray-400 dark:text-slate-500">No matches available right now.</Text>}
-            {matches.map(match => {
+            {isSuperAdmin && adminView === 'reporting' && (
+              <input
+                type="search"
+                value={matchSearch}
+                onChange={(event) => setMatchSearch(event.target.value)}
+                placeholder="Search by team name or abbreviation"
+                className="w-full rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-4 py-3 text-sm text-gray-900 dark:text-white"
+              />
+            )}
+            {visibleMatches.length === 0 && <Text className="text-sm text-gray-400 dark:text-slate-500">No matches available right now.</Text>}
+            {visibleMatches.map(match => {
               const status = getMatchStatus(match);
               const isLive = status === 'live';
               const isUpcoming = status === 'upcoming';
@@ -1159,7 +1326,7 @@ function AdminContent() {
                         onClick={() => setActiveMatchId(match.id)}
                         className="rounded-lg border border-gray-200 dark:border-slate-600 px-4 py-2 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-100 dark:hover:bg-slate-700"
                       >
-                        View Match
+                        {isSuperAdmin ? 'Edit Scores' : 'View Match'}
                       </button>
                     )}
                   </div>

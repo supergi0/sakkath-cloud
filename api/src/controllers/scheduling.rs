@@ -1450,9 +1450,9 @@ async fn get_slot_assignments(
 }
 
 fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowTemplate> {
-    let friday = NaiveDate::from_ymd_opt(2026, 1, 30).unwrap();
-    let saturday = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
-    let sunday = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let friday = NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let saturday = NaiveDate::from_ymd_opt(2026, 5, 23).unwrap();
+    let sunday = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
 
     let friday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
     let friday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
@@ -2118,7 +2118,7 @@ async fn build_schedule_rank_snapshots(
     let mut snapshots = HashMap::new();
     for (division, standings_round) in needed_snapshots {
         let standings =
-            sorting::get_sorted_standings_through_round(db, division, standings_round).await;
+            sorting::get_generation_standings_through_round(db, division, standings_round).await;
         let ranks = standings
             .into_iter()
             .enumerate()

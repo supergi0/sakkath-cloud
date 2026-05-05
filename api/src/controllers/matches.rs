@@ -28,7 +28,7 @@ pub struct Stats {
     pub fields: i64,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize)]
 pub struct TeamMatch {
     pub id: i64,
     pub t1_id: i64,
@@ -46,6 +46,27 @@ pub struct TeamMatch {
     pub possession: Option<i64>,
     pub stream_url: Option<String>,
     pub match_type: i64,
+    pub is_complete: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct TeamMatchRow {
+    id: i64,
+    t1_id: i64,
+    t2_id: i64,
+    t1_name: String,
+    t2_name: String,
+    t1_abbreviation: Option<String>,
+    t2_abbreviation: Option<String>,
+    t1_score: i64,
+    t2_score: i64,
+    t1_spirit: Option<i64>,
+    t2_spirit: Option<i64>,
+    field_name: String,
+    time: String,
+    possession: Option<i64>,
+    stream_url: Option<String>,
+    match_type: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -375,27 +396,7 @@ pub async fn get_team_matches(
     State(state): State<crate::AppState>,
     Path(team_id): Path<i64>,
 ) -> Json<Vec<TeamMatch>> {
-    let matches = sqlx::query_as::<_, TeamMatch>(
-        r#"
-         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
-                             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
-               m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit, 
-               COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
-             m.possession, m.stream_url, m.type as match_type
-        FROM matches m
-        JOIN teams t1 ON t1.id = m.t1_id
-        JOIN teams t2 ON t2.id = m.t2_id
-        LEFT JOIN fields f ON f.id = m.field_id
-        WHERE m.deleted_at IS NULL AND (m.t1_id = ? OR m.t2_id = ?)
-        ORDER BY m.time DESC
-        "#,
-    )
-    .bind(team_id)
-    .bind(team_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    Json(matches)
+    Json(load_team_matches(&state.db, team_id).await)
 }
 
 // Get match events (live log)
@@ -417,6 +418,7 @@ pub async fn get_match_events(
         FROM match_events me
         LEFT JOIN users u ON u.id = me.player_id
         WHERE me.match_id = ?
+                    AND NOT (me.player_id IS NULL AND me.event_type IN (0, 1))
         ORDER BY me.created_at ASC
         "#,
     )
@@ -559,7 +561,9 @@ pub async fn get_match_detail(
              ) as created_at
         FROM match_events me 
         LEFT JOIN users u ON u.id = me.player_id
-        WHERE me.match_id = ? ORDER BY me.created_at ASC
+                WHERE me.match_id = ?
+                    AND NOT (me.player_id IS NULL AND me.event_type IN (0, 1))
+                ORDER BY me.created_at ASC
         "#,
     )
     .bind(match_id)
@@ -625,6 +629,42 @@ pub async fn get_upcoming_matches(
             LIMIT 16
             "#
         ).bind(team_id).bind(team_id).fetch_all(&state.db).await.unwrap_or_default()
+    } else if access.role == 0 {
+        let all_matches = sqlx::query_as::<_, UpcomingMatch>(
+            r#"
+                 SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
+                     t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
+                   COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
+                   m.possession, m.type as match_type, COALESCE(rrs.is_enabled, 0) as reporting_enabled
+            FROM matches m
+            JOIN teams t1 ON t1.id = m.t1_id
+            JOIN teams t2 ON t2.id = m.t2_id
+            LEFT JOIN fields f ON f.id = m.field_id
+            LEFT JOIN reporting_round_settings rrs ON rrs.round_key = m.type
+            WHERE m.deleted_at IS NULL
+            ORDER BY m.time ASC
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+        let mut filtered = Vec::new();
+        for upcoming_match in all_matches {
+            let keep_match = match upcoming_match.possession {
+                None => true,
+                Some(value) if value < 3 => true,
+                Some(_) => match_post_match_is_complete(&state.db, upcoming_match.id)
+                    .await
+                    .map(|is_complete| !is_complete)
+                    .unwrap_or(false),
+            };
+
+            if keep_match {
+                filtered.push(upcoming_match);
+            }
+        }
+        filtered
     } else {
         sqlx::query_as::<_, UpcomingMatch>(
             r#"
@@ -736,6 +776,10 @@ pub async fn start_match(
                     format!("failed to start match: {error}"),
                 )
             })?;
+
+        let division = load_division_for_team(&state.db, t1_id).await?;
+        sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
     }
 
     state.live_updates.publish_match_updated(match_id);
@@ -1034,6 +1078,7 @@ pub async fn record_event(
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
         cache::invalidate_player_stats().await;
         record_match_info(
             "match.inprogress",
@@ -1266,6 +1311,7 @@ pub async fn undo_event(
                 .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
         if let Some((division,)) = division {
             sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+            cache::invalidate_division(division).await;
             cache::invalidate_player_stats().await;
             record_match_info(
                 "match.inprogress",
@@ -1370,6 +1416,7 @@ pub async fn submit_spirit_score(
             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     if let Some((division,)) = division {
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
     }
 
     state.live_updates.publish_match_updated(match_id);
@@ -1394,13 +1441,17 @@ pub async fn get_poc_matches(
 
     let team_id = poc_team.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
 
-    let matches = sqlx::query_as::<_, TeamMatch>(
+    Ok(Json(load_team_matches(&state.db, team_id).await))
+}
+
+async fn load_team_matches(db: &sqlx::SqlitePool, team_id: i64) -> Vec<TeamMatch> {
+    let rows = sqlx::query_as::<_, TeamMatchRow>(
         r#"
         SELECT m.id, m.t1_id, m.t2_id, t1.name as t1_name, t2.name as t2_name,
-                             t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
+               t1.abbreviation as t1_abbreviation, t2.abbreviation as t2_abbreviation,
                m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit,
                COALESCE(f.name, '') as field_name, COALESCE(m.time, '') as time,
-             m.possession, m.stream_url, m.type as match_type
+               m.possession, m.stream_url, m.type as match_type
         FROM matches m
         JOIN teams t1 ON t1.id = m.t1_id
         JOIN teams t2 ON t2.id = m.t2_id
@@ -1411,11 +1462,35 @@ pub async fn get_poc_matches(
     )
     .bind(team_id)
     .bind(team_id)
-    .fetch_all(&state.db)
+    .fetch_all(db)
     .await
     .unwrap_or_default();
 
-    Ok(Json(matches))
+    let mut matches = Vec::with_capacity(rows.len());
+    for row in rows {
+        let is_complete = match_post_match_is_complete(db, row.id).await.unwrap_or(false);
+        matches.push(TeamMatch {
+            id: row.id,
+            t1_id: row.t1_id,
+            t2_id: row.t2_id,
+            t1_name: row.t1_name,
+            t2_name: row.t2_name,
+            t1_abbreviation: row.t1_abbreviation,
+            t2_abbreviation: row.t2_abbreviation,
+            t1_score: row.t1_score,
+            t2_score: row.t2_score,
+            t1_spirit: row.t1_spirit,
+            t2_spirit: row.t2_spirit,
+            field_name: row.field_name,
+            time: row.time,
+            possession: row.possession,
+            stream_url: row.stream_url,
+            match_type: row.match_type,
+            is_complete,
+        });
+    }
+
+    matches
 }
 
 async fn verify_volunteer_user(
@@ -1578,6 +1653,12 @@ pub struct ScoreConfirmRow {
     pub t2_score: i64,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateEndedScoreRequest {
+    pub t1_score: i64,
+    pub t2_score: i64,
+}
+
 // Submit WFDF spirit scores for the OTHER team
 pub async fn submit_wfdf_spirit(
     State(state): State<crate::AppState>,
@@ -1722,16 +1803,20 @@ pub async fn confirm_score(
 
     let my_team_id = resolve_post_match_team(&state.db, &email, payload.team_id).await?;
 
-    let match_info: Option<(i64, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT t1_id, t2_id, possession FROM matches WHERE id = ? AND deleted_at IS NULL",
+    let match_info: Option<(i64, i64, Option<i64>, i64, i64, i64)> = sqlx::query_as(
+        "SELECT t1_id, t2_id, possession, type, t1_score, t2_score FROM matches WHERE id = ? AND deleted_at IS NULL",
     )
     .bind(match_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (t1_id, t2_id, possession) = match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let (t1_id, t2_id, possession, match_type, current_t1_score, current_t2_score) =
+        match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
     if possession.unwrap_or(0) < 3 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    if match_type >= 1000 && payload.t1_score == payload.t2_score {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
     if my_team_id != t1_id && my_team_id != t2_id {
@@ -1745,12 +1830,103 @@ pub async fn confirm_score(
     .execute(&state.db).await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let mut score_changed = false;
+    if let Some((confirmed_t1_score, confirmed_t2_score)) =
+        find_consensus_confirmed_score(&state.db, match_id)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+        && (confirmed_t1_score != current_t1_score || confirmed_t2_score != current_t2_score)
+    {
+        sqlx::query(
+            "UPDATE matches SET t1_score = ?, t2_score = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(confirmed_t1_score)
+        .bind(confirmed_t2_score)
+        .bind(match_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let division = load_division_for_team(&state.db, t1_id).await?;
+        sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+        cache::invalidate_division(division).await;
+        score_changed = true;
+    }
+
     let finalized = match_scores_are_finalized(&state.db, match_id)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     let (is_complete, auto_action) = settle_match_completion_if_ready(&state, match_id).await?;
 
     state.live_updates.publish_match_updated(match_id);
+
+    Ok(Json(
+        serde_json::json!({"success": true, "finalized": finalized, "is_complete": is_complete, "auto_action": auto_action, "score_changed": score_changed}),
+    ))
+}
+
+pub async fn update_incomplete_match_score(
+    State(state): State<crate::AppState>,
+    headers: axum::http::HeaderMap,
+    Path(match_id): Path<i64>,
+    Json(payload): Json<UpdateEndedScoreRequest>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let access = verify_super_user(&state, &headers).await?;
+
+    if payload.t1_score < 0 || payload.t2_score < 0 {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let match_info: Option<(i64, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT t1_id, possession, type FROM matches WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(match_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (t1_id, possession, match_type) = match_info.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    if possession.unwrap_or(0) < 3 {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
+    if match_type >= 1000 && payload.t1_score == payload.t2_score {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    ensure_match_not_finalized(&state.db, match_id).await?;
+
+    sqlx::query(
+        "UPDATE matches SET t1_score = ?, t2_score = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    )
+    .bind(payload.t1_score)
+    .bind(payload.t2_score)
+    .bind(match_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let division = load_division_for_team(&state.db, t1_id).await?;
+    sorting::refresh_intermediate_standings_cache(&state.db, division).await;
+    cache::invalidate_division(division).await;
+
+    let finalized = match_scores_are_finalized(&state.db, match_id)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (is_complete, auto_action) = settle_match_completion_if_ready(&state, match_id).await?;
+
+    state.live_updates.publish_match_updated(match_id);
+    record_match_info(
+        "match.end",
+        serde_json::json!({
+            "match_id": match_id,
+            "match_type": match_type,
+            "division": division,
+            "actor_user_id": access.user_id,
+            "action": "super_update_ended_score",
+            "t1_score": payload.t1_score,
+            "t2_score": payload.t2_score,
+        }),
+    );
 
     Ok(Json(
         serde_json::json!({"success": true, "finalized": finalized, "is_complete": is_complete, "auto_action": auto_action}),
@@ -2024,4 +2200,33 @@ async fn match_scores_are_finalized(
     .await?;
 
     Ok(confirmed.0 >= 2)
+}
+
+async fn find_consensus_confirmed_score(
+    db: &sqlx::SqlitePool,
+    match_id: i64,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    let confirmations: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT t1_score, t2_score FROM score_confirmations WHERE match_id = ? ORDER BY team_id ASC",
+    )
+    .bind(match_id)
+    .fetch_all(db)
+    .await?;
+
+    let Some((first_t1_score, first_t2_score)) = confirmations.first().copied() else {
+        return Ok(None);
+    };
+
+    if confirmations.len() < 2 {
+        return Ok(None);
+    }
+
+    if confirmations
+        .iter()
+        .all(|(t1_score, t2_score)| *t1_score == first_t1_score && *t2_score == first_t2_score)
+    {
+        Ok(Some((first_t1_score, first_t2_score)))
+    } else {
+        Ok(None)
+    }
 }

@@ -19,6 +19,8 @@ type PocPlayerCurrentRow = (
     i64,
     i64,
     i64,
+    i64,
+    i64,
 );
 
 #[derive(Deserialize)]
@@ -106,6 +108,8 @@ pub struct TeamPlayerStat {
     pub turnovers: i64,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -133,6 +137,8 @@ pub struct PocPlayer {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +149,8 @@ pub struct UpdatePlayerRequest {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Deserialize)]
@@ -153,6 +161,8 @@ pub struct AddPlayerRequest {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 // All teams
@@ -257,11 +267,13 @@ pub async fn get_team_players(
             COALESCE(SUM(CASE WHEN me.event_type = 2 THEN 1 ELSE 0 END), 0) as blocks,
             COALESCE(SUM(CASE WHEN me.event_type = 3 THEN 1 ELSE 0 END), 0) as turnovers,
             COALESCE(u.is_captain, 0) as is_captain,
-            COALESCE(u.is_spirit_captain, 0) as is_spirit_captain
+            COALESCE(u.is_spirit_captain, 0) as is_spirit_captain,
+            COALESCE(u.is_manager, 0) as is_manager,
+            COALESCE(u.is_coach, 0) as is_coach
         FROM users u
         LEFT JOIN match_events me ON me.player_id = u.id
         WHERE u.team_id = ? AND u.role = 2 AND u.deleted_at IS NULL
-        GROUP BY u.id, u.name, u.common_name, u.is_captain, u.is_spirit_captain
+        GROUP BY u.id, u.name, u.common_name, u.is_captain, u.is_spirit_captain, u.is_manager, u.is_coach
         "#,
     )
     .bind(id)
@@ -394,7 +406,7 @@ pub async fn get_team_seed_timeline(
         }
 
         let standings =
-            sorting::get_sorted_standings_through_round(&state.db, division, round).await;
+            sorting::get_generation_standings_through_round(&state.db, division, round).await;
         if let Some(seed) = standings
             .iter()
             .position(|standing| standing.team_id == team_id)
@@ -415,8 +427,12 @@ pub async fn get_team_seed_timeline(
         } else {
             total_rounds
         };
-        let swiss_order =
-            sorting::get_sorted_standings_through_round(&state.db, division, swiss_round).await;
+        let swiss_order = sorting::get_generation_standings_through_round(
+            &state.db,
+            division,
+            swiss_round,
+        )
+        .await;
         let playoff_seed_order =
             rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
 
@@ -552,7 +568,7 @@ pub async fn get_poc_players(
     let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
 
     let players = sqlx::query_as::<_, PocPlayer>(
-        "SELECT id, name, common_name, COALESCE(email, '') as email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain 
+        "SELECT id, name, common_name, COALESCE(email, '') as email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain, COALESCE(is_manager, 0) as is_manager, COALESCE(is_coach, 0) as is_coach 
             FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL ORDER BY name"
     ).bind(team_id).fetch_all(&state.db).await.unwrap_or_default();
 
@@ -606,7 +622,7 @@ pub async fn update_poc_player(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let current: Option<PocPlayerCurrentRow> = sqlx::query_as(
-        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, COALESCE(p.is_captain, 0), COALESCE(p.is_spirit_captain, 0), t.roster_moves_remaining
+        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, COALESCE(p.is_captain, 0), COALESCE(p.is_spirit_captain, 0), COALESCE(p.is_manager, 0), COALESCE(p.is_coach, 0), t.roster_moves_remaining
          FROM users p
          INNER JOIN users poc ON poc.team_id = p.team_id
          INNER JOIN teams t ON t.id = p.team_id
@@ -626,6 +642,8 @@ pub async fn update_poc_player(
         current_phone,
         current_captain,
         current_spirit_captain,
+        current_manager,
+        current_coach,
         remaining_moves,
     ) = current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
@@ -639,7 +657,9 @@ pub async fn update_poc_player(
         || current_email != normalized_email
         || current_phone != normalized_phone
         || current_captain != payload.is_captain as i64
-        || current_spirit_captain != payload.is_spirit_captain as i64;
+        || current_spirit_captain != payload.is_spirit_captain as i64
+        || current_manager != payload.is_manager as i64
+        || current_coach != payload.is_coach as i64;
     let common_name_changed = current_common_name != normalized_common_name;
 
     let updated_remaining = if roster_move_change {
@@ -661,9 +681,9 @@ pub async fn update_poc_player(
     };
 
     sqlx::query(
-        "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, is_captain = ?, is_spirit_captain = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, is_captain = ?, is_spirit_captain = ?, is_manager = ?, is_coach = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
     ).bind(normalized_name).bind(normalized_common_name).bind(&normalized_email).bind(&normalized_phone)
-     .bind(payload.is_captain).bind(payload.is_spirit_captain).bind(player_id)
+     .bind(payload.is_captain).bind(payload.is_spirit_captain).bind(payload.is_manager).bind(payload.is_coach).bind(player_id)
      .execute(&mut *tx).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -750,9 +770,9 @@ pub async fn add_poc_player(
     }
 
     let result = sqlx::query(
-        "INSERT INTO users (name, common_name, email, phone, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, ?, 2, ?, ?)"
+        "INSERT INTO users (name, common_name, email, phone, team_id, role, is_captain, is_spirit_captain, is_manager, is_coach) VALUES (?, ?, ?, ?, ?, 2, ?, ?, ?, ?)"
     ).bind(normalized_name).bind(normalized_common_name).bind(&normalized_email).bind(&normalized_phone)
-     .bind(team_id).bind(payload.is_captain).bind(payload.is_spirit_captain)
+     .bind(team_id).bind(payload.is_captain).bind(payload.is_spirit_captain).bind(payload.is_manager).bind(payload.is_coach)
      .execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 

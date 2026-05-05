@@ -107,6 +107,10 @@ fn super_routes() -> Router<AppState> {
             "/super/reporting-rounds/:round_key",
             put(matches::update_reporting_round_setting),
         )
+        .route(
+            "/super/matches/:id/score",
+            put(matches::update_incomplete_match_score),
+        )
 }
 
 // Match routes (public)

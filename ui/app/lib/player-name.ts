@@ -13,7 +13,7 @@ export function abbreviatePlayerName(name: string, maxLen = 20) {
 
   const current = [...parts];
   for (let index = current.length - 1; index > 0; index -= 1) {
-    current[index] = `${current[index][0]}.`;
+    current[index] = `${current[index][0].toUpperCase()}.`;
     const joined = current.join(' ');
     if (joined.length <= maxLen) {
       return joined;
