@@ -17,6 +17,7 @@ The following **count** toward the limit:
 - Changing an official player name or detail
 The following **do not** count toward the limit:
 - Nickname or common name changes
+- Changing a player's role
 ## Advice
  
 - Upload the correct logo early
