@@ -1,11 +1,97 @@
+use opentelemetry::KeyValue;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::{LogExporter, SpanExporter};
+use opentelemetry_sdk::{logs::LoggerProvider, runtime, trace::TracerProvider, Resource};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::{Arc, OnceLock};
 use sysinfo::System;
 use tokio::sync::Mutex;
 use tokio::time::{self, Duration};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use crate::helpers::cache;
+
+// Kept alive for the process lifetime; Drop flushes all pending OTel batches.
+pub struct OtelGuard {
+    logger_provider: Option<LoggerProvider>,
+    tracer_provider: Option<TracerProvider>,
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.tracer_provider.take() {
+            p.shutdown().ok();
+        }
+        if let Some(p) = self.logger_provider.take() {
+            p.shutdown().ok();
+        }
+    }
+}
+
+/// Initialises tracing + optional OTel log export to Grafana.
+///
+/// When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, every `tracing::info!` /
+/// `warn!` / `error!` call is forwarded to Grafana Cloud via OTLP HTTP in
+/// addition to stdout. Falls back to plain stdout when the env var is absent.
+pub fn init_otel() -> OtelGuard {
+    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_err() {
+        tracing_subscriber::fmt()
+            .with_target(false)
+            .with_level(true)
+            .with_max_level(tracing::Level::INFO)
+            .init();
+        return OtelGuard {
+            logger_provider: None,
+            tracer_provider: None,
+        };
+    }
+
+    let resource = Resource::new(vec![KeyValue::new(
+        "service.name",
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "sakkath-api".to_string()),
+    )]);
+
+    // --- Logs ---
+    let log_exporter = LogExporter::builder()
+        .with_http()
+        .build()
+        .expect("OTel log exporter");
+
+    let logger_provider = LoggerProvider::builder()
+        .with_resource(resource.clone())
+        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .build();
+
+    // --- Traces ---
+    let span_exporter = SpanExporter::builder()
+        .with_http()
+        .build()
+        .expect("OTel span exporter");
+
+    let tracer_provider = TracerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .build();
+
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
+    let tracer = tracer_provider.tracer("sakkath-api");
+
+    tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(OpenTelemetryTracingBridge::new(&logger_provider))
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+
+    OtelGuard {
+        logger_provider: Some(logger_provider),
+        tracer_provider: Some(tracer_provider),
+    }
+}
+
 
 const TELEMETRY_QUEUE_KEY: &str = "telemetry:buffer";
 const TELEMETRY_FLUSH_BATCH_SIZE: usize = 2_000;
@@ -90,6 +176,7 @@ fn spawn_worker(runtime: Arc<TelemetryRuntime>) {
 
             system.refresh_all();
 
+            let cpu = system.global_cpu_usage() as f64;
             let memory_used_mb = system.used_memory() as f64 / (1024.0 * 1024.0);
             let memory_percent = if system.total_memory() == 0 {
                 0.0
@@ -97,10 +184,17 @@ fn spawn_worker(runtime: Arc<TelemetryRuntime>) {
                 (system.used_memory() as f64 / system.total_memory() as f64) * 100.0
             };
 
+            tracing::info!(
+                cpu_percent = cpu,
+                memory_mb = memory_used_mb,
+                memory_percent = memory_percent,
+                "system heartbeat"
+            );
+
             enqueue(
                 &runtime,
                 TelemetryEntry::System {
-                    cpu_percent: system.global_cpu_usage() as f64,
+                    cpu_percent: cpu,
                     memory_mb_used: memory_used_mb,
                     memory_percent,
                 },
