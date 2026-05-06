@@ -179,22 +179,10 @@ function roleToFlags(role: PlayerRole) {
   };
 }
 
-function normalizeOptionalText(value?: string | null) {
-  const trimmed = value?.trim() ?? '';
-  return trimmed ? trimmed : null;
-}
-
-function consumesRosterMove(original: Player, draft: Partial<Player>, draftRole: PlayerRole) {
+function consumesRosterMove(original: Player, draft: Partial<Player>) {
   const nextName = draft.name?.trim() ?? '';
-  const nextFlags = roleToFlags(draftRole);
 
-  return original.name.trim() !== nextName
-    || normalizeOptionalText(original.email) !== normalizeOptionalText(draft.email)
-    || normalizeOptionalText(original.phone) !== normalizeOptionalText(draft.phone)
-    || original.is_captain !== nextFlags.is_captain
-    || original.is_spirit_captain !== nextFlags.is_spirit_captain
-    || original.is_manager !== nextFlags.is_manager
-    || original.is_coach !== nextFlags.is_coach;
+  return original.name.trim() !== nextName;
 }
 
 function roleBadge(role: PlayerRole) {
@@ -474,7 +462,7 @@ export default function MyTeamPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editingPlayer = editingId ? players.find(player => player.id === editingId) ?? null : null;
   const rosterMovesExhausted = !!team && team.roster_moves_remaining <= 0;
-  const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
+  const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm) : false;
   const teamEditsLocked = !teamEditsEnabled;
 
   const scrollToTop = () => {
@@ -788,7 +776,7 @@ export default function MyTeamPage() {
             setTeamEditsEnabled(false);
             setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
           } else if (res.status === 409) {
-            setFeedback({ type: 'error', message: 'Roster edit/remove slots are exhausted. Only common name edits stay free now.' });
+            setFeedback({ type: 'error', message: 'Roster edit/remove slots are exhausted. Only full-name changes and deletions are blocked now.' });
           } else {
             setFeedback({ type: 'error', message: 'Unable to save this player right now.' });
           }
@@ -1919,19 +1907,19 @@ export default function MyTeamPage() {
                         disabled={teamEditsLocked}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="email" placeholder="Email (optional)" value={editForm.email || ''} onChange={e => setEditForm({ ...editForm, email: e.target.value })}
-                        disabled={teamEditsLocked || rosterMovesExhausted}
+                        disabled={teamEditsLocked}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <input type="text" placeholder="Phone (optional)" value={editForm.phone || ''} onChange={e => setEditForm({ ...editForm, phone: e.target.value })}
-                        disabled={teamEditsLocked || rosterMovesExhausted}
+                        disabled={teamEditsLocked}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-gray-100" />
                       <select value={editRole} onChange={e => setEditRole(e.target.value as PlayerRole)}
-                        disabled={teamEditsLocked || rosterMovesExhausted}
+                        disabled={teamEditsLocked}
                         className="w-full px-3 py-1.5 text-sm rounded-lg bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-600 text-gray-900 dark:text-white">
                         {PLAYER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
                       {rosterMovesExhausted && (
                         <Text variant="secondary" className="text-[11px]">
-                          Roster edit/remove slots are exhausted. Only the common name field can be changed now.
+                          Roster edit/remove slots are exhausted. Only the main name field and delete are blocked now.
                         </Text>
                       )}
                       <div className="flex gap-2">

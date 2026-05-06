@@ -14,10 +14,13 @@ Each team has a budget of **3 tracked changes** for official roster edits.
  
 The following **count** toward the limit:
 - Removing a player
-- Changing an official player name or detail
+- Changing the player's full name
+
 The following **do not** count toward the limit:
 - Nickname or common name changes
 - Changing a player's role
+- Editing a player's email or phone number
+
 ## Advice
  
 - Upload the correct logo early

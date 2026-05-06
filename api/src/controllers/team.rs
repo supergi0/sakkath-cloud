@@ -14,8 +14,6 @@ type PocPlayerCurrentRow = (
     i64,
     String,
     Option<String>,
-    Option<String>,
-    Option<String>,
     i64,
 );
 
@@ -618,7 +616,7 @@ pub async fn update_poc_player(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let current: Option<PocPlayerCurrentRow> = sqlx::query_as(
-        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, t.roster_moves_remaining
+        "SELECT p.team_id, p.name, p.common_name, t.roster_moves_remaining
          FROM users p
          INNER JOIN users poc ON poc.team_id = p.team_id
          INNER JOIN teams t ON t.id = p.team_id
@@ -634,8 +632,6 @@ pub async fn update_poc_player(
         team_id,
         current_name,
         current_common_name,
-        current_email,
-        current_phone,
         remaining_moves,
     ) = current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
@@ -645,9 +641,7 @@ pub async fn update_poc_player(
         .filter(|value| !value.is_empty())
         .unwrap_or(current_name.as_str());
 
-    let roster_move_change = current_name != normalized_name
-        || current_email != normalized_email
-        || current_phone != normalized_phone;
+    let roster_move_change = current_name != normalized_name;
     let common_name_changed = current_common_name != normalized_common_name;
 
     let updated_remaining = if roster_move_change {
