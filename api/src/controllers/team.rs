@@ -17,10 +17,6 @@ type PocPlayerCurrentRow = (
     Option<String>,
     Option<String>,
     i64,
-    i64,
-    i64,
-    i64,
-    i64,
 );
 
 #[derive(Deserialize)]
@@ -622,7 +618,7 @@ pub async fn update_poc_player(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let current: Option<PocPlayerCurrentRow> = sqlx::query_as(
-        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, COALESCE(p.is_captain, 0), COALESCE(p.is_spirit_captain, 0), COALESCE(p.is_manager, 0), COALESCE(p.is_coach, 0), t.roster_moves_remaining
+        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, t.roster_moves_remaining
          FROM users p
          INNER JOIN users poc ON poc.team_id = p.team_id
          INNER JOIN teams t ON t.id = p.team_id
@@ -640,10 +636,6 @@ pub async fn update_poc_player(
         current_common_name,
         current_email,
         current_phone,
-        current_captain,
-        current_spirit_captain,
-        current_manager,
-        current_coach,
         remaining_moves,
     ) = current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
@@ -655,11 +647,7 @@ pub async fn update_poc_player(
 
     let roster_move_change = current_name != normalized_name
         || current_email != normalized_email
-        || current_phone != normalized_phone
-        || current_captain != payload.is_captain as i64
-        || current_spirit_captain != payload.is_spirit_captain as i64
-        || current_manager != payload.is_manager as i64
-        || current_coach != payload.is_coach as i64;
+        || current_phone != normalized_phone;
     let common_name_changed = current_common_name != normalized_common_name;
 
     let updated_remaining = if roster_move_change {
