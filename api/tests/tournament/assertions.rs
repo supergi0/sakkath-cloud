@@ -1,8 +1,7 @@
 use super::harness::{Harness, TestResult};
 use super::model::{
-    ExpectedPlayoffMatch, ExpectedSwissRound, MatchState, ScheduleGridCellResponse,
-    ScheduleGridResponse, ScheduleMatchResponse, SpiritScoreRowResponse, StatsResponse,
-    TournamentTracker,
+    MatchState, ScheduleGridCellResponse, ScheduleGridResponse, SpiritScoreRowResponse,
+    StatsResponse, TournamentTracker,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -112,98 +111,72 @@ pub(crate) async fn assert_standings_match_tracker(
     tracker: &TournamentTracker,
     division: i64,
 ) -> TestResult {
+    let actual_order: Vec<i64> = harness
+        .get_standings(division)
+        .await?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_standings_match_tracker_with_order(harness, tracker, division, &actual_order, false)
+        .await
+}
+
+pub(crate) async fn assert_display_standings_and_team_ranks(
+    harness: &Harness,
+    tracker: &TournamentTracker,
+    division: i64,
+    expected_order: &[i64],
+) -> TestResult {
+    assert_standings_match_tracker_with_order(harness, tracker, division, expected_order, true)
+        .await
+}
+
+async fn assert_standings_match_tracker_with_order(
+    harness: &Harness,
+    tracker: &TournamentTracker,
+    division: i64,
+    expected_order: &[i64],
+    assert_team_ranks: bool,
+) -> TestResult {
     let standings = harness.get_standings(division).await?;
-    let expected = tracker.swiss_summary(division);
-
     let actual_ids: Vec<i64> = standings.iter().map(|row| row.id).collect();
-    let expected_ids: Vec<i64> = expected.iter().map(|row| row.team_id).collect();
-    assert_eq!(actual_ids, expected_ids);
+    assert_eq!(actual_ids, expected_order);
 
-    for (row, expected_row) in standings.iter().zip(expected.iter()) {
+    let expected_by_id: HashMap<i64, _> = tracker
+        .display_summary_for_order(division, expected_order)
+        .into_iter()
+        .map(|row| (row.team_id, row))
+        .collect();
+
+    for row in &standings {
+        let expected_row = expected_by_id
+            .get(&row.id)
+            .unwrap_or_else(|| panic!("missing expected standings row for team {}", row.id));
         assert_eq!(row.wins, expected_row.wins);
         assert_eq!(row.losses, expected_row.losses);
+        assert_eq!(row.draws, expected_row.draws);
         assert_eq!(row.points_for, expected_row.points_for);
         assert_eq!(row.points_against, expected_row.points_against);
         assert!((row.spirit_avg - expected_row.spirit_avg).abs() < 1e-9);
     }
 
-    Ok(())
-}
-
-pub(crate) fn assert_swiss_round_pairings(
-    round_matches: &[ScheduleMatchResponse],
-    expected: &ExpectedSwissRound,
-) {
-    let actual: HashSet<(i64, i64)> = round_matches
-        .iter()
-        .map(|row| (row.t1_id, row.t2_id))
-        .collect();
-    let expected_pairs: HashSet<(i64, i64)> = expected.pairings.iter().copied().collect();
-    assert_eq!(actual, expected_pairs);
-}
-
-pub(crate) async fn assert_swiss_grid_seed_labels(
-    harness: &Harness,
-    tracker: &TournamentTracker,
-    round_matches: &[ScheduleMatchResponse],
-    division: i64,
-) -> TestResult {
-    let rank_map = tracker.standings_rank_map(division);
-    let grid = harness.get_schedule_grid().await?;
-
-    for schedule_match in round_matches {
-        let cell = find_grid_cell(&grid, schedule_match.id)
-            .expect("swiss match should appear in the schedule grid");
-        assert_eq!(
-            cell.t1_seed_rank,
-            rank_map.get(&schedule_match.t1_id).copied()
-        );
-        assert_eq!(
-            cell.t2_seed_rank,
-            rank_map.get(&schedule_match.t2_id).copied()
-        );
-    }
-
-    Ok(())
-}
-
-pub(crate) fn assert_playoff_pairings(
-    actual: &[ScheduleMatchResponse],
-    expected: &[ExpectedPlayoffMatch],
-) {
-    let actual_pairs: HashSet<(i64, i64)> =
-        actual.iter().map(|row| (row.t1_id, row.t2_id)).collect();
-    let expected_pairs: HashSet<(i64, i64)> = expected
-        .iter()
-        .map(|row| (row.team_a, row.team_b))
-        .collect();
-    assert_eq!(actual_pairs, expected_pairs);
-}
-
-pub(crate) async fn assert_playoff_grid_seed_labels(
-    harness: &Harness,
-    round_matches: &[ScheduleMatchResponse],
-    expected: &[ExpectedPlayoffMatch],
-) -> TestResult {
-    let grid = harness.get_schedule_grid().await?;
-    let expected_by_pair: HashMap<(i64, i64), (i64, i64)> = expected
-        .iter()
-        .map(|row| ((row.team_a, row.team_b), (row.seed_a, row.seed_b)))
-        .collect();
-
-    for schedule_match in round_matches {
-        let expected_seeds = expected_by_pair
-            .get(&(schedule_match.t1_id, schedule_match.t2_id))
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing expected playoff seeds for match {}",
-                    schedule_match.id
-                )
-            });
-        let cell = find_grid_cell(&grid, schedule_match.id)
-            .expect("playoff match should appear in the public grid");
-        assert_eq!(cell.t1_seed_rank, Some(expected_seeds.0));
-        assert_eq!(cell.t2_seed_rank, Some(expected_seeds.1));
+    if assert_team_ranks {
+        for (index, team_id) in expected_order.iter().enumerate() {
+            let detail = harness.get_team_detail(*team_id).await?;
+            let expected_row = expected_by_id
+                .get(team_id)
+                .unwrap_or_else(|| panic!("missing expected standings row for team {}", team_id));
+            assert_eq!(detail.id, *team_id);
+            assert_eq!(
+                detail.games_played,
+                expected_row.wins + expected_row.losses + expected_row.draws
+            );
+            assert_eq!(detail.wins, expected_row.wins);
+            assert_eq!(detail.losses, expected_row.losses);
+            assert_eq!(detail.draws, expected_row.draws);
+            assert!((detail.spirit_avg - expected_row.spirit_avg).abs() < 1e-9);
+            assert_eq!(detail.current_rank, index as i64 + 1);
+        }
     }
 
     Ok(())
@@ -246,7 +219,9 @@ pub(crate) async fn assert_final_public_state(
     }
 
     for division in [0, 1] {
-        assert_standings_match_tracker(harness, tracker, division).await?;
+        let expected_order = tracker.expected_display_order_after_elimination(division);
+        assert_display_standings_and_team_ranks(harness, tracker, division, &expected_order)
+            .await?;
     }
 
     Ok(())

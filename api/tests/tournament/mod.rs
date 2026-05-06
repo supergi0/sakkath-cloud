@@ -1,6 +1,7 @@
 mod assertions;
 mod config;
 mod harness;
+mod iterations_runner;
 mod model;
 mod reporting;
 mod scenarios;
@@ -46,6 +47,10 @@ pub fn cli_main() -> TestResult {
         )
         .into()),
     }
+}
+
+pub fn iterations_main() -> TestResult {
+    iterations_runner::cli_main()
 }
 
 fn install_panic_hook(config: &RunConfig) {

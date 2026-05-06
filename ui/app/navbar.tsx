@@ -15,7 +15,7 @@ const navItems = [
   { name: 'PLAYER STATS', href: '/stats', clickable: true },
   { name: 'FIELDS', href: '/fields', clickable: true },
   { name: 'ANNOUNCEMENTS', href: '/announcements', clickable: true },
-  { name: 'RULES', href: '/rules', clickable: true },
+  { name: 'HANDBOOK', href: '/rules', clickable: true },
   { name: 'PHOTOS', href: '#', clickable: false },
 ];
 

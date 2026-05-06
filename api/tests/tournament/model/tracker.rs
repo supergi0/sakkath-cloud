@@ -2,10 +2,19 @@ use super::api_types::{
     MatchDetailResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse,
     TeamResponse,
 };
+use crate::tournament::config::deterministic_stage_coin_toss_seed;
+use api::helpers::{
+    rounds::{
+        PlayedMatchResult as LivePlayedMatchResult,
+        build_seed_order_after_elimination_results as live_build_seed_order_after_elimination_results,
+        generate_round_pairings_with_diagnostics as live_generate_round_pairings_with_diagnostics,
+    },
+    sorting::TeamSortData,
+};
+use chrono::{Duration, NaiveDateTime};
 use super::pairings::{
-    ExpectedPlayoffMatch, ExpectedSwissRound, SortMetrics, build_playoff_round_one,
-    build_playoff_round_two, build_scoring_groups, generate_round_pairings, naive_pairings,
-    sort_metrics,
+    ExpectedSwissRound, SortMetrics, build_scoring_groups, naive_pairings,
+    sort_metrics_with_seed,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -38,6 +47,8 @@ pub(crate) struct MatchState {
     pub(crate) id: i64,
     pub(crate) division: i64,
     pub(crate) match_type: i64,
+    pub(crate) field_name: String,
+    pub(crate) time: String,
     pub(crate) t1_id: i64,
     pub(crate) t2_id: i64,
     pub(crate) t1_score: i64,
@@ -53,10 +64,11 @@ pub(crate) struct TournamentTracker {
     pub(crate) teams: HashMap<i64, TeamInfo>,
     pub(crate) players: HashMap<i64, PlayerTotals>,
     pub(crate) matches: HashMap<i64, MatchState>,
+    stage_seed_base: u64,
 }
 
 impl TournamentTracker {
-    pub(crate) fn new(teams: &[TeamResponse]) -> Self {
+    pub(crate) fn new(teams: &[TeamResponse], stage_seed_base: u64) -> Self {
         let teams = teams
             .iter()
             .map(|team| {
@@ -76,6 +88,7 @@ impl TournamentTracker {
             teams,
             players: HashMap::new(),
             matches: HashMap::new(),
+            stage_seed_base,
         }
     }
 
@@ -91,6 +104,8 @@ impl TournamentTracker {
                 id: schedule_match.id,
                 division,
                 match_type: schedule_match.match_type,
+                field_name: schedule_match.field_name.clone(),
+                time: schedule_match.time.clone(),
                 t1_id: schedule_match.t1_id,
                 t2_id: schedule_match.t2_id,
                 t1_score: schedule_match.t1_score,
@@ -102,6 +117,8 @@ impl TournamentTracker {
             });
 
         state.match_type = schedule_match.match_type;
+        state.field_name = schedule_match.field_name.clone();
+        state.time = schedule_match.time.clone();
         state.t1_score = schedule_match.t1_score;
         state.t2_score = schedule_match.t2_score;
         state.possession = schedule_match.possession;
@@ -121,6 +138,8 @@ impl TournamentTracker {
                 id: detail.id,
                 division,
                 match_type,
+                field_name: String::new(),
+                time: String::new(),
                 t1_id: detail.t1_id,
                 t2_id: detail.t2_id,
                 t1_score: detail.t1_score,
@@ -284,7 +303,114 @@ impl TournamentTracker {
             .collect()
     }
 
+    pub(crate) fn game_gap_minutes(&self, division: i64) -> Vec<i64> {
+        let mut gaps = Vec::new();
+        let canonical_starts = self.canonical_gap_start_times(division);
+
+        for team_id in self
+            .teams
+            .values()
+            .filter(|team| team.division == division)
+            .map(|team| team.id)
+        {
+            let mut matches: Vec<_> = self
+                .matches
+                .values()
+                .filter(|state| {
+                    state.division == division
+                        && state.possession.unwrap_or(0) >= 3
+                        && (state.t1_id == team_id || state.t2_id == team_id)
+                })
+                .filter_map(|state| {
+                    canonical_starts
+                        .get(&state.id)
+                        .copied()
+                        .or_else(|| parse_match_time(&state.time))
+                        .map(|start_time| (state, start_time))
+                })
+                .collect();
+            matches.sort_by_key(|(_, start_time)| *start_time);
+
+            for window in matches.windows(2) {
+                let (current_match, current_start) = window[0];
+                let (_, next_start) = window[1];
+                if current_start.date() != next_start.date() {
+                    continue;
+                }
+                let current_end = current_start
+                    + Duration::minutes(match_duration_minutes(current_match.division, current_match.match_type));
+                gaps.push(next_start.signed_duration_since(current_end).num_minutes());
+            }
+        }
+
+        gaps
+    }
+
+    pub(crate) fn ground_distribution_score(&self, division: Option<i64>) -> f64 {
+        let team_scores: Vec<f64> = self
+            .teams
+            .values()
+            .filter(|team| division.is_none_or(|value| team.division == value))
+            .filter_map(|team| self.team_ground_distribution_msd(team.id))
+            .collect();
+
+        if team_scores.is_empty() {
+            0.0
+        } else {
+            team_scores.iter().sum::<f64>() / team_scores.len() as f64
+        }
+    }
+
+    fn canonical_gap_start_times(&self, division: i64) -> HashMap<i64, NaiveDateTime> {
+        let mut grouped: BTreeMap<i64, Vec<&MatchState>> = BTreeMap::new();
+
+        for state in self
+            .matches
+            .values()
+            .filter(|state| state.division == division && state.possession.unwrap_or(0) >= 3)
+        {
+            grouped.entry(state.match_type).or_default().push(state);
+        }
+
+        let mut starts = HashMap::new();
+
+        for (match_type, mut states) in grouped {
+            states.sort_by_key(|state| (parse_match_time(&state.time), state.id));
+            let canonical_times = canonical_gap_stage_start_times(division, match_type);
+
+            for (index, state) in states.into_iter().enumerate() {
+                let start_time = canonical_times
+                    .as_ref()
+                    .and_then(|times| times.get(index).copied())
+                    .or_else(|| parse_match_time(&state.time));
+
+                if let Some(start_time) = start_time {
+                    starts.insert(state.id, start_time);
+                }
+            }
+        }
+
+        starts
+    }
+
     pub(crate) fn swiss_summary(&self, division: i64) -> Vec<SortMetrics> {
+        self.summary(division, false, None)
+    }
+
+    pub(crate) fn display_summary_for_order(
+        &self,
+        division: i64,
+        order: &[i64],
+    ) -> Vec<SortMetrics> {
+        self.summary(division, true, Some(order))
+    }
+
+    fn summary(
+        &self,
+        division: i64,
+        include_elimination: bool,
+        order: Option<&[i64]>,
+    ) -> Vec<SortMetrics> {
         let team_ids: Vec<i64> = self
             .teams
             .values()
@@ -307,8 +433,8 @@ impl TournamentTracker {
 
             for state in self.matches.values().filter(|state| {
                 state.division == division
-                    && state.match_type < 1000
                     && state.possession.unwrap_or(0) >= 3
+                    && (include_elimination || state.match_type < 1000)
             }) {
                 let (scored, conceded, opponent) = if state.t1_id == team_id {
                     (state.t1_score, state.t2_score, state.t2_id)
@@ -340,7 +466,7 @@ impl TournamentTracker {
             }
 
             let round_results = per_round.into_values().collect();
-            let spirit_avg = self.team_spirit_average(team_id, true);
+            let spirit_avg = self.team_spirit_average(team_id, !include_elimination);
 
             metrics.push(SortMetrics {
                 team_id,
@@ -362,8 +488,85 @@ impl TournamentTracker {
             });
         }
 
-        sort_metrics(&mut metrics);
-        metrics
+        if let Some(order) = order {
+            let mut metrics_by_team: HashMap<i64, SortMetrics> = metrics
+                .into_iter()
+                .map(|metric| (metric.team_id, metric))
+                .collect();
+            let mut ordered = Vec::with_capacity(metrics_by_team.len());
+
+            for team_id in order {
+                if let Some(metric) = metrics_by_team.remove(team_id) {
+                    ordered.push(metric);
+                }
+            }
+
+            let mut remaining: Vec<_> = metrics_by_team.into_values().collect();
+            remaining.sort_by_key(|metric| (metric.init_rank, metric.team_id));
+            ordered.extend(remaining);
+            ordered
+        } else {
+            sort_metrics_with_seed(&mut metrics, self.current_stage_seed(division));
+            metrics
+        }
+    }
+
+    fn current_stage_seed(&self, division: i64) -> u64 {
+        deterministic_stage_coin_toss_seed(
+            self.stage_seed_base,
+            division,
+            self.current_stage_key(division),
+        )
+    }
+
+    fn current_stage_key(&self, division: i64) -> i64 {
+        let total_rounds = if division == 0 {
+            api::OPEN_ROUNDS
+        } else {
+            api::WOMEN_ROUNDS
+        };
+
+        let highest_existing = self
+            .matches
+            .values()
+            .filter(|state| state.division == division)
+            .map(|state| state.match_type)
+            .max()
+            .unwrap_or(1);
+
+        if self.stage_is_complete(division, highest_existing) {
+            if highest_existing < total_rounds {
+                return highest_existing + 1;
+            }
+
+            if highest_existing == total_rounds {
+                return if division == 1 { 1002 } else { 1001 };
+            }
+
+            if highest_existing == 1001 {
+                return 1002;
+            }
+        }
+
+        highest_existing
+    }
+
+    fn stage_is_complete(&self, division: i64, stage_key: i64) -> bool {
+        let mut total = 0usize;
+        let mut completed = 0usize;
+
+        for state in self
+            .matches
+            .values()
+            .filter(|state| state.division == division && state.match_type == stage_key)
+        {
+            total += 1;
+            if state.possession.unwrap_or(0) >= 3 {
+                completed += 1;
+            }
+        }
+
+        total > 0 && total == completed
     }
 
     pub(crate) fn standings_rank_map(&self, division: i64) -> HashMap<i64, i64> {
@@ -386,21 +589,44 @@ impl TournamentTracker {
                 .unwrap_or(false)
         });
 
-        let pairings = generate_round_pairings(&standings, &history);
+        let next_round = standings
+            .first()
+            .map(|metrics| metrics.round_results.len() as i64 + 1)
+            .unwrap_or(1);
+        let live_standings: Vec<TeamSortData> = standings
+            .iter()
+            .map(|metrics| self.as_live_sort_data(metrics))
+            .collect();
+        let pairing_result =
+            live_generate_round_pairings_with_diagnostics(&live_standings, &history, next_round);
+        let pairings = pairing_result
+            .pairings
+            .into_iter()
+            .map(|pairing| (pairing.t1, pairing.t2))
+            .collect();
 
         ExpectedSwissRound {
             pairings,
             naive_had_rematch,
+            diagnostics: pairing_result.diagnostics,
         }
     }
 
-    pub(crate) fn expected_playoff_round_one(&self, division: i64) -> Vec<ExpectedPlayoffMatch> {
-        build_playoff_round_one(&self.swiss_summary(division))
+    pub(crate) fn expected_display_order_after_playoffs(&self, division: i64) -> Vec<i64> {
+        let standings = self.live_swiss_sort_data(division);
+        let playoff_results = self.completed_playoff_results(division, 1001);
+        live_build_seed_order_after_elimination_results(&standings, &playoff_results, &[])
     }
 
-    pub(crate) fn expected_playoff_round_two(&self, division: i64) -> Vec<ExpectedPlayoffMatch> {
-        let round_one = self.expected_playoff_round_one(division);
-        build_playoff_round_two(&round_one, self)
+    pub(crate) fn expected_display_order_after_elimination(&self, division: i64) -> Vec<i64> {
+        let standings = self.live_swiss_sort_data(division);
+        let playoff_results = self.completed_playoff_results(division, 1001);
+        let final_results = self.completed_playoff_results(division, 1002);
+        live_build_seed_order_after_elimination_results(
+            &standings,
+            &playoff_results,
+            &final_results,
+        )
     }
 
     fn team_spirit_average(&self, team_id: i64, swiss_only: bool) -> f64 {
@@ -428,6 +654,63 @@ impl TournamentTracker {
         }
     }
 
+    fn as_live_sort_data(&self, metrics: &SortMetrics) -> TeamSortData {
+        TeamSortData {
+            team_id: metrics.team_id,
+            name: self.team_name(metrics.team_id).to_string(),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: metrics.init_rank,
+            wins: metrics.wins,
+            losses: metrics.losses,
+            draws: metrics.draws,
+            points: metrics.points,
+            points_for: metrics.points_for,
+            points_against: metrics.points_against,
+            spirit_avg: metrics.spirit_avg,
+            round_results: metrics.round_results.clone(),
+            opponents: metrics.opponents.clone(),
+            h2h: metrics.h2h.clone(),
+        }
+    }
+
+    fn live_swiss_sort_data(&self, division: i64) -> Vec<TeamSortData> {
+        self.swiss_summary(division)
+            .iter()
+            .map(|metrics| self.as_live_sort_data(metrics))
+            .collect()
+    }
+
+    fn completed_playoff_results(
+        &self,
+        division: i64,
+        match_type: i64,
+    ) -> Vec<LivePlayedMatchResult> {
+        let mut states: Vec<_> = self
+            .matches
+            .values()
+            .filter(|state| {
+                state.division == division
+                    && state.match_type == match_type
+                    && state.possession.unwrap_or(0) >= 3
+            })
+            .collect();
+        states.sort_by_key(|state| state.id);
+
+        states
+            .into_iter()
+            .map(|state| LivePlayedMatchResult {
+                t1: state.t1_id,
+                t2: state.t2_id,
+                winner: if state.t1_score >= state.t2_score {
+                    state.t1_id
+                } else {
+                    state.t2_id
+                },
+            })
+            .collect()
+    }
+
     fn match_history(&self, division: i64, swiss_only: bool) -> HashMap<i64, HashSet<i64>> {
         let mut history: HashMap<i64, HashSet<i64>> = HashMap::new();
 
@@ -446,6 +729,36 @@ impl TournamentTracker {
         history
     }
 
+    fn team_ground_distribution_msd(&self, team_id: i64) -> Option<f64> {
+        let mut ground_counts = [0_i64; 4];
+
+        for state in self.matches.values().filter(|state| {
+            state.possession.unwrap_or(0) >= 3 && (state.t1_id == team_id || state.t2_id == team_id)
+        }) {
+            let Some(ground_index) = parse_ground_index(&state.field_name) else {
+                continue;
+            };
+            ground_counts[ground_index] += 1;
+        }
+
+        let total_matches: i64 = ground_counts.iter().sum();
+        if total_matches == 0 {
+            return None;
+        }
+
+        let ideal = total_matches as f64 / ground_counts.len() as f64;
+        Some(
+            ground_counts
+                .iter()
+                .map(|count| {
+                    let diff = *count as f64 - ideal;
+                    diff * diff
+                })
+                .sum::<f64>()
+                / ground_counts.len() as f64,
+        )
+    }
+
     fn apply_player_event(&mut self, match_id: i64, player_id: Option<i64>, event_type: i64) {
         let Some(player_id) = player_id else {
             return;
@@ -461,4 +774,60 @@ impl TournamentTracker {
             _ => {}
         }
     }
+}
+
+fn match_duration_minutes(division: i64, match_type: i64) -> i64 {
+    if match_type >= 1000 || division == 1 {
+        75
+    } else {
+        60
+    }
+}
+
+fn parse_match_time(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+fn parse_ground_index(value: &str) -> Option<usize> {
+    match value.chars().filter(|char| char.is_ascii_digit()).collect::<String>().as_str() {
+        "1" => Some(0),
+        "2" => Some(1),
+        "3" => Some(2),
+        "4" => Some(3),
+        _ => None,
+    }
+}
+
+fn canonical_gap_stage_start_times(division: i64, match_type: i64) -> Option<Vec<NaiveDateTime>> {
+    Some(match (division, match_type) {
+        (0, 1) => expand_gap_times("2026-05-22", &[("06:00:00", 4), ("07:15:00", 3), ("10:00:00", 4)]),
+        (0, 2) => expand_gap_times("2026-05-22", &[("12:45:00", 3), ("14:00:00", 4), ("15:15:00", 4)]),
+        (0, 3) => expand_gap_times("2026-05-22", &[("18:00:00", 3), ("19:15:00", 4), ("20:30:00", 4)]),
+        (0, 4) => expand_gap_times("2026-05-23", &[("06:00:00", 4), ("07:15:00", 3), ("10:00:00", 4)]),
+        (0, 5) => expand_gap_times("2026-05-23", &[("12:45:00", 3), ("14:00:00", 4), ("15:15:00", 4)]),
+        (0, 6) => expand_gap_times("2026-05-23", &[("18:00:00", 3), ("19:15:00", 4), ("20:30:00", 4)]),
+        (0, 1001) => expand_gap_times("2026-05-24", &[("06:30:00", 4), ("08:00:00", 4), ("09:30:00", 3)]),
+        (0, 1002) => expand_gap_times("2026-05-24", &[("11:00:00", 3), ("12:30:00", 3), ("14:00:00", 3), ("15:30:00", 1)]),
+        (1, 1) => expand_gap_times("2026-05-22", &[("07:15:00", 1), ("08:30:00", 4)]),
+        (1, 2) => expand_gap_times("2026-05-22", &[("11:15:00", 4), ("12:45:00", 1)]),
+        (1, 3) => expand_gap_times("2026-05-22", &[("16:30:00", 4), ("18:00:00", 1)]),
+        (1, 4) => expand_gap_times("2026-05-23", &[("07:15:00", 1), ("08:30:00", 4)]),
+        (1, 5) => expand_gap_times("2026-05-23", &[("11:15:00", 4), ("12:45:00", 1)]),
+        (1, 6) => expand_gap_times("2026-05-23", &[("16:30:00", 4), ("18:00:00", 1)]),
+        (1, 1002) => expand_gap_times("2026-05-24", &[("09:30:00", 1), ("11:00:00", 1), ("12:30:00", 1), ("14:00:00", 1), ("16:50:00", 1)]),
+        _ => return None,
+    })
+}
+
+fn expand_gap_times(date: &str, times: &[(&str, usize)]) -> Vec<NaiveDateTime> {
+    let mut expanded = Vec::new();
+
+    for (time, repeat_count) in times {
+        let value = parse_match_time(&format!("{date} {time}")).expect("gap time should parse");
+        for _ in 0..*repeat_count {
+            expanded.push(value);
+        }
+    }
+
+    expanded
 }

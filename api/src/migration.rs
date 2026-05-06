@@ -4,7 +4,10 @@ use std::time::Duration;
 
 pub enum SeedSource {
     MockData,
-    TeamsCsv { path: Option<String> },
+    TeamsCsv {
+        path: Option<String>,
+        replace_password: bool,
+    },
 }
 
 pub fn default_database_path() -> Result<PathBuf, sqlx::Error> {
@@ -314,6 +317,7 @@ async fn rebuild_spirit_scores_with_current_foreign_keys(
             total INTEGER NOT NULL DEFAULT 10,
             mvp_player_id INTEGER,
             msp_player_id INTEGER,
+            notes TEXT,
             submitted_by_team_id INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches(id),
@@ -332,12 +336,12 @@ async fn rebuild_spirit_scores_with_current_foreign_keys(
         r#"
         INSERT INTO spirit_scores (
             id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
-            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id, notes,
             submitted_by_team_id, created_at
         )
         SELECT
             id, match_id, team_id, rules_knowledge, fouls_contact, fair_mindedness,
-            positive_attitude, communication, total, mvp_player_id, msp_player_id,
+            positive_attitude, communication, total, mvp_player_id, msp_player_id, notes,
             submitted_by_team_id, created_at
         FROM spirit_scores_old
         "#,
@@ -452,6 +456,17 @@ fn reporting_round_defaults() -> [(i64, &'static str, bool); 9] {
     ]
 }
 
+async fn seed_persistent_random_state(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO persistent_random_state (name, seed)
+           VALUES ('standings_c7_coin_toss', ABS(RANDOM()))"#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 async fn seed_reporting_round_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     for (round_key, label, is_enabled) in reporting_round_defaults() {
         sqlx::query(
@@ -535,6 +550,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             password_hash VARCHAR(255),
             is_captain INTEGER DEFAULT 0,
             is_spirit_captain INTEGER DEFAULT 0,
+            is_manager INTEGER DEFAULT 0,
+            is_coach INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             deleted_at TIMESTAMP,
@@ -663,7 +680,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS persistent_random_state (
+            name VARCHAR(64) PRIMARY KEY,
+            seed INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     seed_reporting_round_settings(pool).await?;
+    seed_persistent_random_state(pool).await?;
     normalize_field_names(pool).await?;
 
     sqlx::query(
@@ -676,6 +707,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             memory_percent REAL,
             method VARCHAR(16),
             path TEXT,
+            details TEXT,
             ip_address VARCHAR(64),
             status_code INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -710,6 +742,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
 
+    if !table_has_column(pool, "telemetry_logs", "details").await? {
+        sqlx::query("ALTER TABLE telemetry_logs ADD COLUMN details TEXT")
+            .execute(pool)
+            .await?;
+    }
+
     if !table_has_column(pool, "teams", "abbreviation").await? {
         sqlx::query("ALTER TABLE teams ADD COLUMN abbreviation VARCHAR(5)")
             .execute(pool)
@@ -730,8 +768,26 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .await?;
     }
 
+    if !table_has_column(pool, "users", "is_manager").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN is_manager INTEGER DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
+    if !table_has_column(pool, "users", "is_coach").await? {
+        sqlx::query("ALTER TABLE users ADD COLUMN is_coach INTEGER DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
     sqlx::query(
         "UPDATE users SET common_name = name WHERE common_name IS NULL OR TRIM(common_name) = ''",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE users SET is_manager = COALESCE(is_manager, 0), is_coach = COALESCE(is_coach, 0)",
     )
     .execute(pool)
     .await?;
@@ -755,6 +811,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 password_hash VARCHAR(255),
                 is_captain INTEGER DEFAULT 0,
                 is_spirit_captain INTEGER DEFAULT 0,
+                is_manager INTEGER DEFAULT 0,
+                is_coach INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 deleted_at TIMESTAMP,
@@ -766,8 +824,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
         sqlx::query(
-            r#"INSERT INTO users_new (id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at)
-                SELECT id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, created_at, updated_at, deleted_at FROM users"#
+            r#"INSERT INTO users_new (id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, is_manager, is_coach, created_at, updated_at, deleted_at)
+                SELECT id, name, common_name, email, phone, dob, team_id, role, password_hash, is_captain, is_spirit_captain, is_manager, is_coach, created_at, updated_at, deleted_at FROM users"#
         ).execute(&mut *conn).await?;
 
         sqlx::query("DROP TABLE users").execute(&mut *conn).await?;
@@ -826,6 +884,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         rebuild_matches_without_volunteer_id(pool).await?;
     }
 
+    if !table_has_column(pool, "matches", "started_at").await? {
+        sqlx::query("ALTER TABLE matches ADD COLUMN started_at TIMESTAMP")
+            .execute(pool)
+            .await?;
+    }
+
     create_match_event_indexes(pool).await?;
     create_match_indexes(pool).await?;
 
@@ -844,6 +908,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             total INTEGER NOT NULL DEFAULT 10,
             mvp_player_id INTEGER,
             msp_player_id INTEGER,
+            notes TEXT,
             submitted_by_team_id INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches(id),
@@ -864,6 +929,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spirit_scores_team_id ON spirit_scores(team_id)")
         .execute(pool)
         .await?;
+
+    if !table_has_column(pool, "spirit_scores", "notes").await? {
+        sqlx::query("ALTER TABLE spirit_scores ADD COLUMN notes TEXT")
+            .execute(pool)
+            .await?;
+    }
 
     if !table_has_foreign_key_target(pool, "spirit_scores", "match_id", "matches").await? {
         rebuild_spirit_scores_with_current_foreign_keys(pool).await?;
@@ -895,6 +966,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     seed_reporting_round_settings(pool).await?;
+    seed_persistent_random_state(pool).await?;
     normalize_field_names(pool).await?;
 
     Ok(())
@@ -930,8 +1002,16 @@ pub async fn seed_database(pool: &SqlitePool, source: SeedSource) -> Result<(), 
 
     match source {
         SeedSource::MockData => crate::seeder::populate_mock_data(pool).await,
-        SeedSource::TeamsCsv { path } => {
-            crate::helpers::csv_seed::populate_from_teams_csv(pool, path.as_deref()).await
+        SeedSource::TeamsCsv {
+            path,
+            replace_password,
+        } => {
+            crate::helpers::csv_seed::populate_from_teams_csv(
+                pool,
+                path.as_deref(),
+                replace_password,
+            )
+            .await
         }
     }
 }

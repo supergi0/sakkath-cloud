@@ -69,6 +69,11 @@ const DAY_LABELS: Record<(typeof DAY_ORDER)[number], string> = {
   sat: 'Saturday',
   sun: 'Sunday',
 };
+const SCHEDULE_DAY_STORAGE_KEY = 'schedule:selected-day';
+
+function isScheduleDay(value: string): value is (typeof DAY_ORDER)[number] {
+  return DAY_ORDER.includes(value as (typeof DAY_ORDER)[number]);
+}
 
 const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
   'O P1-01': '1 v 4',
@@ -101,7 +106,11 @@ const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
   'W P2-02': '3 v 4',
   'W P2-03': '5 v 6',
   'W P2-04': '7 v 8',
+  'W P2-05': '9 v 10',
 };
+
+const WOMEN_SWISS_OVERFLOW_NOTE =
+  '* Game will start as soon as field is available and can extend into the next 15 mins, for a total of 75 mins. There is a hardstop when the next game is about to start.';
 
 function formatCompactTime(value: string) {
   return value.replace(/^0/, '').replace(':', '.');
@@ -152,7 +161,18 @@ function getSeedLabel(cell: ScheduleGridCell) {
   if (!cell.seed_ranks) {
     return cell.slot_code ? PLAYOFF_PLACEHOLDER_SEEDS[cell.slot_code] ?? null : null;
   }
-  return `${cell.seed_ranks[0]} v ${cell.seed_ranks[1]}`;
+  const [seedA, seedB] = [...cell.seed_ranks].sort((left, right) => left - right);
+  return `${seedA} v ${seedB}`;
+}
+
+function getRowDurationMinutes(row: ScheduleGridRow) {
+  const [startHour, startMinute] = row.start_time.split(':').map(Number);
+  const [endHour, endMinute] = row.end_time.split(':').map(Number);
+  return endHour * 60 + endMinute - (startHour * 60 + startMinute);
+}
+
+function showsWomenSwissOverflowNote(row: ScheduleGridRow, cell: ScheduleGridCell) {
+  return cell.division === 1 && (cell.match_type ?? 1000) < 1000 && getRowDurationMinutes(row) === 60;
 }
 
 function isStageBreak(previousRow: ScheduleGridRow | undefined, currentRow: ScheduleGridRow) {
@@ -194,6 +214,7 @@ function ScheduleDetailModal({
   onClose: () => void;
 }) {
   const stageLabel = getStageLabel(cell);
+  const showWomenSwissOverflowNote = showsWomenSwissOverflowNote(row, cell);
   const hasMatch = cell.match_id !== null;
   const t1Id = cell.data?.[0] ?? null;
   const t2Id = cell.data?.[1] ?? null;
@@ -211,7 +232,7 @@ function ScheduleDetailModal({
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-500 dark:text-slate-400">
-              {stageLabel}
+              {showWomenSwissOverflowNote ? `${stageLabel}*` : stageLabel}
             </p>
             <Text as="h2" variant="primary" className="mt-2 text-lg font-semibold">
               {getRowTitle(row.label)}
@@ -223,6 +244,12 @@ function ScheduleDetailModal({
               <span className="rounded-full bg-gray-100 px-3 py-1 dark:bg-slate-800">{cell.field_name}</span>
               <span className="rounded-full bg-gray-100 px-3 py-1 dark:bg-slate-800">{getStatusLabel(cell.status)}</span>
             </div>
+
+            {showWomenSwissOverflowNote ? (
+              <Text variant="secondary" className="mt-3 text-xs leading-5">
+                {WOMEN_SWISS_OVERFLOW_NOTE}
+              </Text>
+            ) : null}
           </div>
           <button
             type="button"
@@ -312,7 +339,14 @@ export default function SchedulePage() {
   const [draggedMatch, setDraggedMatch] = useState<DragMatch | null>(null);
   const [toastMessage, setToastMessage] = useState('');
   const [toastOpen, setToastOpen] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<(typeof DAY_ORDER)[number]>('fri');
+  const [selectedDay, setSelectedDay] = useState<(typeof DAY_ORDER)[number]>(() => {
+    if (typeof window === 'undefined') {
+      return 'fri';
+    }
+
+    const savedDay = window.localStorage.getItem(SCHEDULE_DAY_STORAGE_KEY);
+    return savedDay && isScheduleDay(savedDay) ? savedDay : 'fri';
+  });
   const [selectedCell, setSelectedCell] = useState<{ row: ScheduleGridRow; cell: ScheduleGridCell } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [statusLabelCellKey, setStatusLabelCellKey] = useState<string | null>(null);
@@ -374,7 +408,6 @@ export default function SchedulePage() {
     }
 
   }, [showToast]);
-
   useEffect(() => {
     let active = true;
 
@@ -399,6 +432,10 @@ export default function SchedulePage() {
       clearInterval(interval);
     };
   }, [fetchGrid, fetchTeams]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SCHEDULE_DAY_STORAGE_KEY, selectedDay);
+  }, [selectedDay]);
 
   const rowsByDay = useMemo(() => {
     const grouped: Record<string, ScheduleGridRow[]> = { fri: [], sat: [], sun: [] };
@@ -504,6 +541,7 @@ export default function SchedulePage() {
     );
     const droppable = isSuperAdmin && isEditMode && canDropIntoCell(cell);
     const stageLabel = getStageLabel(cell);
+    const showWomenSwissOverflow = showsWomenSwissOverflowNote(row, cell);
     const seedLabel = getSeedLabel(cell);
     const cellKey = `${row.key}-${cell.field_index}`;
     const t1Id = cell.data?.[0] ?? null;
@@ -575,7 +613,9 @@ export default function SchedulePage() {
           {cell.slot_code ? (
             <div className="flex items-start justify-between gap-1 overflow-hidden">
               <div className="min-w-0">
-                <p className="truncate text-[9px] font-bold uppercase tracking-wider sm:text-[10px]">{stageLabel}</p>
+                <p className="truncate text-[9px] font-bold uppercase tracking-wider sm:text-[10px]">
+                  {showWomenSwissOverflow ? `${stageLabel}*` : stageLabel}
+                </p>
               </div>
               <div className="relative flex shrink-0 items-center justify-end">
                 {draggable ? <GripVertical className="h-4 w-4 shrink-0 text-gray-400 dark:text-slate-500" /> : null}

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
 import { apiUrl } from "../lib/api";
+import { abbreviatePlayerName } from "../lib/player-name";
 
 interface PlayerStat {
   id: number;
@@ -25,7 +26,7 @@ interface Team {
   division: number;
 }
 
-type SortField = 'name' | 'team' | 'goals' | 'assists' | 'blocks' | 'turnovers' | 'matches' | 'gpm' | 'apm' | 'bpm' | 'tpm';
+type SortField = 'name' | 'team' | 'total' | 'goals' | 'assists' | 'blocks' | 'turnovers' | 'matches' | 'gpm' | 'apm' | 'bpm' | 'tpm';
 type SortDir = 'asc' | 'desc';
 interface StatsPreferences {
   division: 'all' | 'open' | 'women';
@@ -36,13 +37,17 @@ const STATS_PREFS_KEY = 'sakkath:stats:preferences';
 
 const PAGE_SIZE = 32;
 
+function getTotalStat(player: Pick<PlayerStat, 'goals' | 'assists' | 'blocks' | 'turnovers'>) {
+  return player.goals + player.assists + player.blocks - player.turnovers;
+}
+
 export default function Stats() {
   const [players, setPlayers] = useState<PlayerStat[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [division, setDivision] = useState<'all' | 'open' | 'women'>('all');
   const [teamFilter, setTeamFilter] = useState<number | null>(null);
-  const [sortField, setSortField] = useState<SortField>('goals');
+  const [sortField, setSortField] = useState<SortField>('total');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [page, setPage] = useState(1);
   const [tableStickyTop, setTableStickyTop] = useState(112);
@@ -56,25 +61,7 @@ export default function Stats() {
     }));
   };
 
-  const truncateName = (name: string, maxLen: number = 18) => {
-    if (!name) return '';
-    if (name.length <= maxLen) return name;
-    const parts = name.trim().split(/\s+/);
-    if (parts.length <= 1) return name.substring(0, maxLen - 3) + '...';
-    
-    let current = [...parts];
-    for (let i = current.length - 1; i > 0; i--) {
-      current[i] = current[i][0] + '.';
-      const joined = current.join(' ');
-      if (joined.length <= maxLen) return joined;
-    }
-    
-    const joined = current.join(' ');
-    if (joined.length > maxLen) {
-      return joined.substring(0, maxLen - 3) + '...';
-    }
-    return joined;
-  };
+  const truncateName = (name: string, maxLen: number = 18) => abbreviatePlayerName(name, maxLen);
 
   const renderPlayerName = (player: PlayerStat) => {
     const commonName = player.common_name?.trim();
@@ -178,6 +165,7 @@ export default function Stats() {
     switch (sortField) {
       case 'name': aVal = a.name; bVal = b.name; break;
       case 'team': aVal = a.team_name; bVal = b.team_name; break;
+      case 'total': aVal = getTotalStat(a); bVal = getTotalStat(b); break;
       case 'goals': aVal = a.goals; bVal = b.goals; break;
       case 'assists': aVal = a.assists; bVal = b.assists; break;
       case 'blocks': aVal = a.blocks; bVal = b.blocks; break;
@@ -275,10 +263,11 @@ export default function Stats() {
 
       <div className="pb-2 sm:mx-auto sm:max-w-7xl sm:px-4">
         <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-140px)] border-y border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900 sm:rounded-sm sm:border">
-          <table className="w-full min-w-[720px] text-xs sm:min-w-[800px] sm:text-sm">
+          <table className="w-full min-w-[780px] text-xs sm:min-w-[860px] sm:text-sm">
             <thead className="sticky top-0 z-20 bg-white dark:bg-slate-900 shadow-[0_2px_4px_rgba(0,0,0,0.05)] dark:shadow-[0_2px_4px_rgba(0,0,0,0.2)]">
               <tr className="border-b border-gray-200 dark:border-slate-700">
                   <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30 w-[140px] max-w-[140px]" />
+                  <SortHeader field="total" label="Tot" />
                   <SortHeader field="goals" label="Gls" />
                   <SortHeader field="assists" label="Ast" />
                   <SortHeader field="blocks" label="Blk" />
@@ -293,6 +282,7 @@ export default function Stats() {
               <tbody>
                 {paginatedPlayers.map((player) => {
                   const m = player.matches || 1;
+                  const total = getTotalStat(player);
                   return (
                     <tr 
                       key={player.id} 
@@ -304,6 +294,9 @@ export default function Stats() {
                           {renderPlayerName(player)}
                           <Text variant="secondary" className="text-[10px] leading-tight truncate">{truncateName(player.team_name, 20)}</Text>
                         </div>
+                      </td>
+                      <td className="px-2 py-2.5 text-center">
+                        <Text variant="primary">{total}</Text>
                       </td>
                       <td className="px-2 py-2.5 text-center">
                         <Text variant="primary">{player.goals}</Text>

@@ -3,19 +3,52 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::helpers::{cache, rounds, sorting};
 
 const FIELD_COUNT: usize = 4;
-const SWISS_MATCH_MINUTES: i64 = 60;
-const SWISS_BREAK_MINUTES: i64 = 15;
-const PLAYOFF_MATCH_MINUTES: i64 = 75;
-const PLAYOFF_BREAK_MINUTES: i64 = 15;
 const ROW_OVERRIDE_CACHE_KEY: &str = "schedule:row_overrides";
 const ROW_OVERRIDE_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
+
+fn record_schedule_info(key: &'static str, details: serde_json::Value) {
+    crate::telemetry::record_info(key, details.to_string());
+}
+
+fn record_schedule_error(details: serde_json::Value) {
+    crate::telemetry::record_error("schedule.error", details.to_string());
+}
+
+async fn stage_progress(db: &sqlx::SqlitePool, division: i64, match_type: i64) -> (i64, i64) {
+    let total: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
+    )
+    .bind(match_type)
+    .bind(division)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0,));
+
+    let completed: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL AND m.possession >= 3"#,
+    )
+    .bind(match_type)
+    .bind(division)
+    .fetch_one(db)
+    .await
+    .unwrap_or((0,));
+
+    (total.0, completed.0)
+}
 
 #[derive(Serialize)]
 pub struct TournamentState {
@@ -42,6 +75,7 @@ pub struct TeamStanding {
     pub name: String,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub points_for: i64,
     pub points_against: i64,
     pub h2h_diff: i64,
@@ -69,17 +103,17 @@ pub struct ScheduleMatch {
     pub match_type: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridResponse {
     pub rows: Vec<ScheduleGridRow>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleTeamsResponse {
     pub teams: Vec<ScheduleGridTeam>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct ScheduleGridTeam {
     pub id: i64,
     pub name: String,
@@ -88,7 +122,7 @@ pub struct ScheduleGridTeam {
     pub small_logo: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridRow {
     pub key: String,
     pub day_key: String,
@@ -99,7 +133,7 @@ pub struct ScheduleGridRow {
     pub cells: Vec<ScheduleGridCell>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ScheduleGridCell {
     pub field_index: i64,
     pub field_label: String,
@@ -151,6 +185,7 @@ struct RowTimeOverride {
 struct SlotTemplate {
     field_index: usize,
     division: i64,
+    match_type: i64,
     slot_code: String,
 }
 
@@ -160,7 +195,6 @@ struct RowTemplate {
     day_key: &'static str,
     day_label: &'static str,
     label: String,
-    match_type: i64,
     date: NaiveDate,
     day_start: NaiveTime,
     day_end: NaiveTime,
@@ -205,42 +239,45 @@ pub async fn auto_advance_division_if_ready(
     };
 
     for round in 1..=total_rounds {
-        let stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-               FROM matches m JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-        )
-        .bind(round)
-        .bind(division)
-        .fetch_one(db)
-        .await
-        .unwrap_or((0, 0));
-
-        let (total, completed) = stats;
+        let (total, completed) = stage_progress(db, division, round).await;
 
         if total == 0
             && (round == 1
                 || {
-                    let prev: (i64, i64) = sqlx::query_as(
-                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-                       FROM matches m JOIN teams t ON m.t1_id = t.id
-                       WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-                )
-                .bind(round - 1)
-                .bind(division)
-                .fetch_one(db)
-                .await
-                .unwrap_or((0, 0));
+                    let prev = stage_progress(db, division, round - 1).await;
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
-            if generate_next_round_internal(db, division, round)
-                .await
-                .is_ok()
-            {
-                return Some(format!("generated_round_{round}"));
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss"
+                }),
+            );
+            if let Err(error) = generate_next_round_internal(db, division, round).await {
+                record_schedule_error(serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "message": error.to_string()
+                }));
+                return None;
             }
-            return None;
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "action": format!("generated_round_{round}")
+                }),
+            );
+            return Some(format!("generated_round_{round}"));
         }
 
         if total == 0 {
@@ -252,15 +289,70 @@ pub async fn auto_advance_division_if_ready(
         }
     }
 
-    if create_playoffs_if_needed(db, division)
-        .await
-        .unwrap_or(false)
-    {
-        return Some("generated_playoff_1".to_string());
+    match create_playoffs_if_needed(db, division).await {
+        Ok(true) => {
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_1"
+                }),
+            );
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_1",
+                    "action": "generated_playoff_1"
+                }),
+            );
+            return Some("generated_playoff_1".to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "auto_advance",
+                "division": division,
+                "stage": "playoff_1",
+                "message": error.to_string()
+            }));
+            return None;
+        }
     }
 
-    if create_finals_if_needed(db, division).await.unwrap_or(false) {
-        return Some("generated_playoff_2".to_string());
+    match create_finals_if_needed(db, division).await {
+        Ok(true) => {
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_2"
+                }),
+            );
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "auto_advance",
+                    "division": division,
+                    "stage": "playoff_2",
+                    "action": "generated_playoff_2"
+                }),
+            );
+            return Some("generated_playoff_2".to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "auto_advance",
+                "division": division,
+                "stage": "playoff_2",
+                "message": error.to_string()
+            }));
+            return None;
+        }
     }
 
     None
@@ -287,27 +379,84 @@ pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
 }
 
 async fn generate_r1_from_seeding(db: &sqlx::SqlitePool, division: i64) -> Result<(), sqlx::Error> {
-    let teams: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT id, init_rank FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC",
+    let pairings = build_seeded_round_one_pairings(db, division).await?;
+    if pairings.is_empty() {
+        return Ok(());
+    }
+
+    record_schedule_info(
+        "schedule.start",
+        serde_json::json!({
+            "source": "startup",
+            "division": division,
+            "round": 1,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
+    let result = insert_pairings_into_slots(db, division, 1, &pairings).await;
+    match &result {
+        Ok(()) => record_schedule_info(
+            "schedule.end",
+            serde_json::json!({
+                "source": "startup",
+                "division": division,
+                "round": 1,
+                "stage": "swiss",
+                "matches_created": pairings.len()
+            }),
+        ),
+        Err(error) => record_schedule_error(serde_json::json!({
+            "source": "startup",
+            "division": division,
+            "round": 1,
+            "stage": "swiss",
+            "message": error.to_string()
+        })),
+    }
+    result
+}
+
+async fn load_seeded_round_one_team_ids(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let teams: Vec<(i64,)> = sqlx::query_as(
+        "SELECT id FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC, id ASC",
     )
     .bind(division)
     .fetch_all(db)
     .await?;
 
-    if teams.is_empty() {
-        return Ok(());
+    Ok(teams.into_iter().map(|team| team.0).collect())
+}
+
+fn seeded_round_one_pairings_from_team_ids(
+    team_ids: &[i64],
+) -> Result<Vec<rounds::Pairing>, &'static str> {
+    if team_ids.len() % 2 != 0 {
+        return Err("odd number of teams; cannot generate pairings");
     }
 
-    let half = teams.len() / 2;
+    let half = team_ids.len() / 2;
     let mut pairings = Vec::with_capacity(half);
     for index in 0..half {
         pairings.push(rounds::Pairing {
-            t1: teams[index].0,
-            t2: teams[index + half].0,
+            t1: team_ids[index],
+            t2: team_ids[index + half],
         });
     }
 
-    insert_pairings_into_slots(db, division, 1, &pairings).await
+    Ok(pairings)
+}
+
+async fn build_seeded_round_one_pairings(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<Vec<rounds::Pairing>, sqlx::Error> {
+    let team_ids = load_seeded_round_one_team_ids(db, division).await?;
+    seeded_round_one_pairings_from_team_ids(&team_ids)
+        .map_err(|message| sqlx::Error::Protocol(message.into()))
 }
 
 pub async fn read_tournament_state(
@@ -323,28 +472,26 @@ pub async fn read_tournament_state(
 
     let mut round_status = Vec::new();
     for round in 1..=total_rounds {
-        let stats: (i64, i64, i64, i64) = sqlx::query_as(
-            r#"SELECT
-                COUNT(*) as total,
-                COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0) as completed,
-                COALESCE(SUM(CASE WHEN possession IS NOT NULL AND possession < 3 THEN 1 ELSE 0 END), 0) as in_progress,
-                COALESCE(SUM(CASE WHEN possession IS NULL THEN 1 ELSE 0 END), 0) as scheduled
-            FROM matches m
-            JOIN teams t1 ON m.t1_id = t1.id
-            WHERE m.type = ? AND t1.division = ? AND m.deleted_at IS NULL"#,
+        let (total, completed) = stage_progress(&state.db, division, round).await;
+        let scheduled: (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*)
+               FROM matches m
+               JOIN teams t1 ON m.t1_id = t1.id
+               WHERE m.type = ? AND t1.division = ? AND m.deleted_at IS NULL AND m.possession IS NULL"#,
         )
         .bind(round)
         .bind(division)
         .fetch_one(&state.db)
         .await
-        .unwrap_or((0, 0, 0, 0));
+        .unwrap_or((0,));
+        let in_progress = (total - completed - scheduled.0).max(0);
 
         round_status.push(RoundStatus {
             round,
-            total: stats.0,
-            completed: stats.1,
-            in_progress: stats.2,
-            scheduled: stats.3,
+            total,
+            completed,
+            in_progress,
+            scheduled: scheduled.0,
         });
     }
 
@@ -354,25 +501,8 @@ pub async fn read_tournament_state(
         .map(|round| round.round)
         .unwrap_or(total_rounds + 1);
 
-    let playoff_one: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m JOIN teams t ON m.t1_id = t.id
-           WHERE m.type = 1001 AND t.division = ? AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or((0, 0));
-
-    let playoff_two: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m JOIN teams t ON m.t1_id = t.id
-           WHERE m.type = 1002 AND t.division = ? AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or((0, 0));
+    let playoff_one = stage_progress(&state.db, division, 1001).await;
+    let playoff_two = stage_progress(&state.db, division, 1002).await;
 
     let phase = if current_round <= total_rounds {
         format!("swiss_R{current_round}")
@@ -405,7 +535,7 @@ pub async fn read_tournament_state(
 }
 
 async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStanding> {
-    let sorted = sorting::get_sorted_standings(db, division).await;
+    let sorted = sorting::get_display_standings(db, division).await;
     sorted
         .iter()
         .map(|team| TeamStanding {
@@ -413,6 +543,7 @@ async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStan
             name: team.name.clone(),
             wins: team.wins,
             losses: team.losses,
+            draws: team.draws,
             points_for: team.points_for,
             points_against: team.points_against,
             h2h_diff: 0,
@@ -423,7 +554,7 @@ async fn compute_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStan
 }
 
 async fn compute_intermediate_standings(db: &sqlx::SqlitePool, division: i64) -> Vec<TeamStanding> {
-    let sorted = sorting::get_cached_intermediate_standings(db, division).await;
+    let sorted = sorting::get_display_intermediate_standings(db, division).await;
     sorted
         .iter()
         .map(|team| TeamStanding {
@@ -431,6 +562,7 @@ async fn compute_intermediate_standings(db: &sqlx::SqlitePool, division: i64) ->
             name: team.name.clone(),
             wins: team.wins,
             losses: team.losses,
+            draws: team.draws,
             points_for: team.points_for,
             points_against: team.points_against,
             h2h_diff: 0,
@@ -513,20 +645,27 @@ pub async fn get_schedule_matches(
 }
 
 pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<ScheduleGridResponse> {
+    if let Some(cached) = cache::get_schedule_grid_cache::<ScheduleGridResponse>().await {
+        return Json(cached);
+    }
     let overrides = load_row_overrides().await;
     let rows = build_schedule_rows(&overrides);
     let fields = fetch_field_slots(&state.db).await;
     let grid_matches = fetch_grid_matches(&state.db).await;
     let rank_snapshots = build_schedule_rank_snapshots(&state.db, &rows).await;
-
-    Json(ScheduleGridResponse {
+    let response = ScheduleGridResponse {
         rows: materialize_grid(rows, fields, grid_matches, &rank_snapshots),
-    })
+    };
+    cache::set_schedule_grid_cache(&response).await;
+    Json(response)
 }
 
 pub async fn get_schedule_teams(
     State(state): State<crate::AppState>,
 ) -> Json<ScheduleTeamsResponse> {
+    if let Some(cached) = cache::get_schedule_teams_cache::<ScheduleTeamsResponse>().await {
+        return Json(cached);
+    }
     let teams = sqlx::query_as::<_, ScheduleGridTeam>(
         r#"SELECT id, name, abbreviation, division, small_logo
            FROM teams
@@ -536,8 +675,9 @@ pub async fn get_schedule_teams(
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
-
-    Json(ScheduleTeamsResponse { teams })
+    let response = ScheduleTeamsResponse { teams };
+    cache::set_schedule_teams_cache(&response).await;
+    Json(response)
 }
 
 pub async fn update_schedule_row(
@@ -596,14 +736,25 @@ pub async fn update_schedule_row(
     let old_time = row.start_at.format("%Y-%m-%d %H:%M:%S").to_string();
     let new_time = new_start_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let field_ids: Vec<i64> = fields.iter().map(|field| field.id).collect();
+    let field_ids: Vec<i64> = row
+        .slots
+        .iter()
+        .filter_map(|slot| {
+            fields
+                .iter()
+                .find(|field| field.label == format!("G{}", slot.field_index))
+                .map(|field| field.id)
+        })
+        .collect();
+    if field_ids.is_empty() {
+        return Err(axum::http::StatusCode::CONFLICT);
+    }
     let placeholders = vec!["?"; field_ids.len()].join(",");
     let query = format!(
-        "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND type = ? AND time = ? AND field_id IN ({placeholders})"
+        "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND time = ? AND field_id IN ({placeholders})"
     );
     let mut update_query = sqlx::query(&query)
         .bind(&new_time)
-        .bind(row.match_type)
         .bind(&old_time);
     for field_id in field_ids {
         update_query = update_query.bind(field_id);
@@ -660,15 +811,15 @@ pub async fn move_schedule_match(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let target_slot = target_row
+    target_row
         .slots
         .iter()
-        .find(|slot| slot.field_index == field_index && slot.division == division)
+        .find(|slot| {
+            slot.field_index == field_index
+                && slot.division == division
+                && slot.match_type == match_type
+        })
         .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
-
-    if target_row.match_type != match_type || target_slot.division != division {
-        return Err(axum::http::StatusCode::BAD_REQUEST);
-    }
 
     let target_time = target_row.start_at.format("%Y-%m-%d %H:%M:%S").to_string();
     let source_time = source_time.ok_or(axum::http::StatusCode::CONFLICT)?;
@@ -751,6 +902,14 @@ pub async fn generate_next_round(
     .unwrap_or(1);
 
     if next_round > total_rounds {
+        record_schedule_info(
+            "schedule.inprogress",
+            serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "reason": "all_swiss_rounds_complete"
+            }),
+        );
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "All swiss rounds complete"
@@ -758,18 +917,18 @@ pub async fn generate_next_round(
     }
 
     if next_round > 1 {
-        let prev_incomplete: (i64,) = sqlx::query_as(
-            r#"SELECT COUNT(*) FROM matches m
-               JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND (m.possession IS NULL OR m.possession < 3) AND m.deleted_at IS NULL"#,
-        )
-        .bind(next_round - 1)
-        .bind(division)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or((1,));
+        let prev_progress = stage_progress(&state.db, division, next_round - 1).await;
 
-        if prev_incomplete.0 > 0 {
+        if prev_progress.0 == 0 || prev_progress.1 < prev_progress.0 {
+            record_schedule_info(
+                "schedule.inprogress",
+                serde_json::json!({
+                    "source": "manual_generate",
+                    "division": division,
+                    "round": next_round,
+                    "reason": "previous_round_incomplete"
+                }),
+            );
             return Ok(Json(serde_json::json!({
                 "success": false,
                 "message": "Previous round incomplete"
@@ -789,32 +948,109 @@ pub async fn generate_next_round(
     .unwrap_or((0,));
 
     if existing.0 > 0 {
+        record_schedule_info(
+            "schedule.inprogress",
+            serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "reason": "round_already_generated"
+            }),
+        );
         return Ok(Json(serde_json::json!({
             "success": false,
             "message": "Round already generated"
         })));
     }
 
-    let history = rounds::fetch_match_history(&state.db, division).await;
-    let sorted = sorting::get_sorted_standings(&state.db, division).await;
-    if sorted.len() % 2 != 0 {
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Odd number of teams; cannot generate pairings"
-        })));
-    }
+    let pairings = if next_round == 1 {
+        let team_ids = load_seeded_round_one_team_ids(&state.db, division)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        match seeded_round_one_pairings_from_team_ids(&team_ids) {
+            Ok(pairings) => pairings,
+            Err(message) => {
+                record_schedule_error(serde_json::json!({
+                    "source": "manual_generate",
+                    "division": division,
+                    "round": next_round,
+                    "message": message
+                }));
+                return Ok(Json(serde_json::json!({
+                    "success": false,
+                    "message": "Odd number of teams; cannot generate pairings"
+                })));
+            }
+        }
+    } else {
+        let history = rounds::fetch_match_history(&state.db, division).await;
+        let sorted = sorting::get_generation_standings_for_stage(&state.db, division, next_round).await;
+        if sorted.len() % 2 != 0 {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "message": "odd number of teams; cannot generate pairings"
+            }));
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Odd number of teams; cannot generate pairings"
+            })));
+        }
 
-    let pairings = rounds::generate_round_pairings(&sorted, &history);
-    if pairings.len() * 2 != sorted.len() {
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Could not generate complete non-overlapping pairings"
-        })));
-    }
+        let pairings = rounds::generate_round_pairings(&sorted, &history, next_round);
+        if pairings.len() * 2 != sorted.len() {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "message": "could not generate complete non-overlapping pairings"
+            }));
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Could not generate complete non-overlapping pairings"
+            })));
+        }
+
+        pairings
+    };
+
+    record_schedule_info(
+        "schedule.start",
+        serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
 
     insert_pairings_into_slots(&state.db, division, next_round, &pairings)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|error| {
+            record_schedule_error(serde_json::json!({
+                "source": "manual_generate",
+                "division": division,
+                "round": next_round,
+                "stage": "swiss",
+                "message": error.to_string()
+            }));
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    cache::invalidate_all().await;
+
+    record_schedule_info(
+        "schedule.end",
+        serde_json::json!({
+            "source": "manual_generate",
+            "division": division,
+            "round": next_round,
+            "stage": "swiss",
+            "matches_created": pairings.len()
+        }),
+    );
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -842,35 +1078,47 @@ pub async fn check_and_populate_gates(
     };
 
     for round in 1..=total_rounds {
-        let stats: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-               FROM matches m JOIN teams t ON m.t1_id = t.id
-               WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-        )
-        .bind(round)
-        .bind(division)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or((0, 0));
-
-        let (total, completed) = stats;
+        let (total, completed) = stage_progress(&state.db, division, round).await;
         if total == 0
             && (round == 1
                 || {
-                    let prev: (i64, i64) = sqlx::query_as(
-                    r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN possession >= 3 THEN 1 ELSE 0 END), 0)
-                       FROM matches m JOIN teams t ON m.t1_id = t.id
-                       WHERE m.type = ? AND t.division = ? AND m.deleted_at IS NULL"#,
-                )
-                .bind(round - 1)
-                .bind(division)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or((0, 0));
+                    let prev = stage_progress(&state.db, division, round - 1).await;
                     prev.0 > 0 && prev.0 == prev.1
                 })
         {
-            let _ = generate_next_round_internal(&state.db, division, round).await;
+            record_schedule_info(
+                "schedule.start",
+                serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss"
+                }),
+            );
+            if let Err(error) = generate_next_round_internal(&state.db, division, round).await {
+                record_schedule_error(serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "message": error.to_string()
+                }));
+                return Json(serde_json::json!({
+                    "action": "error",
+                    "next_gate": format!("round_{}_generation_failed", round),
+                }));
+            }
+            cache::invalidate_all().await;
+            record_schedule_info(
+                "schedule.end",
+                serde_json::json!({
+                    "source": "check_gates",
+                    "division": division,
+                    "round": round,
+                    "stage": "swiss",
+                    "action": format!("generated_round_{round}")
+                }),
+            );
             return Json(serde_json::json!({
                 "action": format!("generated_round_{round}"),
                 "next_gate": if round < total_rounds {
@@ -900,20 +1148,26 @@ async fn generate_next_round_internal(
     division: i64,
     round: i64,
 ) -> Result<(), sqlx::Error> {
-    let sorted = sorting::get_sorted_standings(db, division).await;
-    if sorted.len() % 2 != 0 {
-        return Err(sqlx::Error::Protocol(
-            "odd number of teams; cannot generate pairings".into(),
-        ));
-    }
+    let pairings = if round == 1 {
+        build_seeded_round_one_pairings(db, division).await?
+    } else {
+        let sorted = sorting::get_generation_standings_for_stage(db, division, round).await;
+        if sorted.len() % 2 != 0 {
+            return Err(sqlx::Error::Protocol(
+                "odd number of teams; cannot generate pairings".into(),
+            ));
+        }
 
-    let history = rounds::fetch_match_history(db, division).await;
-    let pairings = rounds::generate_round_pairings(&sorted, &history);
-    if pairings.len() * 2 != sorted.len() {
-        return Err(sqlx::Error::Protocol(
-            "incomplete pairings generated".into(),
-        ));
-    }
+        let history = rounds::fetch_match_history(db, division).await;
+        let pairings = rounds::generate_round_pairings(&sorted, &history, round);
+        if pairings.len() * 2 != sorted.len() {
+            return Err(sqlx::Error::Protocol(
+                "incomplete pairings generated".into(),
+            ));
+        }
+
+        pairings
+    };
 
     insert_pairings_into_slots(db, division, round, &pairings).await
 }
@@ -1005,6 +1259,10 @@ async fn create_playoffs_if_needed(
     db: &sqlx::SqlitePool,
     division: i64,
 ) -> Result<bool, sqlx::Error> {
+    if division == 1 {
+        return Ok(false);
+    }
+
     let existing_playoffs: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL",
     )
@@ -1016,7 +1274,7 @@ async fn create_playoffs_if_needed(
         return Ok(false);
     }
 
-    let sorted = sorting::get_sorted_standings(db, division).await;
+    let sorted = sorting::get_generation_standings_for_stage(db, division, 1001).await;
     if sorted.len() < 2 {
         return Ok(false);
     }
@@ -1045,20 +1303,21 @@ async fn fetch_completed_playoff_results(
     .fetch_all(db)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
-            if t1_score == t2_score {
-                return None;
-            }
+    let mut results = Vec::new();
 
-            Some(rounds::PlayedMatchResult {
-                t1: t1_id,
-                t2: t2_id,
-                winner: if t1_score > t2_score { t1_id } else { t2_id },
-            })
-        })
-        .collect())
+    for (t1_id, t2_id, t1_score, t2_score) in rows {
+        if t1_score == t2_score {
+            continue;
+        }
+
+        results.push(rounds::PlayedMatchResult {
+            t1: t1_id,
+            t2: t2_id,
+            winner: if t1_score > t2_score { t1_id } else { t2_id },
+        });
+    }
+
+    Ok(results)
 }
 
 async fn create_finals_if_needed(
@@ -1076,24 +1335,24 @@ async fn create_finals_if_needed(
         return Ok(false);
     }
 
-    let playoff_stats: (i64, i64) = sqlx::query_as(
-        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
-           FROM matches m
-           JOIN teams t ON m.t1_id = t.id
-           WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL"#,
-    )
-    .bind(division)
-    .fetch_one(db)
-    .await?;
+    let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
+    let final_pairings = if division == 1 {
+        rounds::build_direct_final_pairings(&sorted)
+    } else {
+        let playoff_stats = stage_progress(db, division, 1001).await;
 
-    if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
-        return Ok(false);
-    }
+        if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
+            return Ok(false);
+        }
 
-    let sorted = sorting::get_sorted_standings(db, division).await;
-    let playoff_results = fetch_completed_playoff_results(db, division).await?;
-    let final_pairings =
-        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
+        let playoff_results = fetch_completed_playoff_results(db, division).await?;
+        if playoff_results.len() as i64 != playoff_stats.0 {
+            return Ok(false);
+        }
+
+        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results)
+    };
+
     if final_pairings.is_empty() {
         return Ok(false);
     }
@@ -1117,7 +1376,12 @@ async fn insert_pairings_into_slots(
         )));
     }
 
-    for (pairing, (field_id, start_time)) in pairings.iter().zip(slots.iter()) {
+    let scheduled_pairings = {
+        let mut rng = rand::rng();
+        arrange_pairings_for_slots(pairings, match_type, &mut rng)
+    };
+
+    for (pairing, (field_id, start_time)) in scheduled_pairings.iter().zip(slots.iter()) {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, ?)",
         )
@@ -1134,6 +1398,18 @@ async fn insert_pairings_into_slots(
     Ok(())
 }
 
+fn arrange_pairings_for_slots<R: rand::Rng + ?Sized>(
+    pairings: &[rounds::Pairing],
+    match_type: i64,
+    rng: &mut R,
+) -> Vec<rounds::Pairing> {
+    let mut scheduled_pairings = pairings.to_vec();
+    if (2..1000).contains(&match_type) {
+        scheduled_pairings.shuffle(rng);
+    }
+    scheduled_pairings
+}
+
 async fn get_slot_assignments(
     db: &sqlx::SqlitePool,
     division: i64,
@@ -1148,34 +1424,579 @@ async fn get_slot_assignments(
     }
 
     let mut slots = Vec::new();
-    for row in rows.iter().filter(|row| row.match_type == match_type) {
-        for slot in row.slots.iter().filter(|slot| slot.division == division) {
+    for row in &rows {
+        for slot in row
+            .slots
+            .iter()
+            .filter(|slot| slot.division == division && slot.match_type == match_type)
+        {
             let field = fields
                 .iter()
                 .find(|field| field.label == format!("G{}", slot.field_index))
                 .ok_or_else(|| sqlx::Error::Protocol("missing field mapping for slot".into()))?;
             slots.push((
+                slot.slot_code.clone(),
                 field.id,
                 row.start_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             ));
         }
     }
-    Ok(slots)
+    slots.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Ok(slots
+        .into_iter()
+        .map(|(_, field_id, start_time)| (field_id, start_time))
+        .collect())
 }
 
 fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowTemplate> {
-    let friday = NaiveDate::from_ymd_opt(2026, 1, 30).unwrap();
-    let saturday = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
-    let sunday = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let friday = NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let saturday = NaiveDate::from_ymd_opt(2026, 5, 23).unwrap();
+    let sunday = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
 
-    let mut rows = Vec::new();
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 1));
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 2));
-    rows.extend(build_swiss_rows("fri", "Friday", friday, 3));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 4));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 5));
-    rows.extend(build_swiss_rows("sat", "Saturday", saturday, 6));
-    rows.extend(build_playoff_rows("sun", "Sunday", sunday));
+    let friday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
+    let friday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
+    let saturday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
+    let saturday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
+    let sunday_start = NaiveTime::from_hms_opt(6, 30, 0).unwrap();
+    let sunday_end = NaiveTime::from_hms_opt(18, 5, 0).unwrap();
+
+    let mut rows = vec![
+        build_row(
+            "fri-r1-a",
+            "fri",
+            "Friday",
+            "Round 1 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "06:00",
+            "07:00",
+            vec![
+                open_slot(1, 1, 1),
+                open_slot(2, 1, 2),
+                open_slot(3, 1, 3),
+                open_slot(4, 1, 4),
+            ],
+        ),
+        build_row(
+            "fri-r1-b",
+            "fri",
+            "Friday",
+            "Round 1 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "07:15",
+            "08:15",
+            vec![
+                open_slot(1, 1, 5),
+                open_slot(2, 1, 6),
+                open_slot(3, 1, 7),
+                women_slot(4, 1, 1),
+            ],
+        ),
+        build_row(
+            "fri-r1-c",
+            "fri",
+            "Friday",
+            "Round 1 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "08:30",
+            "09:45",
+            vec![
+                women_slot(1, 1, 2),
+                women_slot(2, 1, 3),
+                women_slot(3, 1, 4),
+                women_slot(4, 1, 5),
+            ],
+        ),
+        build_row(
+            "fri-r1-d",
+            "fri",
+            "Friday",
+            "Round 1 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "10:00",
+            "11:00",
+            vec![
+                open_slot(1, 1, 8),
+                open_slot(2, 1, 9),
+                open_slot(3, 1, 10),
+                open_slot(4, 1, 11),
+            ],
+        ),
+        build_row(
+            "fri-r2-a",
+            "fri",
+            "Friday",
+            "Round 2 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "11:15",
+            "12:30",
+            vec![
+                women_slot(1, 2, 1),
+                women_slot(2, 2, 2),
+                women_slot(3, 2, 3),
+                women_slot(4, 2, 4),
+            ],
+        ),
+        build_row(
+            "fri-r2-b",
+            "fri",
+            "Friday",
+            "Round 2 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "12:45",
+            "13:45",
+            vec![
+                open_slot(1, 2, 1),
+                open_slot(2, 2, 2),
+                women_slot(3, 2, 5),
+                open_slot(4, 2, 3),
+            ],
+        ),
+        build_row(
+            "fri-r2-c",
+            "fri",
+            "Friday",
+            "Round 2 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "14:00",
+            "15:00",
+            vec![
+                open_slot(1, 2, 4),
+                open_slot(2, 2, 5),
+                open_slot(3, 2, 6),
+                open_slot(4, 2, 7),
+            ],
+        ),
+        build_row(
+            "fri-r2-d",
+            "fri",
+            "Friday",
+            "Round 2 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "15:15",
+            "16:15",
+            vec![
+                open_slot(1, 2, 8),
+                open_slot(2, 2, 9),
+                open_slot(3, 2, 10),
+                open_slot(4, 2, 11),
+            ],
+        ),
+        build_row(
+            "fri-r3-a",
+            "fri",
+            "Friday",
+            "Round 3 · Row A",
+            friday,
+            friday_start,
+            friday_end,
+            "16:30",
+            "17:45",
+            vec![
+                women_slot(1, 3, 1),
+                women_slot(2, 3, 2),
+                women_slot(3, 3, 3),
+                women_slot(4, 3, 4),
+            ],
+        ),
+        build_row(
+            "fri-r3-b",
+            "fri",
+            "Friday",
+            "Round 3 · Row B",
+            friday,
+            friday_start,
+            friday_end,
+            "18:00",
+            "19:00",
+            vec![
+                open_slot(1, 3, 1),
+                women_slot(2, 3, 5),
+                open_slot(3, 3, 2),
+                open_slot(4, 3, 3),
+            ],
+        ),
+        build_row(
+            "fri-r3-c",
+            "fri",
+            "Friday",
+            "Round 3 · Row C",
+            friday,
+            friday_start,
+            friday_end,
+            "19:15",
+            "20:15",
+            vec![
+                open_slot(1, 3, 4),
+                open_slot(2, 3, 5),
+                open_slot(3, 3, 6),
+                open_slot(4, 3, 7),
+            ],
+        ),
+        build_row(
+            "fri-r3-d",
+            "fri",
+            "Friday",
+            "Round 3 · Row D",
+            friday,
+            friday_start,
+            friday_end,
+            "20:30",
+            "21:30",
+            vec![
+                open_slot(1, 3, 8),
+                open_slot(2, 3, 9),
+                open_slot(3, 3, 10),
+                open_slot(4, 3, 11),
+            ],
+        ),
+        build_row(
+            "sat-r4-a",
+            "sat",
+            "Saturday",
+            "Round 4 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "06:00",
+            "07:00",
+            vec![
+                open_slot(1, 4, 1),
+                open_slot(2, 4, 2),
+                open_slot(3, 4, 3),
+                open_slot(4, 4, 4),
+            ],
+        ),
+        build_row(
+            "sat-r4-b",
+            "sat",
+            "Saturday",
+            "Round 4 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "07:15",
+            "08:15",
+            vec![
+                women_slot(1, 4, 1),
+                open_slot(2, 4, 5),
+                open_slot(3, 4, 6),
+                open_slot(4, 4, 7),
+            ],
+        ),
+        build_row(
+            "sat-r4-c",
+            "sat",
+            "Saturday",
+            "Round 4 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "08:30",
+            "09:45",
+            vec![
+                women_slot(1, 4, 2),
+                women_slot(2, 4, 3),
+                women_slot(3, 4, 4),
+                women_slot(4, 4, 5),
+            ],
+        ),
+        build_row(
+            "sat-r4-d",
+            "sat",
+            "Saturday",
+            "Round 4 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "10:00",
+            "11:00",
+            vec![
+                open_slot(1, 4, 8),
+                open_slot(2, 4, 9),
+                open_slot(3, 4, 10),
+                open_slot(4, 4, 11),
+            ],
+        ),
+        build_row(
+            "sat-r5-a",
+            "sat",
+            "Saturday",
+            "Round 5 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "11:15",
+            "12:30",
+            vec![
+                women_slot(1, 5, 1),
+                women_slot(2, 5, 2),
+                women_slot(3, 5, 3),
+                women_slot(4, 5, 4),
+            ],
+        ),
+        build_row(
+            "sat-r5-b",
+            "sat",
+            "Saturday",
+            "Round 5 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "12:45",
+            "13:45",
+            vec![
+                open_slot(1, 5, 1),
+                women_slot(2, 5, 5),
+                open_slot(3, 5, 2),
+                open_slot(4, 5, 3),
+            ],
+        ),
+        build_row(
+            "sat-r5-c",
+            "sat",
+            "Saturday",
+            "Round 5 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "14:00",
+            "15:00",
+            vec![
+                open_slot(1, 5, 4),
+                open_slot(2, 5, 5),
+                open_slot(3, 5, 6),
+                open_slot(4, 5, 7),
+            ],
+        ),
+        build_row(
+            "sat-r5-d",
+            "sat",
+            "Saturday",
+            "Round 5 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "15:15",
+            "16:15",
+            vec![
+                open_slot(1, 5, 8),
+                open_slot(2, 5, 9),
+                open_slot(3, 5, 10),
+                open_slot(4, 5, 11),
+            ],
+        ),
+        build_row(
+            "sat-r6-a",
+            "sat",
+            "Saturday",
+            "Round 6 · Row A",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "16:30",
+            "17:45",
+            vec![
+                women_slot(1, 6, 1),
+                women_slot(2, 6, 2),
+                women_slot(3, 6, 3),
+                women_slot(4, 6, 4),
+            ],
+        ),
+        build_row(
+            "sat-r6-b",
+            "sat",
+            "Saturday",
+            "Round 6 · Row B",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "18:00",
+            "19:00",
+            vec![
+                open_slot(1, 6, 1),
+                open_slot(2, 6, 2),
+                women_slot(3, 6, 5),
+                open_slot(4, 6, 3),
+            ],
+        ),
+        build_row(
+            "sat-r6-c",
+            "sat",
+            "Saturday",
+            "Round 6 · Row C",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "19:15",
+            "20:15",
+            vec![
+                open_slot(1, 6, 4),
+                open_slot(2, 6, 5),
+                open_slot(3, 6, 6),
+                open_slot(4, 6, 7),
+            ],
+        ),
+        build_row(
+            "sat-r6-d",
+            "sat",
+            "Saturday",
+            "Round 6 · Row D",
+            saturday,
+            saturday_start,
+            saturday_end,
+            "20:30",
+            "21:30",
+            vec![
+                open_slot(1, 6, 8),
+                open_slot(2, 6, 9),
+                open_slot(3, 6, 10),
+                open_slot(4, 6, 11),
+            ],
+        ),
+        build_row(
+            "sun-p1-a",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row A",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "06:30",
+            "07:45",
+            vec![
+                playoff_open_slot(1, 1, 5),
+                playoff_open_slot(2, 1, 6),
+                playoff_open_slot(3, 1, 7),
+                playoff_open_slot(4, 1, 8),
+            ],
+        ),
+        build_row(
+            "sun-p1-b",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row B",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "08:00",
+            "09:15",
+            vec![
+                playoff_open_slot(1, 1, 3),
+                playoff_open_slot(2, 1, 4),
+                playoff_open_slot(3, 1, 9),
+                playoff_open_slot(4, 1, 10),
+            ],
+        ),
+        build_row(
+            "sun-p1-c",
+            "sun",
+            "Sunday",
+            "Playoff 1 · Row C",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "09:30",
+            "10:45",
+            vec![
+                playoff_open_slot(1, 1, 1),
+                playoff_open_slot(2, 1, 2),
+                playoff_open_slot(3, 1, 11),
+                playoff_women_slot(4, 2, 5),
+            ],
+        ),
+        build_row(
+            "sun-p2-a",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row A",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "11:00",
+            "12:15",
+            vec![
+                playoff_open_slot(1, 2, 4),
+                playoff_open_slot(2, 2, 5),
+                playoff_women_slot(3, 2, 4),
+                playoff_open_slot(4, 2, 6),
+            ],
+        ),
+        build_row(
+            "sun-p2-b",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row B",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "12:30",
+            "13:45",
+            vec![
+                playoff_open_slot(1, 2, 3),
+                playoff_women_slot(2, 2, 3),
+                playoff_open_slot(3, 2, 7),
+                playoff_open_slot(4, 2, 8),
+            ],
+        ),
+        build_row(
+            "sun-p2-c",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row C",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "14:00",
+            "15:15",
+            vec![
+                playoff_women_slot(1, 2, 2),
+                playoff_open_slot(2, 2, 2),
+                playoff_open_slot(3, 2, 9),
+                playoff_open_slot(4, 2, 10),
+            ],
+        ),
+        build_row(
+            "sun-p2-d",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row D",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "15:30",
+            "16:45",
+            vec![playoff_open_slot(1, 2, 1)],
+        ),
+        build_row(
+            "sun-p2-e",
+            "sun",
+            "Sunday",
+            "Playoff 2 · Row E",
+            sunday,
+            sunday_start,
+            sunday_end,
+            "16:50",
+            "18:05",
+            vec![playoff_women_slot(1, 2, 1)],
+        ),
+    ];
 
     for row in &mut rows {
         if let Some(override_value) = overrides.get(&row.key) {
@@ -1197,179 +2018,33 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     rows
 }
 
-fn build_swiss_rows(
+fn build_row(
+    key: &str,
     day_key: &'static str,
     day_label: &'static str,
+    label: &str,
     date: NaiveDate,
-    round: i64,
-) -> Vec<RowTemplate> {
-    let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
-    let round_offset =
-        Duration::minutes(round_offset(round) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
+    day_start: NaiveTime,
+    day_end: NaiveTime,
+    start_time: &str,
+    end_time: &str,
+    slots: Vec<SlotTemplate>,
+) -> RowTemplate {
+    let start_at = NaiveDateTime::new(date, parse_clock(start_time).expect("valid row start"));
+    let end_at = NaiveDateTime::new(date, parse_clock(end_time).expect("valid row end"));
 
-    let mut rows = Vec::new();
-    for row_index in 0..4 {
-        let start_at = base
-            + round_offset
-            + Duration::minutes((row_index as i64) * (SWISS_MATCH_MINUTES + SWISS_BREAK_MINUTES));
-        let end_at = start_at + Duration::minutes(SWISS_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-r{round}-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Round {round} · Row {}", row_name(row_index)),
-            match_type: round,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
-            duration_minutes: SWISS_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: swiss_row_slots(round, row_index),
-        });
-    }
-    rows
-}
-
-fn build_playoff_rows(
-    day_key: &'static str,
-    day_label: &'static str,
-    date: NaiveDate,
-) -> Vec<RowTemplate> {
-    let base = NaiveDateTime::new(date, NaiveTime::from_hms_opt(6, 30, 0).unwrap());
-    let mut rows = Vec::new();
-
-    for row_index in 0..4 {
-        let start_at = base
-            + Duration::minutes(
-                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
-            );
-        let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-p1-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Playoff 1 · Row {}", row_name(row_index)),
-            match_type: 1001,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(18, 30, 0).unwrap(),
-            duration_minutes: PLAYOFF_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: playoff_one_row_slots(row_index),
-        });
-    }
-
-    let playoff_two_base =
-        base + Duration::minutes(4 * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES));
-    for row_index in 0..4 {
-        let start_at = playoff_two_base
-            + Duration::minutes(
-                (row_index as i64) * (PLAYOFF_MATCH_MINUTES + PLAYOFF_BREAK_MINUTES),
-            );
-        let end_at = start_at + Duration::minutes(PLAYOFF_MATCH_MINUTES);
-        rows.push(RowTemplate {
-            key: format!("{day_key}-p2-{}", row_suffix(row_index)),
-            day_key,
-            day_label,
-            label: format!("Playoff 2 · Row {}", row_name(row_index)),
-            match_type: 1002,
-            date,
-            day_start: NaiveTime::from_hms_opt(6, 30, 0).unwrap(),
-            day_end: NaiveTime::from_hms_opt(18, 30, 0).unwrap(),
-            duration_minutes: PLAYOFF_MATCH_MINUTES,
-            start_at,
-            end_at,
-            slots: playoff_two_row_slots(row_index),
-        });
-    }
-
-    rows
-}
-
-fn swiss_row_slots(round: i64, row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            open_slot(1, round, 1),
-            open_slot(2, round, 2),
-            open_slot(3, round, 3),
-            open_slot(4, round, 4),
-        ],
-        1 => vec![
-            open_slot(1, round, 5),
-            open_slot(2, round, 6),
-            open_slot(3, round, 7),
-            open_slot(4, round, 8),
-        ],
-        2 => vec![
-            open_slot(1, round, 9),
-            open_slot(2, round, 10),
-            open_slot(3, round, 11),
-            women_slot(4, round, 1),
-        ],
-        _ => vec![
-            women_slot(1, round, 2),
-            women_slot(2, round, 3),
-            women_slot(3, round, 4),
-            women_slot(4, round, 5),
-        ],
-    }
-}
-
-fn playoff_one_row_slots(row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            playoff_open_slot(1, 1, 1),
-            playoff_open_slot(2, 1, 2),
-            playoff_open_slot(3, 1, 3),
-            playoff_open_slot(4, 1, 4),
-        ],
-        1 => vec![
-            playoff_open_slot(1, 1, 5),
-            playoff_open_slot(2, 1, 6),
-            playoff_open_slot(3, 1, 7),
-            playoff_open_slot(4, 1, 8),
-        ],
-        2 => vec![
-            playoff_open_slot(1, 1, 9),
-            playoff_open_slot(2, 1, 10),
-            playoff_open_slot(3, 1, 11),
-            playoff_women_slot(4, 1, 1),
-        ],
-        _ => vec![
-            playoff_women_slot(1, 1, 2),
-            playoff_women_slot(2, 1, 3),
-            playoff_women_slot(3, 1, 4),
-            playoff_women_slot(4, 1, 5),
-        ],
-    }
-}
-
-fn playoff_two_row_slots(row_index: usize) -> Vec<SlotTemplate> {
-    match row_index {
-        0 => vec![
-            playoff_open_slot(1, 2, 2),
-            playoff_open_slot(2, 2, 3),
-            playoff_open_slot(3, 2, 4),
-            playoff_open_slot(4, 2, 5),
-        ],
-        1 => vec![
-            playoff_open_slot(1, 2, 6),
-            playoff_open_slot(2, 2, 7),
-            playoff_open_slot(3, 2, 8),
-            playoff_women_slot(4, 2, 2),
-        ],
-        2 => vec![
-            playoff_open_slot(1, 2, 1),
-            playoff_women_slot(2, 2, 3),
-            playoff_women_slot(3, 2, 4),
-        ],
-        _ => vec![
-            playoff_women_slot(1, 2, 1),
-            playoff_open_slot(2, 2, 9),
-            playoff_open_slot(3, 2, 10),
-        ],
+    RowTemplate {
+        key: key.to_string(),
+        day_key,
+        day_label,
+        label: label.to_string(),
+        date,
+        day_start,
+        day_end,
+        duration_minutes: minutes_between(start_at.time(), end_at.time()),
+        start_at,
+        end_at,
+        slots,
     }
 }
 
@@ -1377,6 +2052,7 @@ fn open_slot(field_index: usize, round: i64, slot_number: usize) -> SlotTemplate
     SlotTemplate {
         field_index,
         division: 0,
+        match_type: round,
         slot_code: format!("O R{round}-{slot_number:02}"),
     }
 }
@@ -1385,6 +2061,7 @@ fn women_slot(field_index: usize, round: i64, slot_number: usize) -> SlotTemplat
     SlotTemplate {
         field_index,
         division: 1,
+        match_type: round,
         slot_code: format!("W R{round}-{slot_number:02}"),
     }
 }
@@ -1393,6 +2070,7 @@ fn playoff_open_slot(field_index: usize, playoff_round: i64, slot_number: usize)
     SlotTemplate {
         field_index,
         division: 0,
+        match_type: if playoff_round == 1 { 1001 } else { 1002 },
         slot_code: format!("O P{playoff_round}-{slot_number:02}"),
     }
 }
@@ -1401,37 +2079,8 @@ fn playoff_women_slot(field_index: usize, playoff_round: i64, slot_number: usize
     SlotTemplate {
         field_index,
         division: 1,
+        match_type: if playoff_round == 1 { 1001 } else { 1002 },
         slot_code: format!("W P{playoff_round}-{slot_number:02}"),
-    }
-}
-
-fn round_offset(round: i64) -> i64 {
-    match round {
-        1 => 0,
-        2 => 4,
-        3 => 8,
-        4 => 0,
-        5 => 4,
-        6 => 8,
-        _ => 0,
-    }
-}
-
-fn row_suffix(row_index: usize) -> &'static str {
-    match row_index {
-        0 => "a",
-        1 => "b",
-        2 => "c",
-        _ => "d",
-    }
-}
-
-fn row_name(row_index: usize) -> &'static str {
-    match row_index {
-        0 => "A",
-        1 => "B",
-        2 => "C",
-        _ => "D",
     }
 }
 
@@ -1455,12 +2104,12 @@ async fn build_schedule_rank_snapshots(
     let mut needed_final_snapshots = HashSet::new();
     for row in rows {
         for slot in &row.slots {
-            if row.match_type == 1002 {
+            if slot.match_type == 1002 {
                 needed_final_snapshots.insert(slot.division);
             } else {
                 needed_snapshots.insert((
                     slot.division,
-                    standings_round_for_match_type(slot.division, row.match_type),
+                    standings_round_for_match_type(slot.division, slot.match_type),
                 ));
             }
         }
@@ -1469,7 +2118,7 @@ async fn build_schedule_rank_snapshots(
     let mut snapshots = HashMap::new();
     for (division, standings_round) in needed_snapshots {
         let standings =
-            sorting::get_sorted_standings_through_round(db, division, standings_round).await;
+            sorting::get_generation_standings_through_round(db, division, standings_round).await;
         let ranks = standings
             .into_iter()
             .enumerate()
@@ -1479,7 +2128,7 @@ async fn build_schedule_rank_snapshots(
     }
 
     for division in needed_final_snapshots {
-        let standings = sorting::get_sorted_standings(db, division).await;
+        let standings = sorting::get_generation_standings_for_stage(db, division, 1002).await;
         let playoff_results = fetch_completed_playoff_results(db, division)
             .await
             .unwrap_or_default();
@@ -1564,12 +2213,12 @@ fn materialize_grid(
                 .iter()
                 .find(|slot| slot.field_index == field_index);
             let rank_snapshot_key = slot_template.map(|slot| {
-                if row.match_type == 1002 {
+                if slot.match_type == 1002 {
                     (slot.division, 1002)
                 } else {
                     (
                         slot.division,
-                        standings_round_for_match_type(slot.division, row.match_type),
+                        standings_round_for_match_type(slot.division, slot.match_type),
                     )
                 }
             });
@@ -1580,7 +2229,7 @@ fn materialize_grid(
                         Some(record)
                     } else {
                         fallback_matches
-                            .get_mut(&(slot.division, row.match_type))
+                            .get_mut(&(slot.division, slot.match_type))
                             .and_then(|records| pop_unassigned(records, &row_time, field.id))
                     }
                 }
@@ -1609,7 +2258,7 @@ fn materialize_grid(
                     .unwrap_or_else(|| format!("G{field_index}")),
                 slot_code: slot_template.map(|slot| slot.slot_code.clone()),
                 division: slot_template.map(|slot| slot.division),
-                match_type: slot_template.map(|_| row.match_type),
+                match_type: slot_template.map(|slot| slot.match_type),
                 match_id: matched.as_ref().map(|record| record.id),
                 data: matched.as_ref().map(|record| {
                     [
@@ -1724,6 +2373,33 @@ fn extract_email(headers: &HeaderMap) -> Result<String, axum::http::StatusCode> 
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct ZeroRng;
+
+    impl rand::RngCore for ZeroRng {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(0);
+        }
+    }
+
+    fn sample_pairings() -> Vec<rounds::Pairing> {
+        vec![
+            rounds::Pairing { t1: 1, t2: 2 },
+            rounds::Pairing { t1: 3, t2: 4 },
+            rounds::Pairing { t1: 5, t2: 6 },
+            rounds::Pairing { t1: 7, t2: 8 },
+            rounds::Pairing { t1: 9, t2: 10 },
+        ]
+    }
+
     #[test]
     fn swiss_round_rows_fit_open_and_women_team_counts() {
         let rows = build_schedule_rows(&HashMap::new());
@@ -1732,13 +2408,15 @@ mod tests {
             let mut open_slots = 0;
             let mut women_slots = 0;
 
-            for row in rows.iter().filter(|row| row.match_type == round) {
-                for slot in &row.slots {
-                    if slot.division == 0 {
+            for slot in rows
+                .iter()
+                .flat_map(|row| row.slots.iter())
+                .filter(|slot| slot.match_type == round)
+            {
+                if slot.division == 0 {
                         open_slots += 1;
                     } else {
                         women_slots += 1;
-                    }
                 }
             }
 
@@ -1759,33 +2437,29 @@ mod tests {
 
         let playoff_one_open = rows
             .iter()
-            .filter(|row| row.match_type == 1001)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 0)
+            .filter(|slot| slot.match_type == 1001 && slot.division == 0)
             .count();
         let playoff_one_women = rows
             .iter()
-            .filter(|row| row.match_type == 1001)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 1)
+            .filter(|slot| slot.match_type == 1001 && slot.division == 1)
             .count();
         let playoff_two_open = rows
             .iter()
-            .filter(|row| row.match_type == 1002)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 0)
+            .filter(|slot| slot.match_type == 1002 && slot.division == 0)
             .count();
         let playoff_two_women = rows
             .iter()
-            .filter(|row| row.match_type == 1002)
             .flat_map(|row| row.slots.iter())
-            .filter(|slot| slot.division == 1)
+            .filter(|slot| slot.match_type == 1002 && slot.division == 1)
             .count();
 
         assert_eq!(playoff_one_open, 11);
-        assert_eq!(playoff_one_women, 5);
+        assert_eq!(playoff_one_women, 0);
         assert_eq!(playoff_two_open, 10);
-        assert_eq!(playoff_two_women, 4);
+        assert_eq!(playoff_two_women, 5);
     }
 
     #[test]
@@ -1795,8 +2469,9 @@ mod tests {
         for round in 1..=6 {
             let slot_divisions: Vec<i64> = rows
                 .iter()
-                .filter(|row| row.match_type == round)
-                .flat_map(|row| row.slots.iter().map(|slot| slot.division))
+                .flat_map(|row| row.slots.iter())
+                .filter(|slot| slot.match_type == round)
+                .map(|slot| slot.division)
                 .collect();
 
             assert_eq!(
@@ -1804,8 +2479,67 @@ mod tests {
                 16,
                 "round {round} should expose 16 total swiss slots"
             );
-            assert!(slot_divisions[..11].iter().all(|division| *division == 0));
-            assert!(slot_divisions[11..].iter().all(|division| *division == 1));
+            assert_eq!(
+                slot_divisions.iter().filter(|division| **division == 0).count(),
+                11
+            );
+            assert_eq!(
+                slot_divisions.iter().filter(|division| **division == 1).count(),
+                5
+            );
         }
+    }
+
+    #[test]
+    fn round_one_pairings_keep_their_original_slot_order() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 1, &mut rng);
+
+        assert_eq!(scheduled, pairings);
+    }
+
+    #[test]
+    fn later_swiss_pairings_are_shuffled_before_slot_assignment() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 3, &mut rng);
+
+        assert_ne!(scheduled, pairings);
+
+        let original_set: HashSet<(i64, i64)> =
+            pairings.iter().map(|pairing| (pairing.t1, pairing.t2)).collect();
+        let scheduled_set: HashSet<(i64, i64)> = scheduled
+            .iter()
+            .map(|pairing| (pairing.t1, pairing.t2))
+            .collect();
+
+        assert_eq!(scheduled_set, original_set);
+    }
+
+    #[test]
+    fn seeded_round_one_pairings_use_top_half_vs_bottom_half() {
+        let pairings = seeded_round_one_pairings_from_team_ids(&[1, 2, 3, 4, 5, 6]).unwrap();
+
+        assert_eq!(
+            pairings,
+            vec![
+                rounds::Pairing { t1: 1, t2: 4 },
+                rounds::Pairing { t1: 2, t2: 5 },
+                rounds::Pairing { t1: 3, t2: 6 },
+            ]
+        );
+    }
+
+    #[test]
+    fn elimination_pairings_keep_their_original_slot_order() {
+        let pairings = sample_pairings();
+        let mut rng = ZeroRng;
+
+        let scheduled = arrange_pairings_for_slots(&pairings, 1002, &mut rng);
+
+        assert_eq!(scheduled, pairings);
     }
 }

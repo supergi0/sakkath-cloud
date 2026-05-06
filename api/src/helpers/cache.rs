@@ -10,7 +10,11 @@ const INTERMEDIATE_STANDINGS_PREFIX: &str = "standings_intermediate";
 const SCHEDULE_PREFIX: &str = "schedule";
 const ROUND_PREFIX: &str = "round_pairings";
 const PLAYER_STATS_KEY: &str = "player_stats";
+const TEAMS_LIST_KEY: &str = "teams_list";
+const SCHEDULE_GRID_KEY: &str = "schedule_grid";
+const SCHEDULE_TEAMS_KEY: &str = "schedule_teams";
 const DEFAULT_TTL: u64 = 300; // 5 minutes
+const SCHEDULE_GRID_TTL: u64 = 120; // 2 minutes (explicit invalidation covers most cases)
 
 // Initialize redis connection (call once at startup)
 pub async fn init_redis() -> bool {
@@ -231,6 +235,7 @@ pub async fn invalidate_division(division: i64) {
     del(&intermediate_standings_key(division)).await;
     del_pattern(&format!("{}:{}:*", SCHEDULE_PREFIX, division)).await;
     del_pattern(&format!("{}:{}:*", ROUND_PREFIX, division)).await;
+    del(SCHEDULE_GRID_KEY).await;
 }
 
 // Invalidate everything (nuclear option)
@@ -238,4 +243,38 @@ pub async fn invalidate_all() {
     for div in 0..=1 {
         invalidate_division(div).await;
     }
+    del(TEAMS_LIST_KEY).await;
+    del(SCHEDULE_TEAMS_KEY).await;
+}
+
+// --- Teams list cache ---
+pub async fn get_teams_list<T: DeserializeOwned>() -> Option<T> {
+    get(TEAMS_LIST_KEY).await
+}
+
+pub async fn set_teams_list<T: Serialize>(data: &T) {
+    set(TEAMS_LIST_KEY, data, DEFAULT_TTL).await;
+}
+
+pub async fn invalidate_teams_list() {
+    del(TEAMS_LIST_KEY).await;
+    del(SCHEDULE_TEAMS_KEY).await;
+}
+
+// --- Schedule grid cache ---
+pub async fn get_schedule_grid_cache<T: DeserializeOwned>() -> Option<T> {
+    get(SCHEDULE_GRID_KEY).await
+}
+
+pub async fn set_schedule_grid_cache<T: Serialize>(data: &T) {
+    set(SCHEDULE_GRID_KEY, data, SCHEDULE_GRID_TTL).await;
+}
+
+// --- Schedule teams cache ---
+pub async fn get_schedule_teams_cache<T: DeserializeOwned>() -> Option<T> {
+    get(SCHEDULE_TEAMS_KEY).await
+}
+
+pub async fn set_schedule_teams_cache<T: Serialize>(data: &T) {
+    set(SCHEDULE_TEAMS_KEY, data, DEFAULT_TTL).await;
 }

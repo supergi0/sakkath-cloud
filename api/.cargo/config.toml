@@ -1,0 +1,3 @@
+[alias]
+tournament = ["test", "--test", "tournament", "--"]
+iterations = ["test", "--test", "iterations", "--"]

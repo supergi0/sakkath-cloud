@@ -29,8 +29,17 @@ sakkath.db-shm
 sakkath.db-wal
 
 .env
+passwords.json
+passwords_prod.json
 sshkey
 sshkey.pub
 
 backups/
 logs/
+
+.venv
+
+analyze_cutline_opponents.py
+
+logs_v1
+logs_v2

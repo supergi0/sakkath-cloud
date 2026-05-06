@@ -13,6 +13,7 @@ fn routes_without_auth() -> Router<AppState> {
         .route("/health", get(health::health_check))
         .route("/auth/login", post(user::login))
         .route("/auth/verify", post(user::verify))
+        .route("/stream/live-updates", get(matches::stream_live_updates))
         .route("/stats", get(matches::get_stats))
 }
 
@@ -72,6 +73,10 @@ fn team_routes() -> Router<AppState> {
     Router::new()
         .route("/teams", get(team::get_teams))
         .route("/teams/:id", get(team::get_team_detail))
+        .route(
+            "/teams/:id/seed-timeline",
+            get(team::get_team_seed_timeline),
+        )
         .route("/teams/:id/players", get(team::get_team_players))
         .route("/teams/:id/matches", get(matches::get_team_matches))
         .route("/standings", get(team::get_standings))
@@ -101,6 +106,10 @@ fn super_routes() -> Router<AppState> {
         .route(
             "/super/reporting-rounds/:round_key",
             put(matches::update_reporting_round_setting),
+        )
+        .route(
+            "/super/matches/:id/score",
+            put(matches::update_incomplete_match_score),
         )
 }
 

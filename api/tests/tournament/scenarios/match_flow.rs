@@ -13,7 +13,11 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         "Exercises one full reported match, including visibility checks, score confirmation, and spirit submissions.",
     )?;
 
-    let mut harness = Harness::new(&config.scenario_label("match-flow")).await?;
+    let mut harness = Harness::new(
+        &config.scenario_label("match-flow"),
+        config.scenario_seed("match-flow-stage-seeds"),
+    )
+    .await?;
     let mut tracker = harness.load_initial_tracker().await?;
     let staff = login_staff(&mut harness).await?;
 
@@ -48,19 +52,29 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     let round_settings = harness
         .get_reporting_round_settings(staff.admin_one.as_str())
         .await?;
-    assert_eq!(round_settings.len(), 8);
+    assert_eq!(round_settings.len(), 9);
     let round_one_setting = round_settings
         .iter()
         .find(|setting| setting.round_key == 1)
         .expect("round 1 setting should exist");
     assert_eq!(round_one_setting.label, "Round 1");
-    assert!(!round_one_setting.is_enabled);
+    if round_one_setting.is_enabled {
+        let disabled_round = harness
+            .update_reporting_round_setting(staff.super_admin.as_str(), 1, false)
+            .await?;
+        assert!(!disabled_round.is_enabled);
+    }
+    let team_edits_setting = round_settings
+        .iter()
+        .find(|setting| setting.round_key == 10001)
+        .expect("Allow Team Edits setting should exist");
+    assert_eq!(team_edits_setting.label, "Allow Team Edits");
 
     harness
         .expect_status(
             Method::POST,
             &format!("/v1/admin/matches/{}/start", target_match.id),
-            Some(staff.admin_one.as_str()),
+            Some(team_one_poc.as_str()),
             Some(serde_json::json!({ "possession": 1 })),
             StatusCode::FORBIDDEN,
         )

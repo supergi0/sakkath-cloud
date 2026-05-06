@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp, ArrowLeftRight, ChevronLeft, RotateCcw } from "lucide-react";
 import { Text } from "../components/Text";
 import { useAuth } from "../auth-provider";
 import { apiUrl } from "../lib/api";
+import { getTeamAbbreviation } from "../lib/team-name";
 
 interface Team {
   id: number;
@@ -25,6 +26,8 @@ interface Player {
   phone: string | null;
   is_captain: boolean;
   is_spirit_captain: boolean;
+  is_manager: boolean;
+  is_coach: boolean;
 }
 
 interface PocMatch {
@@ -39,7 +42,9 @@ interface PocMatch {
   t2_spirit: number | null;
   time: string;
   possession: number | null;
+  match_type: number;
   field_name?: string | null;
+  is_complete: boolean;
 }
 
 interface WfdfSpirit {
@@ -50,6 +55,7 @@ interface WfdfSpirit {
   communication: number;
   mvp_player_id: number | null;
   msp_player_id: number | null;
+  notes: string;
 }
 
 interface OpponentPlayer {
@@ -70,6 +76,7 @@ interface SpiritScoreRow {
   total: number;
   mvp_player_id: number | null;
   msp_player_id: number | null;
+  notes: string | null;
   submitted_by_team_id: number;
 }
 
@@ -89,28 +96,87 @@ interface ReportingRoundSetting {
 
 // Per-match post-game form: opponent spirit + self spirit + score confirm
 interface PostMatchForm {
-  t1_score: number;
-  t2_score: number;
+  t1_score: string;
+  t2_score: string;
   opponentSpirit: WfdfSpirit;
   selfSpirit: WfdfSpirit;
 }
+
+interface MockMatchPlayer {
+  id: number;
+  name: string;
+  team_id: number;
+}
+
+interface MockMatchEvent {
+  id: number;
+  player_id: number | null;
+  player_name: string;
+  team_id: number;
+  event_type: number;
+  created_at: string;
+  action_group: number;
+}
+
+interface MockMatchState {
+  id: number;
+  t1_id: number;
+  t2_id: number;
+  t1_name: string;
+  t2_name: string;
+  t1_abbreviation: string | null;
+  t2_abbreviation: string | null;
+  t1_score: number;
+  t2_score: number;
+  possession: number | null;
+  initial_possession: 1 | 2 | null;
+  field_name: string;
+  time_label: string;
+  players: MockMatchPlayer[];
+  events: MockMatchEvent[];
+}
+
+type MockMode = 'idle' | 'choose-possession' | 'live' | 'post-match';
+type MockPanelKey = 't1' | 'log' | 't2';
+type MockConfirmAction = 'start' | 'save' | 'undo' | 'end';
 
 type FeedbackState = { type: 'error' | 'success'; message: string } | null;
 
 const MAX_TEAM_PLAYERS = 22;
 const TEAM_EDITS_ROUND_KEY = 10001;
 const TEAM_EDITS_LOCKED_MESSAGE = 'Team edits are currently locked by the super admin.';
-type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain';
-const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain'];
+const MOCK_MATCH_ID = -1;
+const MOCK_TEST_TEAM_ID = -99;
+const MOCK_EVENT_LABELS = ['Score', 'Assist', 'Block', 'Turnover'];
+const MOCK_EVENT_COLORS = ['text-green-500', 'text-sky-400', 'text-violet-400', 'text-amber-400'];
+const MOCK_TEST_PLAYERS = [
+  'Test One',
+  'Test Two',
+  'Test Three',
+  'Test Four',
+  'Test Five',
+  'Test Six',
+  'Test Seven',
+  'Test Eight',
+];
+type PlayerRole = 'Player' | 'Captain' | 'Spirit Captain' | 'Manager' | 'Coach';
+const PLAYER_ROLES: PlayerRole[] = ['Player', 'Captain', 'Spirit Captain', 'Manager', 'Coach'];
 
 function roleFromPlayer(p: Partial<Player>): PlayerRole {
   if (p.is_captain) return 'Captain';
   if (p.is_spirit_captain) return 'Spirit Captain';
+  if (p.is_manager) return 'Manager';
+  if (p.is_coach) return 'Coach';
   return 'Player';
 }
 
 function roleToFlags(role: PlayerRole) {
-  return { is_captain: role === 'Captain', is_spirit_captain: role === 'Spirit Captain' };
+  return {
+    is_captain: role === 'Captain',
+    is_spirit_captain: role === 'Spirit Captain',
+    is_manager: role === 'Manager',
+    is_coach: role === 'Coach',
+  };
 }
 
 function normalizeOptionalText(value?: string | null) {
@@ -126,7 +192,9 @@ function consumesRosterMove(original: Player, draft: Partial<Player>, draftRole:
     || normalizeOptionalText(original.email) !== normalizeOptionalText(draft.email)
     || normalizeOptionalText(original.phone) !== normalizeOptionalText(draft.phone)
     || original.is_captain !== nextFlags.is_captain
-    || original.is_spirit_captain !== nextFlags.is_spirit_captain;
+    || original.is_spirit_captain !== nextFlags.is_spirit_captain
+    || original.is_manager !== nextFlags.is_manager
+    || original.is_coach !== nextFlags.is_coach;
 }
 
 function roleBadge(role: PlayerRole) {
@@ -134,11 +202,130 @@ function roleBadge(role: PlayerRole) {
   const c: Record<string, string> = {
     'Captain': 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300',
     'Spirit Captain': 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300',
+    'Manager': 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300',
+    'Coach': 'bg-sky-100 dark:bg-sky-900/40 text-sky-700 dark:text-sky-300',
   };
   return <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${c[role] || ''}`}>{role}</span>;
 }
 
-const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null });
+const countCharacters = (value: string) => value.length;
+const sanitizeNumericInput = (value: string) => value.replace(/\D/g, '');
+
+function parseRequiredScore(value: string): number | null {
+  return /^\d+$/.test(value) ? Number(value) : null;
+}
+
+function getCompactTeamName(name: string, abbreviation?: string | null) {
+  if (name.length > 6) {
+    return getTeamAbbreviation(name, abbreviation, 6);
+  }
+
+  return name;
+}
+
+function getHeaderTeamName(name: string, abbreviation?: string | null) {
+  if (name.length > 16) {
+    return getTeamAbbreviation(name, abbreviation, 6);
+  }
+
+  return name;
+}
+
+const defaultSpirit = (): WfdfSpirit => ({ rules_knowledge: 2, fouls_contact: 2, fair_mindedness: 2, positive_attitude: 2, communication: 2, mvp_player_id: null, msp_player_id: null, notes: '' });
+
+function buildSpiritFormFromRow(row?: SpiritScoreRow | null): WfdfSpirit {
+  if (!row) {
+    return defaultSpirit();
+  }
+
+  return {
+    rules_knowledge: row.rules_knowledge,
+    fouls_contact: row.fouls_contact,
+    fair_mindedness: row.fair_mindedness,
+    positive_attitude: row.positive_attitude,
+    communication: row.communication,
+    mvp_player_id: row.mvp_player_id,
+    msp_player_id: row.msp_player_id,
+    notes: row.notes ?? '',
+  };
+}
+
+function buildPostMatchForm(
+  match: PocMatch,
+  ownConfirm?: ScoreConfirmRow,
+  ownOpponentSpirit?: SpiritScoreRow,
+  ownSelfSpirit?: SpiritScoreRow,
+): PostMatchForm {
+  return {
+    t1_score: String(ownConfirm?.t1_score ?? match.t1_score),
+    t2_score: String(ownConfirm?.t2_score ?? match.t2_score),
+    opponentSpirit: buildSpiritFormFromRow(ownOpponentSpirit),
+    selfSpirit: buildSpiritFormFromRow(ownSelfSpirit),
+  };
+}
+
+function buildMockOpponentPlayers(): MockMatchPlayer[] {
+  return MOCK_TEST_PLAYERS.map((name, index) => ({
+    id: 10000 + index,
+    name,
+    team_id: MOCK_TEST_TEAM_ID,
+  }));
+}
+
+function buildInitialMockMatch(team: Team, players: Player[]): MockMatchState {
+  const teamPlayers = players.map((player) => ({ id: player.id, name: player.name, team_id: team.id }));
+  return {
+    id: MOCK_MATCH_ID,
+    t1_id: team.id,
+    t2_id: MOCK_TEST_TEAM_ID,
+    t1_name: team.name,
+    t2_name: 'Test Team',
+    t1_abbreviation: team.abbreviation,
+    t2_abbreviation: 'TEST',
+    t1_score: 0,
+    t2_score: 0,
+    possession: null,
+    initial_possession: null,
+    field_name: 'Mock Field',
+    time_label: 'Mock Match',
+    players: [...teamPlayers, ...buildMockOpponentPlayers()],
+    events: [],
+  };
+}
+
+function recomputeMockMatchState(match: MockMatchState, events: MockMatchEvent[]): Pick<MockMatchState, 't1_score' | 't2_score' | 'possession'> {
+  let t1Score = 0;
+  let t2Score = 0;
+  let possession = match.initial_possession;
+
+  for (const event of events) {
+    if (possession === null) {
+      break;
+    }
+
+    if (event.event_type === 0) {
+      if (possession === 1) {
+        t1Score += 1;
+      } else {
+        t2Score += 1;
+      }
+      possession = possession === 1 ? 2 : 1;
+    } else if (event.event_type === 2 || event.event_type === 3) {
+      possession = possession === 1 ? 2 : 1;
+    }
+  }
+
+  return { t1_score: t1Score, t2_score: t2Score, possession };
+}
+
+function formatMockLogTime(timestamp: string) {
+  return new Date(timestamp).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
 
 function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string; message: string; onConfirm: () => void; onCancel: () => void }) {
   return (
@@ -158,15 +345,17 @@ function ConfirmDialog({ title, message, onConfirm, onCancel }: { title: string;
   );
 }
 
-function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp = true }: {
+function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp = true, showNotes = false }: {
   label: string;
   form: WfdfSpirit;
   onChange: (f: WfdfSpirit) => void;
   playerList: { id: number; name: string }[];
   playerLabel: string;
   showMvpMsp?: boolean;
+  showNotes?: boolean;
 }) {
   const total = form.rules_knowledge + form.fouls_contact + form.fair_mindedness + form.positive_attitude + form.communication;
+  const noteCharacterCount = countCharacters(form.notes);
   const categories = [
     { key: 'rules_knowledge' as const, label: 'Rules Knowledge & Use' },
     { key: 'fouls_contact' as const, label: 'Fouls & Body Contact' },
@@ -219,6 +408,21 @@ function SpiritForm({ label, form, onChange, playerList, playerLabel, showMvpMsp
           </div>
         </>
       )}
+      {showNotes && (
+        <div>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <Text variant="secondary" className="text-xs">Notes ({playerLabel})</Text>
+            <Text variant="secondary" className={`text-[11px] ${noteCharacterCount > 250 ? 'text-red-600 dark:text-red-400' : ''}`}>{noteCharacterCount}/250 characters</Text>
+          </div>
+          <textarea
+            value={form.notes}
+            onChange={e => onChange({ ...form, notes: e.target.value })}
+            rows={4}
+            placeholder="Optional notes for the other team"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -236,7 +440,7 @@ export default function MyTeamPage() {
   const [editForm, setEditForm] = useState<Partial<Player>>({});
   const [editRole, setEditRole] = useState<PlayerRole>('Player');
   const [isAdding, setIsAdding] = useState(false);
-  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+  const [newPlayer, setNewPlayer] = useState<Partial<Player>>({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false });
   const [newRole, setNewRole] = useState<PlayerRole>('Player');
   const [isEditingLogo, setIsEditingLogo] = useState(false);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
@@ -247,8 +451,23 @@ export default function MyTeamPage() {
   const [confirmedMatches, setConfirmedMatches] = useState<Set<number>>(new Set());
   const [submittedSpirits, setSubmittedSpirits] = useState<Set<number>>(new Set());
   const [submittedSelfSpirits, setSubmittedSelfSpirits] = useState<Set<number>>(new Set());
+  const [otherTeamConfirmedMatches, setOtherTeamConfirmedMatches] = useState<Set<number>>(new Set());
   const [otherTeamSpirits, setOtherTeamSpirits] = useState<Set<number>>(new Set());
+  const [otherTeamSubmittedSelfSpirits, setOtherTeamSubmittedSelfSpirits] = useState<Set<number>>(new Set());
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
+  const [mockMode, setMockMode] = useState<MockMode>('idle');
+  const [mockMatch, setMockMatch] = useState<MockMatchState | null>(null);
+  const [mockPanel, setMockPanel] = useState<MockPanelKey>('log');
+  const [mockPostForm, setMockPostForm] = useState<PostMatchForm | null>(null);
+  const [mockConfirmAction, setMockConfirmAction] = useState<MockConfirmAction | null>(null);
+  const [mockErrorMessage, setMockErrorMessage] = useState<string | null>(null);
+  const [pendingMockPossession, setPendingMockPossession] = useState<1 | 2 | null>(null);
+  const [mockPendingScorerId, setMockPendingScorerId] = useState<number | null>(null);
+  const [mockPendingAssisterId, setMockPendingAssisterId] = useState<number | null>(null);
+  const [mockPendingBlockId, setMockPendingBlockId] = useState<number | null>(null);
+  const [mockPendingTurnover, setMockPendingTurnover] = useState(false);
+  const [mockPendingTurnoverId, setMockPendingTurnoverId] = useState<number | null>(null);
+  const [mockPendingSwitchOnly, setMockPendingSwitchOnly] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{ title: string; message: string; onConfirm: () => void } | null>(null);
   const [feedback, setFeedback] = useState<FeedbackState>(null);
   const [teamEditsEnabled, setTeamEditsEnabled] = useState(true);
@@ -257,6 +476,211 @@ export default function MyTeamPage() {
   const rosterMovesExhausted = !!team && team.roster_moves_remaining <= 0;
   const saveConsumesMove = editingPlayer ? consumesRosterMove(editingPlayer, editForm, editRole) : false;
   const teamEditsLocked = !teamEditsEnabled;
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  };
+
+  const resetMockComposer = () => {
+    setMockPendingScorerId(null);
+    setMockPendingAssisterId(null);
+    setMockPendingBlockId(null);
+    setMockPendingTurnover(false);
+    setMockPendingTurnoverId(null);
+    setMockPendingSwitchOnly(false);
+    setMockErrorMessage(null);
+  };
+
+  const resetMockState = () => {
+    setMockMode('idle');
+    setMockMatch(null);
+    setMockPostForm(null);
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const ensureMockMatch = () => {
+    if (mockMatch) {
+      return mockMatch;
+    }
+    if (!team) {
+      return null;
+    }
+    return buildInitialMockMatch(team, players);
+  };
+
+  const requestMockStart = () => {
+    if (!team) {
+      return;
+    }
+    scrollToTop();
+    setMockMatch(buildInitialMockMatch(team, players));
+    setMockMode('choose-possession');
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const startMockReporting = (possession: 1 | 2) => {
+    const nextMatch = ensureMockMatch();
+    if (!nextMatch) {
+      return;
+    }
+    setMockMatch({ ...nextMatch, possession, initial_possession: possession, t1_score: 0, t2_score: 0, events: [] });
+    setMockPanel(possession === 1 ? 't1' : 't2');
+    setMockMode('live');
+    setMockConfirmAction(null);
+    setPendingMockPossession(null);
+    resetMockComposer();
+  };
+
+  const saveMockAction = () => {
+    const currentMatch = mockMatch;
+    if (!currentMatch || mockPanel === 'log' || currentMatch.possession === null) return;
+
+    const isOffenseView =
+      (mockPanel === 't1' && currentMatch.possession === 1) ||
+      (mockPanel === 't2' && currentMatch.possession === 2);
+
+    const now = new Date().toISOString();
+    const actionGroup = currentMatch.events.length === 0
+      ? 1
+      : Math.max(...currentMatch.events.map((event) => event.action_group)) + 1;
+    let nextEvents = currentMatch.events.slice();
+    let nextEventId = currentMatch.events.length === 0
+      ? 1
+      : Math.max(...currentMatch.events.map((event) => event.id)) + 1;
+    const eventTeamId = currentMatch.possession === 1 ? currentMatch.t1_id : currentMatch.t2_id;
+    const defenseTeamId = currentMatch.possession === 1 ? currentMatch.t2_id : currentMatch.t1_id;
+    const viewedPlayers = currentMatch.players.filter((player) => player.team_id === (mockPanel === 't1' ? currentMatch.t1_id : currentMatch.t2_id));
+
+    if (mockPendingSwitchOnly) {
+      setMockMatch({
+        ...currentMatch,
+        possession: currentMatch.possession === 1 ? 2 : 1,
+      });
+      resetMockComposer();
+      return;
+    }
+
+    if (isOffenseView && mockPendingTurnover) {
+      nextEvents.push({
+        id: nextEventId,
+        player_id: null,
+        player_name: '',
+        team_id: eventTeamId,
+        event_type: 3,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else if (isOffenseView && mockPendingTurnoverId !== null) {
+      const player = viewedPlayers.find((entry) => entry.id === mockPendingTurnoverId);
+      if (!player) return;
+      nextEvents.push({
+        id: nextEventId,
+        player_id: player.id,
+        player_name: player.name,
+        team_id: eventTeamId,
+        event_type: 3,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else if (isOffenseView && mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId !== mockPendingAssisterId) {
+      const scorer = viewedPlayers.find((entry) => entry.id === mockPendingScorerId);
+      const assister = viewedPlayers.find((entry) => entry.id === mockPendingAssisterId);
+      if (!scorer || !assister) return;
+      nextEvents.push(
+        {
+          id: nextEventId,
+          player_id: assister.id,
+          player_name: assister.name,
+          team_id: eventTeamId,
+          event_type: 1,
+          created_at: now,
+          action_group: actionGroup,
+        },
+        {
+          id: nextEventId + 1,
+          player_id: scorer.id,
+          player_name: scorer.name,
+          team_id: eventTeamId,
+          event_type: 0,
+          created_at: now,
+          action_group: actionGroup,
+        },
+      );
+    } else if (!isOffenseView && mockPendingBlockId !== null) {
+      const blocker = viewedPlayers.find((entry) => entry.id === mockPendingBlockId);
+      if (!blocker) return;
+      nextEvents.push({
+        id: nextEventId,
+        player_id: blocker.id,
+        player_name: blocker.name,
+        team_id: defenseTeamId,
+        event_type: 2,
+        created_at: now,
+        action_group: actionGroup,
+      });
+    } else {
+      return;
+    }
+
+    const recomputed = recomputeMockMatchState(currentMatch, nextEvents);
+    setMockMatch({ ...currentMatch, ...recomputed, events: nextEvents });
+    resetMockComposer();
+  };
+
+  const undoMockAction = () => {
+    if (!mockMatch || mockMatch.events.length === 0) return;
+    const lastGroup = Math.max(...mockMatch.events.map((event) => event.action_group));
+    const nextEvents = mockMatch.events.filter((event) => event.action_group !== lastGroup);
+    const recomputed = recomputeMockMatchState(mockMatch, nextEvents);
+    setMockMatch({ ...mockMatch, ...recomputed, events: nextEvents });
+    resetMockComposer();
+  };
+
+  const endMockMatch = () => {
+    if (!mockMatch) return;
+    setMockMatch({ ...mockMatch, possession: 3 });
+    setMockPostForm({
+      t1_score: String(mockMatch.t1_score),
+      t2_score: String(mockMatch.t2_score),
+      opponentSpirit: defaultSpirit(),
+      selfSpirit: defaultSpirit(),
+    });
+    setMockMode('post-match');
+    setMockConfirmAction(null);
+    resetMockComposer();
+  };
+
+  const handleMockConfirm = () => {
+    if (mockConfirmAction === 'start' && pendingMockPossession) {
+      startMockReporting(pendingMockPossession);
+    } else if (mockConfirmAction === 'save') {
+      saveMockAction();
+    } else if (mockConfirmAction === 'undo') {
+      undoMockAction();
+    } else if (mockConfirmAction === 'end') {
+      endMockMatch();
+    }
+    setMockConfirmAction(null);
+  };
+
+  const submitMockPostMatch = () => {
+    if (!mockPostForm) return;
+    const mockT1Score = parseRequiredScore(mockPostForm.t1_score);
+    const mockT2Score = parseRequiredScore(mockPostForm.t2_score);
+    if (mockT1Score === null || mockT2Score === null) {
+      setMockErrorMessage('Please enter a valid score before submitting.');
+      return;
+    }
+    if (countCharacters(mockPostForm.opponentSpirit.notes) > 250) {
+      setMockErrorMessage('Opponent notes must be 250 characters or fewer.');
+      return;
+    }
+    resetMockState();
+  };
 
   useEffect(() => {
     if (isLoading) return;
@@ -321,7 +745,7 @@ export default function MyTeamPage() {
         setTeamEditsEnabled(false);
         setFeedback({ type: 'error', message: TEAM_EDITS_LOCKED_MESSAGE });
       } else {
-        setFeedback({ type: 'error', message: 'Unable to save the team code right now.' });
+        setFeedback({ type: 'error', message: 'Unable to save the team short name right now.' });
       }
     } catch (err) { console.error(err); }
     finally { setSavingTeamAbbreviation(false); }
@@ -428,7 +852,7 @@ export default function MyTeamPage() {
           if (res.ok) {
             const data = await res.json();
             setPlayers([...players, { id: data.id, ...payload } as Player]);
-            setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false });
+            setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false });
             setNewRole('Player'); setIsAdding(false);
           } else if (res.status === 403) {
             setTeamEditsEnabled(false);
@@ -462,8 +886,8 @@ export default function MyTeamPage() {
       setPostForms(prev => ({
         ...prev,
         [matchId]: {
-          t1_score: match.t1_score,
-          t2_score: match.t2_score,
+          t1_score: String(match.t1_score),
+          t2_score: String(match.t2_score),
           opponentSpirit: defaultSpirit(),
           selfSpirit: defaultSpirit(),
         },
@@ -479,82 +903,168 @@ export default function MyTeamPage() {
     if (!m) return;
     const isT1 = m.t1_id === team.id;
     const opponentId = isT1 ? m.t2_id : m.t1_id;
+    const submittedT1Score = parseRequiredScore(form.t1_score);
+    const submittedT2Score = parseRequiredScore(form.t2_score);
+    if (submittedT1Score === null || submittedT2Score === null) {
+      setFeedback({ type: 'error', message: 'Please enter both scores using digits only.' });
+      return;
+    }
+    if (m.match_type >= 1000 && submittedT1Score === submittedT2Score) {
+      setFeedback({
+        type: 'error',
+        message: m.match_type === 1001
+          ? 'Playoffs cannot have an equal score.'
+          : 'Finals cannot have an equal score.',
+      });
+      return;
+    }
+    if (countCharacters(form.opponentSpirit.notes) > 250) {
+      setFeedback({ type: 'error', message: 'Opponent notes must be 250 characters or fewer.' });
+      return;
+    }
+
+    const otherSideAlreadyDone = otherTeamConfirmedMatches.has(matchId)
+      && otherTeamSpirits.has(matchId)
+      && otherTeamSubmittedSelfSpirits.has(matchId);
 
     try {
       // 1. Confirm score
-      if (!confirmedMatches.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/confirm-score`), {
-          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ t1_score: form.t1_score, t2_score: form.t2_score }),
-        });
-        if (res.ok) setConfirmedMatches(prev => new Set([...prev, matchId]));
-        else throw new Error('confirm-score');
-      }
+      const confirmResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/confirm-score`), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ t1_score: submittedT1Score, t2_score: submittedT2Score }),
+      });
+      if (!confirmResponse.ok) throw new Error('confirm-score');
+      setConfirmedMatches(prev => new Set([...prev, matchId]));
 
       // 2. Submit opponent spirit
-      if (!submittedSpirits.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
-        });
-        if (res.ok) setSubmittedSpirits(prev => new Set([...prev, matchId]));
-        else throw new Error('opponent-spirit');
-      }
+      const opponentSpiritResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ...form.opponentSpirit, team_id: opponentId }),
+      });
+      if (!opponentSpiritResponse.ok) throw new Error('opponent-spirit');
+      setSubmittedSpirits(prev => new Set([...prev, matchId]));
 
       // 3. Submit self spirit (no MVP/MSP for self-rating)
-      if (!submittedSelfSpirits.has(matchId)) {
-        const res = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body: JSON.stringify({
-            rules_knowledge: form.selfSpirit.rules_knowledge,
-            fouls_contact: form.selfSpirit.fouls_contact,
-            fair_mindedness: form.selfSpirit.fair_mindedness,
-            positive_attitude: form.selfSpirit.positive_attitude,
-            communication: form.selfSpirit.communication,
-            mvp_player_id: null,
-            msp_player_id: null,
-            team_id: team.id,
-          }),
-        });
-        if (res.ok) setSubmittedSelfSpirits(prev => new Set([...prev, matchId]));
-        else throw new Error('self-spirit');
-      }
+      const selfSpiritResponse = await fetch(apiUrl(`/v1/poc/matches/${matchId}/spirit-wfdf`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          rules_knowledge: form.selfSpirit.rules_knowledge,
+          fouls_contact: form.selfSpirit.fouls_contact,
+          fair_mindedness: form.selfSpirit.fair_mindedness,
+          positive_attitude: form.selfSpirit.positive_attitude,
+          communication: form.selfSpirit.communication,
+          mvp_player_id: null,
+          msp_player_id: null,
+          team_id: team.id,
+        }),
+      });
+      if (!selfSpiritResponse.ok) throw new Error('self-spirit');
+      const selfSpiritData = await selfSpiritResponse.json();
+      setSubmittedSelfSpirits(prev => new Set([...prev, matchId]));
 
-      setExpandedMatch(null);
+      setMatches(prev => prev.map(match => (
+        match.id === matchId
+          ? { ...match, t1_score: submittedT1Score, t2_score: submittedT2Score, is_complete: Boolean(selfSpiritData.is_complete) }
+          : match
+      )));
+      await fetchExistingSpirits();
+
+      if (selfSpiritData.is_complete) {
+        setExpandedMatch(null);
+        setFeedback({ type: 'success', message: 'Post-match finalized.' });
+      } else if (otherSideAlreadyDone) {
+        setFeedback({ type: 'error', message: 'Saved, but the score still disagrees with the other team. Update it to match before the post-match can complete.' });
+      } else {
+        setExpandedMatch(null);
+        setFeedback({ type: 'success', message: 'Post-match submission saved.' });
+      }
     } catch (err) {
       console.error(err);
-      setFeedback({ type: 'error', message: 'Unable to complete the full post-match submission right now.' });
+      setFeedback({ type: 'error', message: 'Unable to save the post-match submission right now.' });
     }
   };
 
   const fetchExistingSpirits = async () => {
     if (!token || !team) return;
+    const nextSubmittedSpirits = new Set<number>();
+    const nextSubmittedSelfSpirits = new Set<number>();
+    const nextOtherTeamConfirmedMatches = new Set<number>();
+    const nextOtherTeamSpirits = new Set<number>();
+    const nextOtherTeamSubmittedSelfSpirits = new Set<number>();
+    const nextConfirmedMatches = new Set<number>();
+    const nextPostForms: Record<number, PostMatchForm> = {};
+
     for (const m of matches.filter(m => m.possession !== null && m.possession >= 3)) {
       try {
         const [spiritRes, confirmRes] = await Promise.all([
           fetch(apiUrl(`/v1/matches/${m.id}/spirits`)),
           fetch(apiUrl(`/v1/matches/${m.id}/score-confirmations`)),
         ]);
+        const otherTeamId = m.t1_id === team.id ? m.t2_id : m.t1_id;
+        let ownOpponentSpiritRow: SpiritScoreRow | undefined;
+        let ownSelfSpiritRow: SpiritScoreRow | undefined;
+        let ownConfirm: ScoreConfirmRow | undefined;
         if (spiritRes.ok) {
           const spirits: SpiritScoreRow[] = await spiritRes.json();
-          const otherTeamId = m.t1_id === team.id ? m.t2_id : m.t1_id;
-          // Our submission rating the opponent
-          if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === otherTeamId))
-            setSubmittedSpirits(prev => new Set([...prev, m.id]));
-          // Our submission rating ourselves
-          if (spirits.some(s => s.submitted_by_team_id === team.id && s.team_id === team.id))
-            setSubmittedSelfSpirits(prev => new Set([...prev, m.id]));
-          // Opponent's submission rating us
-          if (spirits.some(s => s.submitted_by_team_id === otherTeamId))
-            setOtherTeamSpirits(prev => new Set([...prev, m.id]));
+          ownOpponentSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === team.id && spirit.team_id === otherTeamId,
+          );
+          ownSelfSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === team.id && spirit.team_id === team.id,
+          );
+          const otherOpponentSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === otherTeamId && spirit.team_id === team.id,
+          );
+          const otherSelfSpiritRow = spirits.find(
+            spirit => spirit.submitted_by_team_id === otherTeamId && spirit.team_id === otherTeamId,
+          );
+
+          if (ownOpponentSpiritRow) {
+            nextSubmittedSpirits.add(m.id);
+          }
+          if (ownSelfSpiritRow) {
+            nextSubmittedSelfSpirits.add(m.id);
+          }
+          if (otherOpponentSpiritRow) {
+            nextOtherTeamSpirits.add(m.id);
+          }
+          if (otherSelfSpiritRow) {
+            nextOtherTeamSubmittedSelfSpirits.add(m.id);
+          }
         }
         if (confirmRes.ok) {
           const confirms: ScoreConfirmRow[] = await confirmRes.json();
-          if (confirms.some(c => c.team_id === team.id))
-            setConfirmedMatches(prev => new Set([...prev, m.id]));
+          ownConfirm = confirms.find(confirm => confirm.team_id === team.id);
+          const otherConfirm = confirms.find(confirm => confirm.team_id === otherTeamId);
+
+          if (ownConfirm) {
+            nextConfirmedMatches.add(m.id);
+          }
+          if (otherConfirm) {
+            nextOtherTeamConfirmedMatches.add(m.id);
+          }
         }
+
+        nextPostForms[m.id] = buildPostMatchForm(m, ownConfirm, ownOpponentSpiritRow, ownSelfSpiritRow);
       } catch {}
     }
+
+    setSubmittedSpirits(nextSubmittedSpirits);
+    setSubmittedSelfSpirits(nextSubmittedSelfSpirits);
+    setOtherTeamConfirmedMatches(nextOtherTeamConfirmedMatches);
+    setOtherTeamSpirits(nextOtherTeamSpirits);
+    setOtherTeamSubmittedSelfSpirits(nextOtherTeamSubmittedSelfSpirits);
+    setConfirmedMatches(nextConfirmedMatches);
+    setPostForms(prev => {
+      const merged = { ...prev };
+      for (const [matchId, form] of Object.entries(nextPostForms)) {
+        const numericMatchId = Number(matchId);
+        if (!prev[numericMatchId] || expandedMatch !== numericMatchId) {
+          merged[numericMatchId] = form;
+        }
+      }
+      return merged;
+    });
   };
 
   useEffect(() => {
@@ -628,6 +1138,467 @@ export default function MyTeamPage() {
   if (isLoading || loading) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">Loading...</Text></div></div>;
   if (!team) return <div className="py-4 px-3 min-h-screen"><div className="max-w-lg mx-auto"><Text variant="primary">You are not assigned to a team.</Text></div></div>;
 
+  if (mockMode === 'choose-possession' && mockMatch) {
+    return (
+      <div className="min-h-screen px-4 py-4 md:px-0">
+        <div className="mx-auto max-w-lg">
+          {mockConfirmAction === 'start' && pendingMockPossession && (
+            <ConfirmDialog
+              title="Start Match"
+              message={`Set ${pendingMockPossession === 1 ? mockMatch.t1_name : mockMatch.t2_name} as starting on offense? This can be undone later.`}
+              onConfirm={handleMockConfirm}
+              onCancel={() => { setMockConfirmAction(null); setPendingMockPossession(null); }}
+            />
+          )}
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6">
+            <button
+              onClick={resetMockState}
+              className="mb-4 inline-flex items-center gap-1.5 text-sm text-gray-600 dark:text-slate-300 hover:text-gray-900 dark:hover:text-white"
+            >
+              <ChevronLeft className="h-4 w-4" /> Back
+            </button>
+            <div className="text-lg font-semibold text-gray-900 dark:text-white">{mockMatch.t1_name} vs {mockMatch.t2_name}</div>
+            <div className="text-sm text-gray-500 dark:text-slate-400 mt-1">{mockMatch.time_label} &bull; {mockMatch.field_name}</div>
+            <div className="mt-6 text-sm font-medium text-gray-700 dark:text-slate-300">Who starts on offense?</div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <button
+                onClick={() => { setPendingMockPossession(1); setMockConfirmAction('start'); }}
+                className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10"
+              >
+                {mockMatch.t1_name}
+              </button>
+              <button
+                onClick={() => { setPendingMockPossession(2); setMockConfirmAction('start'); }}
+                className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-4 text-sm font-semibold text-gray-900 dark:text-white transition hover:border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-400/10"
+              >
+                {mockMatch.t2_name}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (mockMode === 'live' && mockMatch) {
+    const t1Abbr = getTeamAbbreviation(mockMatch.t1_name, mockMatch.t1_abbreviation, 12);
+    const t2Abbr = getTeamAbbreviation(mockMatch.t2_name, mockMatch.t2_abbreviation, 12);
+    const displayT1Name = getHeaderTeamName(mockMatch.t1_name, mockMatch.t1_abbreviation);
+    const displayT2Name = getHeaderTeamName(mockMatch.t2_name, mockMatch.t2_abbreviation);
+    const viewedTeamId = mockPanel === 't1' ? mockMatch.t1_id : mockMatch.t2_id;
+    const viewedPlayers = mockMatch.players
+      .filter((player) => player.team_id === viewedTeamId)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const isOffenseView =
+      (mockPanel === 't1' && mockMatch.possession === 1) ||
+      (mockPanel === 't2' && mockMatch.possession === 2);
+    const saveEnabled = mockPanel !== 'log' && (
+      mockPendingSwitchOnly ||
+      (isOffenseView && mockPendingTurnover) ||
+      (isOffenseView && mockPendingTurnoverId !== null) ||
+      (isOffenseView && mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId !== mockPendingAssisterId) ||
+      (!isOffenseView && mockPendingBlockId !== null)
+    );
+
+    const saveLabel = mockPendingSwitchOnly
+      ? 'Switch'
+      : (mockPendingTurnover || mockPendingTurnoverId !== null)
+        ? 'Save Turnover'
+        : isOffenseView
+          ? 'Save Score'
+          : 'Save Block';
+
+    return (
+      <div className="min-h-screen px-3 py-3 md:px-0">
+        <div className="mx-auto max-w-2xl space-y-3">
+          {mockConfirmAction && (
+            <ConfirmDialog
+              title={mockConfirmAction === 'end' ? 'End Match' : mockConfirmAction === 'undo' ? 'Undo Event' : 'Save Event'}
+              message={
+                mockConfirmAction === 'end'
+                  ? 'Are you sure you want to end this match? This cannot be easily reversed.'
+                  : mockConfirmAction === 'undo'
+                    ? 'Undo the last recorded event?'
+                    : 'Save this event to the match log?'
+              }
+              onConfirm={handleMockConfirm}
+              onCancel={() => setMockConfirmAction(null)}
+            />
+          )}
+
+          <div className="flex items-center justify-between">
+            <button
+              onClick={resetMockState}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-50 dark:hover:bg-slate-800"
+            >
+              <ChevronLeft className="h-4 w-4" /> Back
+            </button>
+            <div className="flex-1 px-3 text-center text-sm font-medium text-gray-500 dark:text-slate-400">Mock Match</div>
+            <button
+              onClick={() => setMockConfirmAction('end')}
+              className="rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-red-500"
+            >
+              End Match
+            </button>
+          </div>
+
+          {mockErrorMessage && (
+            <div className="rounded-xl border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-2">
+              <Text className="text-sm text-red-700 dark:text-red-200">{mockErrorMessage}</Text>
+            </div>
+          )}
+
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+              <button
+                onClick={() => { setMockPanel('t1'); resetMockComposer(); }}
+                className={`rounded-xl border p-3 text-left transition ${
+                  mockPanel === 't1' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+                }`}
+              >
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={mockMatch.t1_name}>{displayT1Name}</div>
+                <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${mockMatch.possession === 1 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {mockMatch.possession === 1 ? 'OFFENSE' : 'DEFENSE'}
+                </div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{mockMatch.t1_score}</div>
+              </button>
+              <div className="text-lg text-gray-400 dark:text-slate-500 font-light">-</div>
+              <button
+                onClick={() => { setMockPanel('t2'); resetMockComposer(); }}
+                className={`rounded-xl border p-3 text-right transition ${
+                  mockPanel === 't2' ? 'border-amber-400 bg-amber-50 dark:bg-amber-400/10' : 'border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800'
+                }`}
+              >
+                <div className="text-sm font-semibold text-gray-900 dark:text-white truncate" title={mockMatch.t2_name}>{displayT2Name}</div>
+                <div className={`text-[10px] font-bold tracking-widest mt-0.5 ${mockMatch.possession === 2 ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'}`}>
+                  {mockMatch.possession === 2 ? 'OFFENSE' : 'DEFENSE'}
+                </div>
+                <div className="text-4xl font-black text-gray-900 dark:text-white mt-2">{mockMatch.t2_score}</div>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-900 p-1">
+            {([
+              { key: 't1' as MockPanelKey, label: t1Abbr },
+              { key: 'log' as MockPanelKey, label: 'Log' },
+              { key: 't2' as MockPanelKey, label: t2Abbr },
+            ]).map(item => (
+              <button
+                key={item.key}
+                onClick={() => { setMockPanel(item.key); resetMockComposer(); }}
+                className={`truncate rounded-full px-2 py-2 text-sm font-semibold transition ${
+                  mockPanel === item.key
+                    ? 'bg-amber-400 text-gray-900 dark:text-slate-950'
+                    : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-800'
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          {mockPanel === 'log' ? (
+            <div className="space-y-1.5">
+              {mockMatch.events.length === 0 && (
+                <Text className="text-sm text-gray-400 dark:text-slate-500 px-1">No events yet</Text>
+              )}
+              {mockMatch.events.slice().reverse().map(event => {
+                const isT1 = event.team_id === mockMatch.t1_id;
+                const playerName = event.player_name || (isT1 ? mockMatch.t1_name : mockMatch.t2_name);
+                return (
+                  <div key={event.id} className={`flex ${isT1 ? 'justify-start' : 'justify-end'}`}>
+                    <div className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 ${
+                      isT1 ? 'bg-gray-100 dark:bg-slate-800/80' : 'bg-sky-50 dark:bg-sky-500/10'
+                    }`}>
+                      <span className={`text-xs font-bold ${MOCK_EVENT_COLORS[event.event_type]}`}>{MOCK_EVENT_LABELS[event.event_type]}</span>
+                      <span className="text-sm text-gray-900 dark:text-white">{playerName}</span>
+                      <span className="text-[10px] text-gray-400 dark:text-slate-500">{formatMockLogTime(event.created_at)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : isOffenseView ? (
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
+                <button
+                  onClick={() => setMockConfirmAction('undo')}
+                  disabled={mockMatch.events.length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
+                >
+                  <RotateCcw className="h-4 w-4" /> Undo
+                </button>
+                <button
+                  onClick={() => setMockConfirmAction('save')}
+                  disabled={!saveEnabled}
+                  className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-bold transition ${
+                    saveEnabled ? 'bg-amber-400 text-gray-900 hover:bg-amber-300' : 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                  }`}
+                >
+                  <Save className="h-4 w-4" /> {saveLabel}
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_48px_48px_48px] border-b border-gray-200 dark:border-slate-700 px-4 py-2 text-[10px] font-bold tracking-wider text-gray-500 dark:text-slate-500 uppercase">
+                <div>Player</div>
+                <div className="text-center">Score</div>
+                <div className="text-center">Assist</div>
+                <div className="text-center">Turn</div>
+              </div>
+              {viewedPlayers.map(player => {
+                const isScorer = mockPendingScorerId === player.id;
+                const isAssister = mockPendingAssisterId === player.id;
+                const isTurnover = mockPendingTurnoverId === player.id;
+                return (
+                  <div
+                    key={player.id}
+                    className={`grid grid-cols-[1fr_48px_48px_48px] items-center border-b border-gray-100 dark:border-slate-800 px-4 py-2.5 ${
+                      isScorer || isAssister || isTurnover ? 'bg-amber-50 dark:bg-amber-400/5' : ''
+                    }`}
+                  >
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
+                    <button
+                      onClick={() => {
+                        setMockPendingScorerId(prev => prev === player.id ? null : player.id);
+                        setMockPendingTurnover(false);
+                        setMockPendingTurnoverId(null);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isScorer ? 'bg-green-500 text-white ring-2 ring-green-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-green-100 dark:hover:bg-green-900/30'
+                      }`}
+                    >
+                      {isScorer ? 'S' : ''}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMockPendingAssisterId(prev => prev === player.id ? null : player.id);
+                        setMockPendingTurnover(false);
+                        setMockPendingTurnoverId(null);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isAssister ? 'bg-sky-500 text-white ring-2 ring-sky-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-sky-100 dark:hover:bg-sky-900/30'
+                      }`}
+                    >
+                      {isAssister ? 'A' : ''}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMockPendingTurnoverId(prev => prev === player.id ? null : player.id);
+                        setMockPendingScorerId(null);
+                        setMockPendingAssisterId(null);
+                        setMockPendingTurnover(false);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isTurnover ? 'bg-amber-500 text-white ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-amber-100 dark:hover:bg-amber-900/30'
+                      }`}
+                    >
+                      {isTurnover ? 'T' : ''}
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(false);
+                  setMockPendingTurnover(prev => !prev);
+                }}
+                className={`w-full grid grid-cols-[1fr_48px_48px_48px] items-center px-4 py-2.5 transition text-left border-b border-gray-100 dark:border-slate-800 ${
+                  mockPendingTurnover ? 'bg-amber-100 dark:bg-amber-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingTurnover ? 'text-amber-700 dark:text-amber-300' : 'text-gray-500 dark:text-slate-400'}`}>Turnover (no player)</span>
+                <span /><span />
+                <span className={`mx-auto h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                  mockPendingTurnover ? 'bg-amber-400 text-gray-900 ring-2 ring-amber-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                }`}>T</span>
+              </button>
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnover(false);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(prev => !prev);
+                }}
+                className={`w-full flex items-center justify-between px-4 py-3 transition ${
+                  mockPendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingSwitchOnly ? 'text-sky-700 dark:text-sky-300' : 'text-gray-500 dark:text-slate-400'}`}>Don&apos;t Know</span>
+                <ArrowLeftRight className={`h-4 w-4 ${mockPendingSwitchOnly ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400 dark:text-slate-500'}`} />
+              </button>
+              {mockPendingScorerId !== null && mockPendingAssisterId !== null && mockPendingScorerId === mockPendingAssisterId && (
+                <div className="px-4 py-2 text-sm text-red-600 dark:text-red-300">Scorer and assister must be different</div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-gray-200 dark:border-slate-700 px-4 py-3">
+                <button
+                  onClick={() => setMockConfirmAction('undo')}
+                  disabled={mockMatch.events.length === 0}
+                  className="inline-flex items-center gap-2 rounded-lg bg-gray-100 dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-gray-700 dark:text-slate-200 hover:bg-gray-200 dark:hover:bg-slate-700 disabled:opacity-40 transition"
+                >
+                  <RotateCcw className="h-4 w-4" /> Undo
+                </button>
+                <button
+                  onClick={() => setMockConfirmAction('save')}
+                  disabled={!saveEnabled}
+                  className={`inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-bold transition ${
+                    saveEnabled ? 'bg-amber-400 text-gray-900 hover:bg-amber-300' : 'bg-gray-200 dark:bg-slate-800 text-gray-400 dark:text-slate-500'
+                  }`}
+                >
+                  <Save className="h-4 w-4" /> {saveLabel}
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_56px] border-b border-gray-200 dark:border-slate-700 px-4 py-2 text-[10px] font-bold tracking-wider text-gray-500 dark:text-slate-500 uppercase">
+                <div>Player</div>
+                <div className="text-center">Block</div>
+              </div>
+              {viewedPlayers.map(player => {
+                const isBlock = mockPendingBlockId === player.id;
+                return (
+                  <div
+                    key={player.id}
+                    className={`grid grid-cols-[1fr_56px] items-center border-b border-gray-100 dark:border-slate-800 px-4 py-2.5 ${
+                      isBlock ? 'bg-violet-50 dark:bg-violet-400/5' : ''
+                    }`}
+                  >
+                    <div className="text-sm font-medium text-gray-900 dark:text-white truncate pr-2">{player.name}</div>
+                    <button
+                      onClick={() => {
+                        setMockPendingBlockId(prev => prev === player.id ? null : player.id);
+                        setMockPendingSwitchOnly(false);
+                      }}
+                      className={`mx-auto h-8 w-8 rounded-full text-xs font-bold transition ${
+                        isBlock ? 'bg-violet-500 text-white ring-2 ring-violet-300' : 'bg-gray-100 dark:bg-slate-800 text-gray-400 dark:text-slate-500 hover:bg-violet-100 dark:hover:bg-violet-900/30'
+                      }`}
+                    >
+                      {isBlock ? 'B' : ''}
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                onClick={() => {
+                  setMockPendingScorerId(null);
+                  setMockPendingAssisterId(null);
+                  setMockPendingBlockId(null);
+                  setMockPendingTurnover(false);
+                  setMockPendingTurnoverId(null);
+                  setMockPendingSwitchOnly(prev => !prev);
+                }}
+                className={`w-full flex items-center justify-between px-4 py-3 transition ${
+                  mockPendingSwitchOnly ? 'bg-sky-50 dark:bg-sky-400/10' : 'hover:bg-gray-50 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span className={`text-sm font-medium ${mockPendingSwitchOnly ? 'text-sky-700 dark:text-sky-300' : 'text-gray-500 dark:text-slate-400'}`}>Don&apos;t Know</span>
+                <ArrowLeftRight className={`h-4 w-4 ${mockPendingSwitchOnly ? 'text-sky-600 dark:text-sky-300' : 'text-gray-400 dark:text-slate-500'}`} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (mockMode === 'post-match' && mockMatch && mockPostForm) {
+    const myDisplayName = getCompactTeamName(mockMatch.t1_name, mockMatch.t1_abbreviation);
+    const oppDisplayName = getCompactTeamName(mockMatch.t2_name, mockMatch.t2_abbreviation);
+    const opponentPlayers = mockMatch.players.filter((player) => player.team_id === mockMatch.t2_id);
+    const teamPlayers = mockMatch.players.filter((player) => player.team_id === mockMatch.t1_id);
+
+    return (
+      <div className="py-4 px-3 min-h-screen">
+        <div className="max-w-lg mx-auto space-y-3">
+          <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                onClick={resetMockState}
+                className="inline-flex items-center gap-1.5 rounded-full border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-gray-700 dark:text-slate-200 transition hover:bg-gray-50 dark:hover:bg-slate-800"
+              >
+                <ChevronLeft className="h-4 w-4" /> Back
+              </button>
+              <Text variant="primary" className="text-sm font-semibold">Mock Post-Match</Text>
+            </div>
+
+            {mockErrorMessage && (
+              <div className="rounded-xl border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-2">
+                <Text className="text-sm text-red-700 dark:text-red-200">{mockErrorMessage}</Text>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <Text variant="secondary" className="text-[11px] mb-1 block break-words">{myDisplayName}</Text>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={mockPostForm.t1_score}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t1_score: sanitizeNumericInput(e.target.value) })}
+                    className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                  />
+                </div>
+                <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
+                <div className="flex-1 min-w-0">
+                  <Text variant="secondary" className="text-[11px] mb-1 block break-words">{oppDisplayName}</Text>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={mockPostForm.t2_score}
+                    onChange={e => setMockPostForm({ ...mockPostForm, t2_score: sanitizeNumericInput(e.target.value) })}
+                    className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <SpiritForm
+              label={`Rate ${oppDisplayName}`}
+              form={mockPostForm.opponentSpirit}
+              onChange={opponentSpirit => setMockPostForm({ ...mockPostForm, opponentSpirit })}
+              playerList={opponentPlayers}
+              playerLabel={oppDisplayName}
+              showNotes
+            />
+
+            <div className="border-t border-gray-200 dark:border-slate-700" />
+
+            <SpiritForm
+              label={`Rate ${myDisplayName} (Self)`}
+              form={mockPostForm.selfSpirit}
+              onChange={selfSpirit => setMockPostForm({ ...mockPostForm, selfSpirit })}
+              playerList={teamPlayers}
+              playerLabel={myDisplayName}
+              showMvpMsp={false}
+            />
+
+            <button
+              onClick={submitMockPostMatch}
+              className="w-full py-2.5 text-sm font-semibold rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 transition"
+            >
+              Submit All
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const headerTeamName = getHeaderTeamName(team.name, team.abbreviation);
+
   const getMatchStatus = (m: PocMatch) => {
     if (m.possession === null) return 'upcoming';
     if (m.possession >= 3) return 'ended';
@@ -638,11 +1609,16 @@ export default function MyTeamPage() {
     const s = getMatchStatus(m);
     if (s === 'upcoming') return 'upcoming';
     if (s === 'live') return 'live';
+    if (m.is_complete) return 'done';
     const myDone = submittedSpirits.has(m.id) && submittedSelfSpirits.has(m.id) && confirmedMatches.has(m.id);
+    const otherDone = otherTeamConfirmedMatches.has(m.id)
+      && otherTeamSpirits.has(m.id)
+      && otherTeamSubmittedSelfSpirits.has(m.id);
     if (!myDone) return 'action';
-    if (!otherTeamSpirits.has(m.id)) {
+    if (otherDone) return 'action';
+    if (!otherDone) {
       const isT1 = m.t1_id === team.id;
-      return 'waiting:' + (isT1 ? m.t2_name : m.t1_name);
+      return 'waiting:' + getCompactTeamName(isT1 ? m.t2_name : m.t1_name);
     }
     return 'done';
   };
@@ -670,7 +1646,7 @@ export default function MyTeamPage() {
               <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
             </div>
             <div className="min-w-0">
-              <Text as="h1" variant="primary" className="text-base font-bold truncate">{team.name}</Text>
+              <Text as="h1" variant="primary" className="text-base font-bold truncate">{headerTeamName}</Text>
               {team.location && <Text variant="secondary" className="text-xs">{team.location}</Text>}
             </div>
           </div>
@@ -679,7 +1655,7 @@ export default function MyTeamPage() {
               type="text"
               value={teamAbbreviation}
               maxLength={5}
-              placeholder="Team code"
+              placeholder="short name"
               disabled={teamEditsLocked}
               onChange={e => setTeamAbbreviation(e.target.value.replace(/[^a-zA-Z0-9]/g, ''))}
               className="w-28 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm uppercase text-gray-900 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-900 dark:text-white"
@@ -689,7 +1665,7 @@ export default function MyTeamPage() {
               disabled={teamEditsLocked || savingTeamAbbreviation || (team.abbreviation || '') === teamAbbreviation.trim()}
               className="rounded-lg bg-cyan-700 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {savingTeamAbbreviation ? 'Saving' : 'Save code'}
+              {savingTeamAbbreviation ? 'Saving' : 'Save'}
             </button>
             <Text variant="secondary" className="text-[11px]">Up to 5 letters or numbers.</Text>
           </div>
@@ -723,11 +1699,20 @@ export default function MyTeamPage() {
               const isExpanded = expandedMatch === match.id;
               const myTeamName = isT1 ? match.t1_name : match.t2_name;
               const oppTeamName = isT1 ? match.t2_name : match.t1_name;
+              const myDisplayName = getCompactTeamName(myTeamName, team.abbreviation);
+              const oppDisplayName = getCompactTeamName(oppTeamName);
+              const t1DisplayName = getCompactTeamName(match.t1_name, isT1 ? team.abbreviation : null);
+              const t2DisplayName = getCompactTeamName(match.t2_name, !isT1 ? team.abbreviation : null);
               const myScore = isT1 ? match.t1_score : match.t2_score;
               const oppScore = isT1 ? match.t2_score : match.t1_score;
               const form = postForms[match.id];
               const opponents = opponentPlayers[match.id] || [];
               const myDone = confirmedMatches.has(match.id) && submittedSpirits.has(match.id) && submittedSelfSpirits.has(match.id);
+              const otherDone = otherTeamConfirmedMatches.has(match.id)
+                && otherTeamSpirits.has(match.id)
+                && otherTeamSubmittedSelfSpirits.has(match.id);
+              const scoreDisagrees = myDone && otherDone && !match.is_complete;
+              const postMatchLocked = match.is_complete;
 
               const matchDate = match.time
                 ? new Date(match.time).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })
@@ -761,13 +1746,13 @@ export default function MyTeamPage() {
 
                     {/* Score row: my team vs opponent */}
                     <div className="flex items-center gap-2">
-                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">{myTeamName}</Text>
+                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">{myDisplayName}</Text>
                       <div className="shrink-0 flex items-center gap-1">
                         <Text variant="primary" className="text-xl font-bold tabular-nums">{status === 'upcoming' ? '-' : myScore}</Text>
                         <Text variant="secondary" className="text-sm">:</Text>
                         <Text variant="primary" className="text-xl font-bold tabular-nums">{status === 'upcoming' ? '-' : oppScore}</Text>
                       </div>
-                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">{oppTeamName}</Text>
+                      <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">{oppDisplayName}</Text>
                     </div>
 
                     {/* Action waiting info */}
@@ -783,10 +1768,10 @@ export default function MyTeamPage() {
                           {status === 'live' ? 'Resume Reporting' : 'Start Reporting'}
                         </button>
                       )}
-                      {isEnded && !myDone && (
+                      {isEnded && !postMatchLocked && (
                         <button onClick={() => handleExpandMatch(match.id, match)}
                           className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-cyan-700 py-2 text-sm font-semibold text-white hover:bg-cyan-600 transition">
-                          {isExpanded ? 'Collapse' : 'Complete Post-Match'}{isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                          {isExpanded ? 'Collapse' : myDone ? 'Edit Post-Match' : 'Complete Post-Match'}{isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                         </button>
                       )}
                       <button onClick={() => router.push('/matches?match_id=' + match.id)}
@@ -799,57 +1784,64 @@ export default function MyTeamPage() {
                   {/* Expanded post-match form */}
                   {isExpanded && isEnded && form && (
                     <div className="border-t border-gray-200 dark:border-slate-700 p-3 space-y-4">
-                      {/* Score confirmation */}
-                      {!confirmedMatches.has(match.id) && (
-                        <div className="space-y-2">
-                          <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
-                          <div className="flex items-center gap-3">
-                            <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{match.t1_name}</Text>
-                              <input type="number" min="0" inputMode="numeric" value={form.t1_score}
-                                onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t1_score: parseInt(e.target.value) || 0 } }))}
-                                className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
-                            </div>
-                            <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
-                            <div className="flex-1 min-w-0">
-                              <Text variant="secondary" className="text-[11px] mb-1 block break-words">{match.t2_name}</Text>
-                              <input type="number" min="0" inputMode="numeric" value={form.t2_score}
-                                onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t2_score: parseInt(e.target.value) || 0 } }))}
-                                className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
-                            </div>
-                          </div>
+                      {myDone && !otherDone && (
+                        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+                          Your submission is saved. You can still edit it until the other team finishes their post-match submission.
                         </div>
                       )}
 
-                      {/* Opponent spirit */}
-                      {!submittedSpirits.has(match.id) && (
-                        <SpiritForm
-                          label={`Rate ${oppTeamName}`}
-                          form={form.opponentSpirit}
-                          onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
-                          playerList={opponents}
-                          playerLabel={oppTeamName}
-                        />
+                      {scoreDisagrees && (
+                        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
+                          Both teams have submitted, but the confirmed scores still do not match. Update the score and submit again.
+                        </div>
                       )}
 
+                      {/* Score confirmation */}
+                      <div className="space-y-2">
+                        <Text variant="primary" className="text-xs font-bold uppercase tracking-wider">Confirm Score</Text>
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t1DisplayName}</Text>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*" value={form.t1_score}
+                              onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t1_score: sanitizeNumericInput(e.target.value) } }))}
+                              className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
+                          </div>
+                          <Text variant="secondary" className="text-base font-bold mt-4">-</Text>
+                          <div className="flex-1 min-w-0">
+                            <Text variant="secondary" className="text-[11px] mb-1 block break-words">{t2DisplayName}</Text>
+                            <input type="text" inputMode="numeric" pattern="[0-9]*" value={form.t2_score}
+                              onChange={e => setPostForms(prev => ({ ...prev, [match.id]: { ...form, t2_score: sanitizeNumericInput(e.target.value) } }))}
+                              className="w-full px-2 py-1.5 text-sm font-bold text-center rounded-lg border border-gray-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-gray-900 dark:text-white" />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Opponent spirit */}
+                      <SpiritForm
+                        label={`Rate ${oppDisplayName}`}
+                        form={form.opponentSpirit}
+                        onChange={opponentSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, opponentSpirit } }))}
+                        playerList={opponents}
+                        playerLabel={oppDisplayName}
+                        showNotes
+                      />
+
                       {/* Self spirit */}
-                      {!submittedSelfSpirits.has(match.id) && (
-                        <>
-                          <div className="border-t border-gray-200 dark:border-slate-700" />
-                          <SpiritForm
-                            label={`Rate ${myTeamName} (Self)`}
-                            form={form.selfSpirit}
-                            onChange={selfSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, selfSpirit } }))}
-                            playerList={players.map(p => ({ id: p.id, name: p.name }))}
-                            playerLabel={myTeamName}
-                            showMvpMsp={false}
-                          />
-                        </>
-                      )}
+                      <>
+                        <div className="border-t border-gray-200 dark:border-slate-700" />
+                        <SpiritForm
+                          label={`Rate ${myDisplayName} (Self)`}
+                          form={form.selfSpirit}
+                          onChange={selfSpirit => setPostForms(prev => ({ ...prev, [match.id]: { ...form, selfSpirit } }))}
+                          playerList={players.map(p => ({ id: p.id, name: p.name }))}
+                          playerLabel={myDisplayName}
+                          showMvpMsp={false}
+                        />
+                      </>
 
                       <button onClick={() => handleSubmitPostMatch(match.id)}
                         className="w-full py-2.5 text-sm font-semibold rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 transition">
-                        Submit All
+                        {myDone ? 'Update Post-Match' : 'Submit All'}
                       </button>
                     </div>
                   )}
@@ -905,7 +1897,7 @@ export default function MyTeamPage() {
                   className="flex-1 flex items-center justify-center gap-1 py-1.5 text-sm rounded-lg bg-cyan-700 text-white hover:bg-cyan-600 font-semibold disabled:opacity-50 transition">
                   <Save className="w-3 h-3" /> Add
                 </button>
-                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false }); setNewRole('Player'); }}
+                <button onClick={() => { setIsAdding(false); setNewPlayer({ name: '', common_name: '', email: '', phone: '', is_captain: false, is_spirit_captain: false, is_manager: false, is_coach: false }); setNewRole('Player'); }}
                   className="px-3 py-1.5 text-sm rounded-lg border border-gray-200 dark:border-slate-600 text-gray-600 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 transition">
                   Cancel
                 </button>
@@ -981,6 +1973,43 @@ export default function MyTeamPage() {
               );
             })}
             {players.length === 0 && !isAdding && <Text variant="secondary" className="text-sm text-center py-4">No players added yet</Text>}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
+          <div className="mb-2">
+            <Text as="h2" variant="primary" className="text-sm font-bold uppercase tracking-wider">Mock Match</Text>
+          </div>
+          <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800">
+            <div className="p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Text variant="secondary" className="text-[11px]">Mock Match · Mock Field</Text>
+                <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full bg-gray-100 dark:bg-slate-700 text-gray-500 dark:text-slate-400">Upcoming</span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-cyan-700 dark:text-cyan-400 break-words leading-tight">
+                  {getCompactTeamName(team.name, team.abbreviation)}
+                </Text>
+                <div className="shrink-0 flex items-center gap-1">
+                  <Text variant="primary" className="text-xl font-bold tabular-nums">-</Text>
+                  <Text variant="secondary" className="text-sm">:</Text>
+                  <Text variant="primary" className="text-xl font-bold tabular-nums">-</Text>
+                </div>
+                <Text variant="primary" className="flex-1 min-w-0 text-sm font-semibold text-right break-words leading-tight">
+                  {getCompactTeamName('Test Team', 'TEST')}
+                </Text>
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={requestMockStart}
+                  className="flex-1 rounded-lg bg-amber-400 py-2 text-sm font-semibold text-gray-900 hover:bg-amber-300 transition"
+                >
+                  Start Reporting
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 

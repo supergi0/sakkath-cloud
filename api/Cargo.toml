@@ -9,15 +9,20 @@ name = "sakkath-api"
 path = "src/main.rs"
 
 [[test]]
-name = "mod"
+name = "tournament"
 path = "tests/mod.rs"
+harness = false
+
+[[test]]
+name = "iterations"
+path = "tests/iterations.rs"
 harness = false
 
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip"] }
 tower_governor = "0.4"
 governor = "0.6"
 dotenv = "0.15"
@@ -30,6 +35,7 @@ jsonwebtoken = "9.3"
 bcrypt = "0.16"
 chrono = "0.4"
 redis = { version = "0.27", features = ["tokio-comp", "aio"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 rand = "0.9"
 csv = "1.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -39,3 +45,4 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "logs", "metrics
 opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client", "logs", "metrics", "trace", "tls-roots"] }
 opentelemetry-appender-tracing = "0.27"
 tracing-opentelemetry = "0.28"
+sha2 = "0.10"

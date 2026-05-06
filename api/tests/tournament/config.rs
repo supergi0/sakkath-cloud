@@ -10,6 +10,14 @@ pub(crate) struct RunConfig {
 }
 
 impl RunConfig {
+    pub(crate) fn from_itr(itr: u64) -> TestResult<Self> {
+        if itr == 0 {
+            return Err("itr must be greater than zero".into());
+        }
+
+        Ok(Self::build(itr))
+    }
+
     pub(crate) fn from_process_args<I>(args: I) -> TestResult<Self>
     where
         I: IntoIterator<Item = String>,
@@ -42,12 +50,7 @@ impl RunConfig {
             }
         }
 
-        let seed = 0x5A_CC_A7_u64 ^ itr.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let log_dir = Self::repo_root()
-            .join("logs")
-            .join(format!("test_tournament_itr{itr}"));
-
-        Ok(Self { itr, seed, log_dir })
+        Ok(Self::build(itr))
     }
 
     pub(crate) fn repo_root() -> PathBuf {
@@ -66,6 +69,42 @@ impl RunConfig {
             seed.rotate_left(5) ^ u64::from(byte)
         })
     }
+
+    fn build(itr: u64) -> Self {
+        let seed = 0x5A_CC_A7_u64 ^ itr.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let log_dir = Self::repo_root()
+            .join("logs")
+            .join(format!("test_tournament_itr{itr}"));
+
+        Self { itr, seed, log_dir }
+    }
+}
+
+pub(crate) fn deterministic_global_coin_toss_seed(base_seed: u64) -> u64 {
+    mix_seed(base_seed, 0xA11C_E000_0000_0001, 0xC710_BA11_F00D_BA11)
+}
+
+pub(crate) fn deterministic_stage_coin_toss_seed(
+    base_seed: u64,
+    division: i64,
+    stage_key: i64,
+) -> u64 {
+    mix_seed(
+        base_seed,
+        division as u64,
+        (stage_key as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
+}
+
+fn mix_seed(base_seed: u64, left: u64, right: u64) -> u64 {
+    let mut value = base_seed
+        ^ left.wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ right.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 fn parse_itr(value: &str) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {

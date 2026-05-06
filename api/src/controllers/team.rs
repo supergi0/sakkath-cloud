@@ -5,7 +5,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use crate::helpers::cache;
+use crate::helpers::{cache, rounds, sorting};
 
 const MAX_TEAM_PLAYERS: i64 = 22;
 const TEAM_EDITS_ROUND_KEY: i64 = 10_001;
@@ -19,6 +19,8 @@ type PocPlayerCurrentRow = (
     i64,
     i64,
     i64,
+    i64,
+    i64,
 );
 
 #[derive(Deserialize)]
@@ -26,7 +28,7 @@ pub struct DivisionQuery {
     pub division: Option<i32>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub struct Team {
     pub id: i64,
     pub name: String,
@@ -50,6 +52,7 @@ pub struct TeamDetail {
     pub games_played: i64,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub spirit_avg: f64,
     pub spirit_rank: i64,
     pub current_rank: i64,
@@ -66,10 +69,17 @@ pub struct TeamStanding {
     pub init_rank: i64,
     pub wins: i64,
     pub losses: i64,
+    pub draws: i64,
     pub points_for: i64,
     pub points_against: i64,
     pub spirit_avg: f64,
     pub small_logo: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TeamSeedTimelinePoint {
+    pub label: String,
+    pub seed: i64,
 }
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
@@ -98,6 +108,8 @@ pub struct TeamPlayerStat {
     pub turnovers: i64,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -125,6 +137,8 @@ pub struct PocPlayer {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +149,8 @@ pub struct UpdatePlayerRequest {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 #[derive(Deserialize)]
@@ -145,13 +161,19 @@ pub struct AddPlayerRequest {
     pub phone: Option<String>,
     pub is_captain: bool,
     pub is_spirit_captain: bool,
+    pub is_manager: bool,
+    pub is_coach: bool,
 }
 
 // All teams
 pub async fn get_teams(State(state): State<crate::AppState>) -> Json<Vec<Team>> {
+    if let Some(cached) = crate::helpers::cache::get_teams_list::<Vec<Team>>().await {
+        return Json(cached);
+    }
     let teams = sqlx::query_as::<_, Team>(
         "SELECT id, name, abbreviation, division, location, init_rank, full_logo, small_logo FROM teams WHERE deleted_at IS NULL ORDER BY division, init_rank"
     ).fetch_all(&state.db).await.unwrap_or_default();
+    crate::helpers::cache::set_teams_list(&teams).await;
     Json(teams)
 }
 
@@ -160,13 +182,14 @@ pub async fn get_team_detail(
     State(state): State<crate::AppState>,
     Path(id): Path<i64>,
 ) -> Json<TeamDetail> {
-    let result = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
+    let result = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64, i64, i64, f64, i64, Option<String>, Option<String>)>(
         r#"
         SELECT 
             t.id, t.name, t.abbreviation, t.location, t.division, t.init_rank,
             (SELECT COUNT(*) FROM users WHERE team_id = t.id AND role = 2 AND deleted_at IS NULL) as players,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score > t2_score) OR (t2_id = t.id AND t2_score > t1_score))) as wins,
             (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id AND t1_score < t2_score) OR (t2_id = t.id AND t2_score < t1_score))) as losses,
+            (SELECT COUNT(*) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND ((t1_id = t.id OR t2_id = t.id) AND t1_score = t2_score)) as draws,
             COALESCE((SELECT AVG(CASE WHEN t1_id = t.id THEN t1_spirit WHEN t2_id = t.id THEN t2_spirit END) FROM matches WHERE deleted_at IS NULL AND possession >= 3 AND (t1_id = t.id OR t2_id = t.id) AND (t1_spirit IS NOT NULL OR t2_spirit IS NOT NULL)), 0.0) as spirit_avg,
             (SELECT COUNT(*) + 1 FROM (
                 SELECT tm.id, COALESCE(AVG(CASE WHEN m.t1_id = tm.id THEN m.t1_spirit WHEN m.t2_id = tm.id THEN m.t2_spirit END), 0.0) as avg_spirit
@@ -181,23 +204,34 @@ pub async fn get_team_detail(
     ).bind(id).fetch_optional(&state.db).await;
 
     match result {
-        Ok(Some(r)) => Json(TeamDetail {
-            id: r.0,
-            name: r.1,
-            abbreviation: r.2,
-            location: r.3.unwrap_or_default(),
-            division: r.4,
-            init_rank: r.5.unwrap_or(0),
-            players: r.6,
-            games_played: r.7 + r.8,
-            wins: r.7,
-            losses: r.8,
-            spirit_avg: r.9,
-            spirit_rank: r.10,
-            current_rank: r.5.unwrap_or(0),
-            full_logo: r.11,
-            small_logo: r.12,
-        }),
+        Ok(Some(r)) => {
+            let current_rank =
+                crate::helpers::sorting::get_display_intermediate_standings(&state.db, r.4)
+                    .await
+                    .iter()
+                    .position(|team| team.team_id == r.0)
+                    .map(|index| index as i64 + 1)
+                    .unwrap_or(r.5.unwrap_or(0));
+
+            Json(TeamDetail {
+                id: r.0,
+                name: r.1,
+                abbreviation: r.2,
+                location: r.3.unwrap_or_default(),
+                division: r.4,
+                init_rank: r.5.unwrap_or(0),
+                players: r.6,
+                games_played: r.7 + r.8 + r.9,
+                wins: r.7,
+                losses: r.8,
+                draws: r.9,
+                spirit_avg: r.10,
+                spirit_rank: r.11,
+                current_rank,
+                full_logo: r.12,
+                small_logo: r.13,
+            })
+        }
         _ => Json(TeamDetail {
             id: 0,
             name: "Not Found".to_string(),
@@ -209,6 +243,7 @@ pub async fn get_team_detail(
             games_played: 0,
             wins: 0,
             losses: 0,
+            draws: 0,
             spirit_avg: 0.0,
             spirit_rank: 0,
             current_rank: 0,
@@ -232,11 +267,13 @@ pub async fn get_team_players(
             COALESCE(SUM(CASE WHEN me.event_type = 2 THEN 1 ELSE 0 END), 0) as blocks,
             COALESCE(SUM(CASE WHEN me.event_type = 3 THEN 1 ELSE 0 END), 0) as turnovers,
             COALESCE(u.is_captain, 0) as is_captain,
-            COALESCE(u.is_spirit_captain, 0) as is_spirit_captain
+            COALESCE(u.is_spirit_captain, 0) as is_spirit_captain,
+            COALESCE(u.is_manager, 0) as is_manager,
+            COALESCE(u.is_coach, 0) as is_coach
         FROM users u
         LEFT JOIN match_events me ON me.player_id = u.id
         WHERE u.team_id = ? AND u.role = 2 AND u.deleted_at IS NULL
-        GROUP BY u.id, u.name, u.common_name, u.is_captain, u.is_spirit_captain
+        GROUP BY u.id, u.name, u.common_name, u.is_captain, u.is_spirit_captain, u.is_manager, u.is_coach
         "#,
     )
     .bind(id)
@@ -254,7 +291,7 @@ pub async fn get_standings(
     let division = params.division.unwrap_or(0) as i64;
 
     let sorted =
-        crate::helpers::sorting::get_cached_intermediate_standings(&state.db, division).await;
+        crate::helpers::sorting::get_display_intermediate_standings(&state.db, division).await;
 
     let standings: Vec<TeamStanding> = sorted
         .iter()
@@ -266,6 +303,7 @@ pub async fn get_standings(
             init_rank: t.init_rank,
             wins: t.wins,
             losses: t.losses,
+            draws: t.draws,
             points_for: t.points_for,
             points_against: t.points_against,
             spirit_avg: t.spirit_avg,
@@ -274,6 +312,155 @@ pub async fn get_standings(
         .collect();
 
     Json(standings)
+}
+
+async fn get_stage_progress(
+    db: &SqlitePool,
+    division: i64,
+    match_type: i64,
+) -> Result<(i64, i64), axum::http::StatusCode> {
+    sqlx::query_as(
+        r#"SELECT COUNT(*), COALESCE(SUM(CASE WHEN m.possession >= 3 THEN 1 ELSE 0 END), 0)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.deleted_at IS NULL"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_one(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn fetch_completed_stage_results(
+    db: &SqlitePool,
+    division: i64,
+    match_type: i64,
+) -> Result<Vec<rounds::PlayedMatchResult>, axum::http::StatusCode> {
+    let rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"SELECT m.t1_id, m.t2_id, m.t1_score, m.t2_score
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.possession >= 3 AND m.deleted_at IS NULL
+           ORDER BY m.time ASC, m.field_id ASC, m.id ASC"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_all(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(t1_id, t2_id, t1_score, t2_score)| {
+            if t1_score == t2_score {
+                return None;
+            }
+
+            Some(rounds::PlayedMatchResult {
+                t1: t1_id,
+                t2: t2_id,
+                winner: if t1_score > t2_score { t1_id } else { t2_id },
+            })
+        })
+        .collect())
+}
+
+fn find_seed_position(team_ids: &[i64], team_id: i64) -> Option<i64> {
+    team_ids
+        .iter()
+        .position(|current_team_id| *current_team_id == team_id)
+        .map(|index| index as i64 + 1)
+}
+
+pub async fn get_team_seed_timeline(
+    State(state): State<crate::AppState>,
+    Path(team_id): Path<i64>,
+) -> Result<Json<Vec<TeamSeedTimelinePoint>>, axum::http::StatusCode> {
+    let team_row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT division, COALESCE(init_rank, 0) FROM teams WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(team_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (division, init_rank) = team_row.ok_or(axum::http::StatusCode::NOT_FOUND)?;
+    let total_rounds = if division == 0 {
+        crate::OPEN_ROUNDS
+    } else {
+        crate::WOMEN_ROUNDS
+    };
+
+    let mut timeline = vec![TeamSeedTimelinePoint {
+        label: "Start".to_string(),
+        seed: init_rank,
+    }];
+    let mut last_completed_round = 0;
+
+    for round in 1..=total_rounds {
+        let (total_matches, completed_matches) =
+            get_stage_progress(&state.db, division, round).await?;
+        if total_matches == 0 || total_matches != completed_matches {
+            break;
+        }
+
+        let standings =
+            sorting::get_generation_standings_through_round(&state.db, division, round).await;
+        if let Some(seed) = standings
+            .iter()
+            .position(|standing| standing.team_id == team_id)
+            .map(|index| index as i64 + 1)
+        {
+            last_completed_round = round;
+            timeline.push(TeamSeedTimelinePoint {
+                label: format!("R{round}"),
+                seed,
+            });
+        }
+    }
+
+    let playoff_results = fetch_completed_stage_results(&state.db, division, 1001).await?;
+    if !playoff_results.is_empty() {
+        let swiss_round = if last_completed_round > 0 {
+            last_completed_round
+        } else {
+            total_rounds
+        };
+        let swiss_order = sorting::get_generation_standings_through_round(
+            &state.db,
+            division,
+            swiss_round,
+        )
+        .await;
+        let playoff_seed_order =
+            rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
+
+        if let Some(seed) = find_seed_position(&playoff_seed_order, team_id) {
+            timeline.push(TeamSeedTimelinePoint {
+                label: "P".to_string(),
+                seed,
+            });
+        }
+
+        let final_results = fetch_completed_stage_results(&state.db, division, 1002).await?;
+        if !final_results.is_empty() {
+            let final_seed_order = rounds::build_seed_order_after_elimination_results(
+                &swiss_order,
+                &playoff_results,
+                &final_results,
+            );
+
+            if let Some(seed) = find_seed_position(&final_seed_order, team_id) {
+                timeline.push(TeamSeedTimelinePoint {
+                    label: "F".to_string(),
+                    seed,
+                });
+            }
+        }
+    }
+
+    Ok(Json(timeline))
 }
 
 // All player stats in one query
@@ -381,7 +568,7 @@ pub async fn get_poc_players(
     let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
 
     let players = sqlx::query_as::<_, PocPlayer>(
-        "SELECT id, name, common_name, COALESCE(email, '') as email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain 
+        "SELECT id, name, common_name, COALESCE(email, '') as email, phone, COALESCE(is_captain, 0) as is_captain, COALESCE(is_spirit_captain, 0) as is_spirit_captain, COALESCE(is_manager, 0) as is_manager, COALESCE(is_coach, 0) as is_coach 
             FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL ORDER BY name"
     ).bind(team_id).fetch_all(&state.db).await.unwrap_or_default();
 
@@ -435,7 +622,7 @@ pub async fn update_poc_player(
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let current: Option<PocPlayerCurrentRow> = sqlx::query_as(
-        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, COALESCE(p.is_captain, 0), COALESCE(p.is_spirit_captain, 0), t.roster_moves_remaining
+        "SELECT p.team_id, p.name, p.common_name, p.email, p.phone, COALESCE(p.is_captain, 0), COALESCE(p.is_spirit_captain, 0), COALESCE(p.is_manager, 0), COALESCE(p.is_coach, 0), t.roster_moves_remaining
          FROM users p
          INNER JOIN users poc ON poc.team_id = p.team_id
          INNER JOIN teams t ON t.id = p.team_id
@@ -455,6 +642,8 @@ pub async fn update_poc_player(
         current_phone,
         current_captain,
         current_spirit_captain,
+        current_manager,
+        current_coach,
         remaining_moves,
     ) = current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
@@ -468,7 +657,9 @@ pub async fn update_poc_player(
         || current_email != normalized_email
         || current_phone != normalized_phone
         || current_captain != payload.is_captain as i64
-        || current_spirit_captain != payload.is_spirit_captain as i64;
+        || current_spirit_captain != payload.is_spirit_captain as i64
+        || current_manager != payload.is_manager as i64
+        || current_coach != payload.is_coach as i64;
     let common_name_changed = current_common_name != normalized_common_name;
 
     let updated_remaining = if roster_move_change {
@@ -490,9 +681,9 @@ pub async fn update_poc_player(
     };
 
     sqlx::query(
-        "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, is_captain = ?, is_spirit_captain = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+        "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, is_captain = ?, is_spirit_captain = ?, is_manager = ?, is_coach = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
     ).bind(normalized_name).bind(normalized_common_name).bind(&normalized_email).bind(&normalized_phone)
-     .bind(payload.is_captain).bind(payload.is_spirit_captain).bind(player_id)
+     .bind(payload.is_captain).bind(payload.is_spirit_captain).bind(payload.is_manager).bind(payload.is_coach).bind(player_id)
      .execute(&mut *tx).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -579,9 +770,9 @@ pub async fn add_poc_player(
     }
 
     let result = sqlx::query(
-        "INSERT INTO users (name, common_name, email, phone, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, ?, 2, ?, ?)"
+        "INSERT INTO users (name, common_name, email, phone, team_id, role, is_captain, is_spirit_captain, is_manager, is_coach) VALUES (?, ?, ?, ?, ?, 2, ?, ?, ?, ?)"
     ).bind(normalized_name).bind(normalized_common_name).bind(&normalized_email).bind(&normalized_phone)
-     .bind(team_id).bind(payload.is_captain).bind(payload.is_spirit_captain)
+     .bind(team_id).bind(payload.is_captain).bind(payload.is_spirit_captain).bind(payload.is_manager).bind(payload.is_coach)
      .execute(&state.db).await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -699,16 +890,16 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
     if let Some((division,)) = division {
         cache::invalidate_division(division).await;
     }
+    cache::invalidate_teams_list().await;
 }
 
 async fn ensure_team_edits_enabled(db: &SqlitePool) -> Result<(), axum::http::StatusCode> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?",
-    )
-    .bind(TEAM_EDITS_ROUND_KEY)
-    .fetch_optional(db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?")
+            .bind(TEAM_EDITS_ROUND_KEY)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if matches!(row, Some((0,))) {
         return Err(axum::http::StatusCode::FORBIDDEN);

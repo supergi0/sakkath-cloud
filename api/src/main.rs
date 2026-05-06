@@ -2,6 +2,7 @@ use axum::middleware as axum_middleware;
 use axum::routing::{get, get_service};
 use std::net::SocketAddr;
 use std::process;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
@@ -13,20 +14,100 @@ enum CliCommand {
     Serve,
     CreateDatabase,
     SeedDatabase(migration::SeedSource),
+    MockDatabase(helpers::mock_seed::MockDatabaseRequest),
 }
 
-fn parse_cli_command() -> CliCommand {
+fn seed_database_csv_usage() -> &'static str {
+    "Usage: sakkath-api seed-database csv [path] [--replace_password true|false]"
+}
+
+fn mock_database_usage() -> &'static str {
+    "Usage: sakkath-api mock-database <round> [games]\n  round: 1..6, P, or F\n  games: optional integer between 1 and 15"
+}
+
+fn parse_bool_flag(value: &str, flag_name: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "Invalid value `{value}` for {flag_name}. {}",
+            seed_database_csv_usage()
+        )),
+    }
+}
+
+fn parse_seed_database_csv_command(args: &[String]) -> Result<CliCommand, String> {
+    let mut path = None;
+    let mut replace_password = false;
+    let mut index = 2;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--replace_password" | "replace_password" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    format!(
+                        "Missing value for replace_password. {}",
+                        seed_database_csv_usage()
+                    )
+                })?;
+                replace_password = parse_bool_flag(value, "replace_password")?;
+                index += 2;
+            }
+            _ if arg.starts_with("--replace_password=") => {
+                let value = arg.trim_start_matches("--replace_password=");
+                replace_password = parse_bool_flag(value, "replace_password")?;
+                index += 1;
+            }
+            _ if path.is_none() => {
+                path = Some(args[index].clone());
+                index += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "Unexpected argument `{arg}`. {}",
+                    seed_database_csv_usage()
+                ));
+            }
+        }
+    }
+
+    Ok(CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
+        path,
+        replace_password,
+    }))
+}
+
+fn parse_cli_command() -> Result<CliCommand, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
-        Some("create-database") => CliCommand::CreateDatabase,
+        Some("create-database") => Ok(CliCommand::CreateDatabase),
         Some("seed-database") => match args.get(1).map(String::as_str) {
-            Some("csv") => CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
-                path: args.get(2).cloned(),
-            }),
-            _ => CliCommand::SeedDatabase(migration::SeedSource::MockData),
+            Some("csv") => parse_seed_database_csv_command(&args),
+            _ => Ok(CliCommand::SeedDatabase(migration::SeedSource::MockData)),
         },
-        _ => CliCommand::Serve,
+        Some("mock-database") => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(mock_database_usage().to_string());
+            }
+
+            let target = helpers::mock_seed::MockRoundTarget::parse(&args[1])?;
+            let games = match args.get(2) {
+                Some(raw_games) => Some(raw_games.parse::<usize>().map_err(|_| {
+                    format!(
+                        "Invalid games value `{raw_games}`. {}",
+                        mock_database_usage()
+                    )
+                })?),
+                None => None,
+            };
+
+            Ok(CliCommand::MockDatabase(
+                helpers::mock_seed::MockDatabaseRequest::new(target, games)?,
+            ))
+        }
+        _ => Ok(CliCommand::Serve),
     }
 }
 
@@ -63,6 +144,31 @@ async fn run_database_setup(database_url: &str, seed_source: Option<migration::S
     }
 }
 
+async fn run_mock_database(database_url: &str, request: helpers::mock_seed::MockDatabaseRequest) {
+    let db_pool = connect_db(database_url, false).await;
+
+    migration::run_migrations(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to run migrations: {err}")));
+
+    migration::verify_migrations(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to verify migrations: {err}")));
+
+    let summary = helpers::mock_seed::mock_existing_database(&db_pool, request)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to mock database: {err}")));
+
+    tracing::info!(
+        target = %summary.target_label,
+        newly_completed_matches = summary.newly_completed_matches,
+        post_match_updates = summary.post_match_updates,
+        target_stage_completed = summary.target_stage_completed,
+        target_stage_total = summary.target_stage_total,
+        "Database mock reporting completed successfully"
+    );
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
@@ -80,7 +186,7 @@ async fn main() {
         .to_lowercase()
         == "true";
 
-    let cli_command = parse_cli_command();
+    let cli_command = parse_cli_command().unwrap_or_else(|err| exit_with_error(&err));
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "9000".to_string())
@@ -121,6 +227,16 @@ async fn main() {
             run_database_setup(&database_url, Some(source)).await;
             return;
         }
+        CliCommand::MockDatabase(request) => {
+            if !migration::is_sqlite_file_present(&database_url) {
+                exit_with_error(
+                    "Database file is missing. Run `sakkath-api create-database` first, then seed it before using `sakkath-api mock-database`.",
+                );
+            }
+
+            run_mock_database(&database_url, request).await;
+            return;
+        }
         CliCommand::Serve => {}
     }
 
@@ -143,6 +259,10 @@ async fn main() {
         .await
         .unwrap_or_else(|err| exit_with_error(&format!("Failed to verify migrations: {err}")));
 
+    helpers::sorting::initialize_persistent_coin_toss_seed(&db_pool)
+        .await
+        .unwrap_or_else(|err| exit_with_error(&format!("Failed to load persistent tiebreak seed: {err}")));
+
     // Init redis cache (non-blocking, works without redis)
     helpers::cache::init_redis().await;
     telemetry::init(db_pool.clone(), telemetry_enabled).await;
@@ -153,6 +273,7 @@ async fn main() {
     let app_state = AppState {
         db: db_pool,
         telemetry_enabled,
+        live_updates: helpers::live_updates::LiveUpdates::new(),
     };
 
     let telemetry_routes = Router::new().route(
@@ -162,7 +283,9 @@ async fn main() {
     );
 
     // Use routes from routes.rs
-    let api_routes = routes::api_routes().layer(middleware::rate_limit::api_rate_limit_layer());
+    let api_routes = routes::api_routes()
+        .layer(CompressionLayer::new())
+        .layer(middleware::rate_limit::api_rate_limit_layer());
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

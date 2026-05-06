@@ -23,6 +23,17 @@ pub(crate) struct TeamResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TeamDetailResponse {
+    pub(crate) id: i64,
+    pub(crate) games_played: i64,
+    pub(crate) wins: i64,
+    pub(crate) losses: i64,
+    pub(crate) draws: i64,
+    pub(crate) spirit_avg: f64,
+    pub(crate) current_rank: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MatchPlayerResponse {
     pub(crate) id: i64,
     pub(crate) team_id: i64,
@@ -96,6 +107,7 @@ pub(crate) struct StandingRowResponse {
     pub(crate) id: i64,
     pub(crate) wins: i64,
     pub(crate) losses: i64,
+    pub(crate) draws: i64,
     pub(crate) points_for: i64,
     pub(crate) points_against: i64,
     pub(crate) spirit_avg: f64,
@@ -106,6 +118,8 @@ pub(crate) struct ScheduleMatchResponse {
     pub(crate) id: i64,
     pub(crate) t1_id: i64,
     pub(crate) t2_id: i64,
+    pub(crate) field_name: String,
+    pub(crate) time: String,
     pub(crate) t1_score: i64,
     pub(crate) t2_score: i64,
     pub(crate) t1_spirit: Option<i64>,
@@ -127,8 +141,6 @@ pub(crate) struct ScheduleGridRowResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct ScheduleGridCellResponse {
     pub(crate) match_id: Option<i64>,
-    pub(crate) t1_seed_rank: Option<i64>,
-    pub(crate) t2_seed_rank: Option<i64>,
     pub(crate) t1_score: Option<i64>,
     pub(crate) t2_score: Option<i64>,
     pub(crate) status: String,
@@ -138,17 +150,11 @@ pub(crate) struct ScheduleGridCellResponse {
 struct ScheduleGridCellWire {
     match_id: Option<i64>,
     #[serde(default)]
-    t1_seed_rank: Option<i64>,
-    #[serde(default)]
-    t2_seed_rank: Option<i64>,
-    #[serde(default)]
     t1_score: Option<i64>,
     #[serde(default)]
     t2_score: Option<i64>,
     #[serde(default)]
     data: Option<[i64; 5]>,
-    #[serde(default)]
-    seed_ranks: Option<[i64; 2]>,
     status: String,
 }
 
@@ -159,16 +165,9 @@ impl<'de> Deserialize<'de> for ScheduleGridCellResponse {
     {
         let wire = ScheduleGridCellWire::deserialize(deserializer)?;
         let compact_data = wire.data;
-        let compact_seeds = wire.seed_ranks;
 
         Ok(Self {
             match_id: wire.match_id,
-            t1_seed_rank: wire
-                .t1_seed_rank
-                .or_else(|| compact_seeds.map(|seed_ranks| seed_ranks[0])),
-            t2_seed_rank: wire
-                .t2_seed_rank
-                .or_else(|| compact_seeds.map(|seed_ranks| seed_ranks[1])),
             t1_score: wire.t1_score.or_else(|| compact_data.map(|data| data[3])),
             t2_score: wire.t2_score.or_else(|| compact_data.map(|data| data[4])),
             status: wire.status,

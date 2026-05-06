@@ -119,6 +119,11 @@ pub enum TelemetryEntry {
         ip_address: String,
         status_code: i64,
     },
+    Event {
+        level: String,
+        key: String,
+        details: String,
+    },
 }
 
 pub async fn init(db: SqlitePool, enabled: bool) {
@@ -152,6 +157,45 @@ pub fn record_request(method: String, path: String, ip_address: String, status_c
                 path,
                 ip_address,
                 status_code,
+            },
+        )
+        .await;
+    });
+}
+
+pub fn record_info(key: impl Into<String>, details: impl Into<String>) {
+    record_event("info".to_string(), key.into(), details.into());
+}
+
+pub fn record_error(key: impl Into<String>, details: impl Into<String>) {
+    record_event("error".to_string(), key.into(), details.into());
+}
+
+fn record_event(level: String, key: String, details: String) {
+    let Some(runtime) = TELEMETRY_RUNTIME.get().cloned() else {
+        return;
+    };
+
+    match level.as_str() {
+        "error" => {
+            tracing::error!(event_key = %key, event_details = %details, "application event");
+        }
+        _ => {
+            tracing::info!(event_key = %key, event_details = %details, "application event");
+        }
+    }
+
+    if !runtime.enabled {
+        return;
+    }
+
+    tokio::spawn(async move {
+        enqueue(
+            &runtime,
+            TelemetryEntry::Event {
+                level,
+                key,
+                details,
             },
         )
         .await;
@@ -262,6 +306,20 @@ async fn flush_entries(runtime: &TelemetryRuntime) -> Result<(), sqlx::Error> {
                 .bind(path)
                 .bind(ip_address)
                 .bind(status_code)
+                .execute(&mut *tx)
+                .await?;
+            }
+            TelemetryEntry::Event {
+                level,
+                key,
+                details,
+            } => {
+                sqlx::query(
+                    "INSERT INTO telemetry_logs (kind, method, path, details) VALUES ('event', ?, ?, ?)",
+                )
+                .bind(level)
+                .bind(key)
+                .bind(details)
                 .execute(&mut *tx)
                 .await?;
             }
