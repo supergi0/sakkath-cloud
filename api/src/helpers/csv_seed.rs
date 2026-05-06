@@ -1,10 +1,10 @@
 use chrono::NaiveDate;
 use csv::{ReaderBuilder, StringRecord};
 use rand::Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,7 +40,7 @@ fn hash_password(password: &str) -> Result<String, sqlx::Error> {
         .map_err(|err| sqlx::Error::Configuration(format!("Failed to hash password: {err}").into()))
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct PasswordManifest {
     #[serde(rename = "super")]
     super_admins: Vec<PasswordManifestEntry>,
@@ -48,7 +48,7 @@ struct PasswordManifest {
     womens: Vec<PasswordManifestEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PasswordManifestEntry {
     email: String,
     password: String,
@@ -75,6 +75,37 @@ impl PasswordManifest {
             1 => self.womens.push(entry),
             _ => {}
         }
+    }
+
+    fn find_super_password(&self, email: &str) -> Option<String> {
+        let email_key = normalize_key(email);
+        self.super_admins
+            .iter()
+            .find(|entry| normalize_key(&entry.email) == email_key)
+            .map(|entry| entry.password.clone())
+    }
+
+    fn find_division_password(&self, division: i64, email: &str, team: &str) -> Option<String> {
+        let entries = match division {
+            0 => &self.opens,
+            1 => &self.womens,
+            _ => return None,
+        };
+        let team_key = normalize_key(team);
+        let email_key = normalize_key(email);
+
+        entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .team
+                    .as_deref()
+                    .map(normalize_key)
+                    .as_deref()
+                    == Some(team_key.as_str())
+            })
+            .or_else(|| entries.iter().find(|entry| normalize_key(&entry.email) == email_key))
+            .map(|entry| entry.password.clone())
     }
 }
 
@@ -124,12 +155,18 @@ pub fn resolve_teams_csv_path(requested_path: Option<&str>) -> Result<PathBuf, s
 pub async fn populate_from_teams_csv(
     pool: &SqlitePool,
     requested_path: Option<&str>,
+    replace_password: bool,
 ) -> Result<(), sqlx::Error> {
     let csv_path = resolve_teams_csv_path(requested_path)?;
     let rows = load_team_rows(&csv_path)?;
     let jwt_secret = load_jwt_secret_for_passwords()?;
     let super_admin_emails = load_super_admin_emails()?;
     let manifest_path = resolve_password_manifest_path(&csv_path);
+    let existing_manifest = if replace_password {
+        PasswordManifest::default()
+    } else {
+        load_existing_password_manifest(&manifest_path)?
+    };
     let mut password_manifest = PasswordManifest::default();
 
     let mut tx = pool.begin().await?;
@@ -137,6 +174,7 @@ pub async fn populate_from_teams_csv(
         &mut tx,
         &super_admin_emails,
         &jwt_secret,
+        &existing_manifest,
         &mut password_manifest,
     )
     .await?;
@@ -165,15 +203,9 @@ pub async fn populate_from_teams_csv(
         .await?;
 
         let team_id = team_result.last_insert_rowid();
-        let mut member_ids_by_name = HashMap::new();
 
         for member in row.members {
-            let member_key = normalize_key(&member.full_name);
-            if member_key.is_empty() || member_ids_by_name.contains_key(&member_key) {
-                continue;
-            }
-
-            let member_result = sqlx::query(
+            sqlx::query(
                 "INSERT INTO users (name, common_name, dob, team_id, role, is_captain, is_spirit_captain) VALUES (?, ?, ?, ?, 2, 0, 0)"
             )
             .bind(&member.full_name)
@@ -182,43 +214,28 @@ pub async fn populate_from_teams_csv(
             .bind(team_id)
             .execute(&mut *tx)
             .await?;
-
-            member_ids_by_name.insert(member_key, member_result.last_insert_rowid());
         }
 
-        let admin_key = normalize_key(&row.admin_name);
-        let admin_password = generate_seed_password(&jwt_secret, &row.admin_email)?;
+        let admin_password = resolve_seed_password(
+            existing_manifest.find_division_password(row.division, &row.admin_email, &row.team_name),
+            &jwt_secret,
+            &row.admin_email,
+        )?;
         let admin_password_hash = hash_password(&admin_password)?;
 
-        let admin_id = if let Some(existing_member_id) = member_ids_by_name.get(&admin_key) {
-            sqlx::query(
-                "UPDATE users SET name = ?, common_name = ?, email = ?, phone = ?, role = 3, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
-            )
-            .bind(&row.admin_name)
-            .bind(&row.admin_name)
-            .bind(&row.admin_email)
-            .bind(&row.admin_phone)
-            .bind(&admin_password_hash)
-            .bind(existing_member_id)
-            .execute(&mut *tx)
-            .await?;
+        let admin_result = sqlx::query(
+            "INSERT INTO users (name, common_name, email, phone, team_id, role, password_hash) VALUES (?, ?, ?, ?, ?, 3, ?)"
+        )
+        .bind(&row.admin_name)
+        .bind(&row.admin_name)
+        .bind(&row.admin_email)
+        .bind(&row.admin_phone)
+        .bind(team_id)
+        .bind(&admin_password_hash)
+        .execute(&mut *tx)
+        .await?;
 
-            *existing_member_id
-        } else {
-            let admin_result = sqlx::query(
-                "INSERT INTO users (name, common_name, email, phone, team_id, role, password_hash) VALUES (?, ?, ?, ?, ?, 3, ?)"
-            )
-            .bind(&row.admin_name)
-            .bind(&row.admin_name)
-            .bind(&row.admin_email)
-            .bind(&row.admin_phone)
-            .bind(team_id)
-            .bind(&admin_password_hash)
-            .execute(&mut *tx)
-            .await?;
-
-            admin_result.last_insert_rowid()
-        };
+        let admin_id = admin_result.last_insert_rowid();
 
         password_manifest.push_division(
             row.division,
@@ -237,6 +254,32 @@ pub async fn populate_from_teams_csv(
     tx.commit().await?;
     write_password_manifest(&manifest_path, &password_manifest)?;
     Ok(())
+}
+
+fn load_existing_password_manifest(manifest_path: &Path) -> Result<PasswordManifest, sqlx::Error> {
+    if !manifest_path.exists() {
+        return Ok(PasswordManifest::default());
+    }
+
+    let raw = fs::read_to_string(manifest_path).map_err(|err| {
+        sqlx::Error::Configuration(
+            format!(
+                "Failed to read password manifest at {}: {err}",
+                manifest_path.display()
+            )
+            .into(),
+        )
+    })?;
+
+    serde_json::from_str(&raw).map_err(|err| {
+        sqlx::Error::Configuration(
+            format!(
+                "Failed to parse password manifest at {}: {err}",
+                manifest_path.display()
+            )
+            .into(),
+        )
+    })
 }
 
 fn load_jwt_secret_for_passwords() -> Result<String, sqlx::Error> {
@@ -372,6 +415,17 @@ fn write_password_manifest(
             .into(),
         )
     })
+}
+
+fn resolve_seed_password(
+    existing_password: Option<String>,
+    jwt_secret: &str,
+    email: &str,
+) -> Result<String, sqlx::Error> {
+    match existing_password {
+        Some(password) if !password.trim().is_empty() => Ok(password),
+        _ => generate_seed_password(jwt_secret, email),
+    }
 }
 
 fn generate_seed_password(jwt_secret: &str, email: &str) -> Result<String, sqlx::Error> {
@@ -628,10 +682,15 @@ async fn seed_default_staff_and_fields(
     tx: &mut Transaction<'_, Sqlite>,
     super_admin_emails: &[String],
     jwt_secret: &str,
+    existing_manifest: &PasswordManifest,
     manifest: &mut PasswordManifest,
 ) -> Result<(), sqlx::Error> {
     for email in super_admin_emails {
-        let password = generate_seed_password(jwt_secret, email)?;
+        let password = resolve_seed_password(
+            existing_manifest.find_super_password(email),
+            jwt_secret,
+            email,
+        )?;
         let password_hash = hash_password(&password)?;
         let display_name = display_name_from_email(email);
 

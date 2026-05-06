@@ -30,6 +30,7 @@ sakkath.db-wal
 
 .env
 passwords.json
+passwords_prod.json
 sshkey
 sshkey.pub
 

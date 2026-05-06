@@ -17,8 +17,65 @@ enum CliCommand {
     MockDatabase(helpers::mock_seed::MockDatabaseRequest),
 }
 
+fn seed_database_csv_usage() -> &'static str {
+    "Usage: sakkath-api seed-database csv [path] [--replace_password true|false]"
+}
+
 fn mock_database_usage() -> &'static str {
     "Usage: sakkath-api mock-database <round> [games]\n  round: 1..6, P, or F\n  games: optional integer between 1 and 15"
+}
+
+fn parse_bool_flag(value: &str, flag_name: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "Invalid value `{value}` for {flag_name}. {}",
+            seed_database_csv_usage()
+        )),
+    }
+}
+
+fn parse_seed_database_csv_command(args: &[String]) -> Result<CliCommand, String> {
+    let mut path = None;
+    let mut replace_password = false;
+    let mut index = 2;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--replace_password" | "replace_password" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    format!(
+                        "Missing value for replace_password. {}",
+                        seed_database_csv_usage()
+                    )
+                })?;
+                replace_password = parse_bool_flag(value, "replace_password")?;
+                index += 2;
+            }
+            _ if arg.starts_with("--replace_password=") => {
+                let value = arg.trim_start_matches("--replace_password=");
+                replace_password = parse_bool_flag(value, "replace_password")?;
+                index += 1;
+            }
+            _ if path.is_none() => {
+                path = Some(args[index].clone());
+                index += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "Unexpected argument `{arg}`. {}",
+                    seed_database_csv_usage()
+                ));
+            }
+        }
+    }
+
+    Ok(CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
+        path,
+        replace_password,
+    }))
 }
 
 fn parse_cli_command() -> Result<CliCommand, String> {
@@ -27,9 +84,7 @@ fn parse_cli_command() -> Result<CliCommand, String> {
     match args.first().map(String::as_str) {
         Some("create-database") => Ok(CliCommand::CreateDatabase),
         Some("seed-database") => match args.get(1).map(String::as_str) {
-            Some("csv") => Ok(CliCommand::SeedDatabase(migration::SeedSource::TeamsCsv {
-                path: args.get(2).cloned(),
-            })),
+            Some("csv") => parse_seed_database_csv_command(&args),
             _ => Ok(CliCommand::SeedDatabase(migration::SeedSource::MockData)),
         },
         Some("mock-database") => {

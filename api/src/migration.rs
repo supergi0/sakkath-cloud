@@ -4,7 +4,10 @@ use std::time::Duration;
 
 pub enum SeedSource {
     MockData,
-    TeamsCsv { path: Option<String> },
+    TeamsCsv {
+        path: Option<String>,
+        replace_password: bool,
+    },
 }
 
 pub fn default_database_path() -> Result<PathBuf, sqlx::Error> {
@@ -999,8 +1002,16 @@ pub async fn seed_database(pool: &SqlitePool, source: SeedSource) -> Result<(), 
 
     match source {
         SeedSource::MockData => crate::seeder::populate_mock_data(pool).await,
-        SeedSource::TeamsCsv { path } => {
-            crate::helpers::csv_seed::populate_from_teams_csv(pool, path.as_deref()).await
+        SeedSource::TeamsCsv {
+            path,
+            replace_password,
+        } => {
+            crate::helpers::csv_seed::populate_from_teams_csv(
+                pool,
+                path.as_deref(),
+                replace_password,
+            )
+            .await
         }
     }
 }
