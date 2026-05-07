@@ -8,7 +8,6 @@ use sqlx::SqlitePool;
 use crate::helpers::{cache, rounds, sorting};
 
 const MAX_TEAM_PLAYERS: i64 = 22;
-const TEAM_EDITS_ROUND_KEY: i64 = 10_001;
 
 type PocPlayerCurrentRow = (
     i64,
@@ -114,6 +113,7 @@ pub struct PocTeam {
     pub location: Option<String>,
     pub full_logo: Option<String>,
     pub small_logo: Option<String>,
+    pub allow_edits: bool,
     pub roster_moves_remaining: i64,
 }
 
@@ -157,6 +157,20 @@ pub struct AddPlayerRequest {
     pub is_spirit_captain: bool,
     pub is_manager: bool,
     pub is_coach: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TeamEditSetting {
+    pub id: i64,
+    pub name: String,
+    pub abbreviation: Option<String>,
+    pub division: i64,
+    pub allow_edits: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTeamEditSettingRequest {
+    pub allow_edits: bool,
 }
 
 // All teams
@@ -499,7 +513,7 @@ pub async fn get_poc_team(
     let email = extract_email(&headers)?;
 
     let team = sqlx::query_as::<_, PocTeam>(
-        "SELECT t.id, t.name, t.abbreviation, t.location, t.full_logo, t.small_logo, t.roster_moves_remaining FROM teams t 
+        "SELECT t.id, t.name, t.abbreviation, t.location, t.full_logo, t.small_logo, COALESCE(t.allow_edits, 0) as allow_edits, t.roster_moves_remaining FROM teams t 
          INNER JOIN users u ON u.team_id = t.id 
          WHERE u.email = ? AND u.role = 3 AND u.deleted_at IS NULL"
     ).bind(&email).fetch_optional(&state.db).await
@@ -511,23 +525,71 @@ pub async fn get_poc_team(
     }
 }
 
+pub async fn get_team_edit_settings(
+    State(state): State<crate::AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<TeamEditSetting>>, axum::http::StatusCode> {
+    verify_super_user(&state.db, &headers).await?;
+
+    let teams = sqlx::query_as::<_, TeamEditSetting>(
+        r#"SELECT id, name, abbreviation, division, COALESCE(allow_edits, 0) as allow_edits
+           FROM teams
+           WHERE deleted_at IS NULL
+           ORDER BY division ASC, COALESCE(init_rank, 9999) ASC, name ASC"#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(teams))
+}
+
+pub async fn update_team_edit_setting(
+    State(state): State<crate::AppState>,
+    headers: axum::http::HeaderMap,
+    Path(team_id): Path<i64>,
+    Json(payload): Json<UpdateTeamEditSettingRequest>,
+) -> Result<Json<TeamEditSetting>, axum::http::StatusCode> {
+    verify_super_user(&state.db, &headers).await?;
+
+    let result = sqlx::query(
+        r#"UPDATE teams
+           SET allow_edits = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND deleted_at IS NULL"#,
+    )
+    .bind(if payload.allow_edits { 1 } else { 0 })
+    .bind(team_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if result.rows_affected() == 0 {
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    let team = sqlx::query_as::<_, TeamEditSetting>(
+        r#"SELECT id, name, abbreviation, division, COALESCE(allow_edits, 0) as allow_edits
+           FROM teams
+           WHERE id = ? AND deleted_at IS NULL"#,
+    )
+    .bind(team_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.live_updates.publish_reporting_rounds_updated();
+
+    Ok(Json(team))
+}
+
 pub async fn update_poc_team(
     State(state): State<crate::AppState>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<UpdatePocTeamRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
-    ensure_team_edits_enabled(&state.db).await?;
-
-    let team_id: Option<(i64,)> = sqlx::query_as(
-        "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
+    let team_id = resolve_poc_team_id(&state.db, &email).await?;
+    ensure_team_edits_enabled(&state.db, team_id).await?;
     let abbreviation = normalize_team_abbreviation(payload.abbreviation.as_deref())?;
 
     sqlx::query("UPDATE teams SET abbreviation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -577,7 +639,8 @@ pub async fn update_poc_player(
     Json(payload): Json<UpdatePlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
-    ensure_team_edits_enabled(&state.db).await?;
+    let team_id = resolve_poc_team_id(&state.db, &email).await?;
+    ensure_team_edits_enabled(&state.db, team_id).await?;
     let normalized_name = payload.name.trim();
     let normalized_common_name = payload
         .common_name
@@ -699,7 +762,8 @@ pub async fn add_poc_player(
     Json(payload): Json<AddPlayerRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
-    ensure_team_edits_enabled(&state.db).await?;
+    let team_id = resolve_poc_team_id(&state.db, &email).await?;
+    ensure_team_edits_enabled(&state.db, team_id).await?;
     let normalized_name = payload.name.trim();
     let normalized_common_name = payload
         .common_name
@@ -715,16 +779,6 @@ pub async fn add_poc_player(
     if normalized_name.is_empty() {
         return Err(axum::http::StatusCode::BAD_REQUEST);
     }
-
-    let team_id: Option<(i64,)> = sqlx::query_as(
-        "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
 
     let player_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM users WHERE team_id = ? AND role = 2 AND deleted_at IS NULL",
@@ -772,7 +826,8 @@ pub async fn delete_poc_player(
     Path(player_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
-    ensure_team_edits_enabled(&state.db).await?;
+    let team_id = resolve_poc_team_id(&state.db, &email).await?;
+    ensure_team_edits_enabled(&state.db, team_id).await?;
 
     let mut tx = state
         .db
@@ -837,17 +892,8 @@ pub async fn update_poc_team_logo(
     Json(payload): Json<UpdateLogoRequest>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let email = extract_email(&headers)?;
-    ensure_team_edits_enabled(&state.db).await?;
-
-    let team_id: Option<(i64,)> = sqlx::query_as(
-        "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let team_id = team_id.ok_or(axum::http::StatusCode::FORBIDDEN)?.0;
+    let team_id = resolve_poc_team_id(&state.db, &email).await?;
+    ensure_team_edits_enabled(&state.db, team_id).await?;
 
     sqlx::query(
         "UPDATE teams SET full_logo = ?, small_logo = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
@@ -875,19 +921,59 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
     cache::invalidate_teams_list().await;
 }
 
-async fn ensure_team_edits_enabled(db: &SqlitePool) -> Result<(), axum::http::StatusCode> {
-    let row: Option<(i64,)> =
-        sqlx::query_as("SELECT is_enabled FROM reporting_round_settings WHERE round_key = ?")
-            .bind(TEAM_EDITS_ROUND_KEY)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+async fn resolve_poc_team_id(
+    db: &SqlitePool,
+    email: &str,
+) -> Result<i64, axum::http::StatusCode> {
+    let team_id: Option<(i64,)> = sqlx::query_as(
+        "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
+    )
+    .bind(email)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if matches!(row, Some((0,))) {
+    team_id
+        .map(|(team_id,)| team_id)
+        .ok_or(axum::http::StatusCode::FORBIDDEN)
+}
+
+async fn ensure_team_edits_enabled(
+    db: &SqlitePool,
+    team_id: i64,
+) -> Result<(), axum::http::StatusCode> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT COALESCE(allow_edits, 0) FROM teams WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(team_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !matches!(row, Some((1,))) {
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
 
     Ok(())
+}
+
+async fn verify_super_user(
+    db: &SqlitePool,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), axum::http::StatusCode> {
+    let email = extract_email(headers)?;
+    let role: Option<(i64,)> =
+        sqlx::query_as("SELECT role FROM users WHERE email = ? AND deleted_at IS NULL")
+            .bind(&email)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if matches!(role, Some((0,))) {
+        Ok(())
+    } else {
+        Err(axum::http::StatusCode::FORBIDDEN)
+    }
 }
 
 fn extract_email(headers: &axum::http::HeaderMap) -> Result<String, axum::http::StatusCode> {

@@ -1,6 +1,10 @@
 # Edit Team
  
-Team admins should log in with their credentials to edit their team.
+- Team admins should log in with their credentials to edit their team.
+
+- Credentials are available with the email used while registering, and contact email.
+
+- Please clear the balance fee remaining, for access to edit team.
  
 ## What your team can update
  

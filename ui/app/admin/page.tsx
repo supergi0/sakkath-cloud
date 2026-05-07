@@ -70,16 +70,22 @@ interface ReportingRoundSetting {
   is_enabled: boolean;
 }
 
+interface TeamEditSetting {
+  id: number;
+  name: string;
+  abbreviation?: string | null;
+  division: number;
+  allow_edits: boolean;
+}
+
 interface PocTeamSummary {
   id: number;
 }
 
-const TEAM_EDITS_ROUND_KEY = 10001;
-
 type MatchStatus = 'upcoming' | 'live' | 'ended';
 type PanelKey = 't1' | 'log' | 't2';
 type ConfirmAction = 'end' | 'save' | 'undo' | 'possession';
-type AdminView = 'reporting' | 'allow-reporting';
+type AdminView = 'reporting' | 'permission' | 'teams';
 
 const EVENT_LABELS = ['Score', 'Assist', 'Block', 'Turnover'];
 const EVENT_COLORS = ['text-green-500', 'text-sky-400', 'text-violet-400', 'text-amber-400'];
@@ -241,6 +247,7 @@ function AdminContent() {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
   const [pendingPossession, setPendingPossession] = useState<{ matchId: number; possession: 1 | 2 } | null>(null);
   const [savingRoundKey, setSavingRoundKey] = useState<number | null>(null);
+  const [savingTeamId, setSavingTeamId] = useState<number | null>(null);
   const [matchSearch, setMatchSearch] = useState('');
   const [endedScoreDraft, setEndedScoreDraft] = useState<{ t1_score: string; t2_score: string }>({ t1_score: '', t2_score: '' });
 
@@ -283,6 +290,13 @@ function AdminContent() {
     return response.json();
   };
 
+  const fetchTeamEditSettings = async (): Promise<TeamEditSetting[]> => {
+    if (!token || !isSuperAdmin) return [];
+    const response = await fetch(apiUrl('/v1/super/team-edit-settings'), { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) return [];
+    return response.json();
+  };
+
   const { data: matches = [], mutate: mutateMatches, isLoading: matchesLoading } = useSWR(
     token && isLoggedIn && canReport ? apiUrl('/v1/admin/matches') : null,
     fetchVolunteerMatches,
@@ -307,6 +321,12 @@ function AdminContent() {
     { revalidateOnFocus: true }
   );
 
+  const { data: teamEditSettings = [], mutate: mutateTeamEditSettings, isLoading: teamEditSettingsLoading } = useSWR(
+    token && isLoggedIn && isSuperAdmin ? apiUrl('/v1/super/team-edit-settings') : null,
+    fetchTeamEditSettings,
+    { revalidateOnFocus: true }
+  );
+
   useEffect(() => {
     if (!isLoggedIn || !canReport) return;
 
@@ -319,10 +339,11 @@ function AdminContent() {
       },
       onReportingRoundsUpdated: () => {
         void mutateReportingRounds();
+        void mutateTeamEditSettings();
         void mutateMatches();
       },
     });
-  }, [activeMatchId, canReport, isLoggedIn, mutateActiveMatch, mutateMatches, mutateReportingRounds]);
+  }, [activeMatchId, canReport, isLoggedIn, mutateActiveMatch, mutateMatches, mutateReportingRounds, mutateTeamEditSettings]);
 
   useEffect(() => {
     if (!activeMatch) return;
@@ -549,6 +570,31 @@ function AdminContent() {
       setErrorMessage(error instanceof Error ? error.message : 'Unable to update reporting access right now.');
     } finally {
       setSavingRoundKey(null);
+    }
+  }
+
+  async function toggleTeamEditSetting(teamId: number, allowEdits: boolean) {
+    if (!token || !isSuperAdmin) return;
+
+    try {
+      setSavingTeamId(teamId);
+      setErrorMessage(null);
+      const response = await fetch(apiUrl(`/v1/super/teams/${teamId}/allow-edits`), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ allow_edits: allowEdits }),
+      });
+
+      if (!response.ok) throw new Error('Unable to update team edit access right now.');
+
+      await mutateTeamEditSettings();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to update team edit access right now.');
+    } finally {
+      setSavingTeamId(null);
     }
   }
 
@@ -1144,9 +1190,11 @@ function AdminContent() {
   }
 
   // MATCH LIST VIEW
-  const reporterHeading = adminView === 'allow-reporting'
-    ? 'Allow Reporting'
-    : isPoc ? 'Team Reporting' : 'Start Reporting';
+  const reporterHeading = adminView === 'permission'
+    ? 'Permission'
+    : adminView === 'teams'
+      ? 'Teams'
+      : isPoc ? 'Team Reporting' : 'Start Reporting';
   const normalizedMatchSearch = matchSearch.trim().toLowerCase();
   const visibleMatches = isSuperAdmin && adminView === 'reporting' && normalizedMatchSearch
     ? matches.filter(match => {
@@ -1160,6 +1208,8 @@ function AdminContent() {
         return fields.some(value => value.toLowerCase().includes(normalizedMatchSearch));
       })
     : matches;
+  const openTeams = teamEditSettings.filter(team => team.division === 0);
+  const womenTeams = teamEditSettings.filter(team => team.division === 1);
   
 
   return (
@@ -1167,7 +1217,7 @@ function AdminContent() {
       <div className="mx-auto max-w-3xl">
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
           {isSuperAdmin && (
-            <div className="mb-4 grid grid-cols-2 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-950 p-1">
+            <div className="mb-4 grid grid-cols-3 rounded-full border border-gray-200 dark:border-slate-800 bg-gray-100 dark:bg-slate-950 p-1">
               <button
                 onClick={() => setAdminView('reporting')}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
@@ -1179,14 +1229,24 @@ function AdminContent() {
                 Matches
               </button>
               <button
-                onClick={() => setAdminView('allow-reporting')}
+                onClick={() => setAdminView('permission')}
                 className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  adminView === 'allow-reporting'
+                  adminView === 'permission'
                     ? 'bg-amber-400 text-gray-900'
                     : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-900'
                 }`}
               >
                 Permission
+              </button>
+              <button
+                onClick={() => setAdminView('teams')}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  adminView === 'teams'
+                    ? 'bg-amber-400 text-gray-900'
+                    : 'text-gray-600 dark:text-slate-400 hover:bg-gray-200 dark:hover:bg-slate-900'
+                }`}
+              >
+                Teams
               </button>
             </div>
           )}
@@ -1206,14 +1266,13 @@ function AdminContent() {
             </div>
           )}
 
-          {adminView === 'allow-reporting' && isSuperAdmin ? (
+          {adminView === 'permission' && isSuperAdmin ? (
             <div className="space-y-3">
               {reportingRoundsLoading && reportingRounds.length === 0 && (
                 <Text className="text-sm text-gray-400 dark:text-slate-500">Loading round settings...</Text>
               )}
               {reportingRounds.map(round => {
                 const saving = savingRoundKey === round.round_key;
-                const isTeamEditToggle = round.round_key === TEAM_EDITS_ROUND_KEY;
                 return (
                   <div
                     key={round.round_key}
@@ -1222,13 +1281,9 @@ function AdminContent() {
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">{round.label}</div>
                       <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
-                        {isTeamEditToggle
-                          ? (round.is_enabled
-                            ? 'POCs can edit roster entries, team code, and logos.'
-                            : 'POCs can still handle reporting and spirit, but team profile edits are locked.')
-                          : (round.is_enabled
-                            ? 'Admins and POCs can report this round.'
-                            : 'Pairings stay visible, but reporting is locked.')}
+                        {round.is_enabled
+                          ? 'Admins and POCs can report this round.'
+                          : 'Pairings stay visible, but reporting is locked.'}
                       </div>
                     </div>
                     <button
@@ -1246,6 +1301,56 @@ function AdminContent() {
                   </div>
                 );
               })}
+            </div>
+          ) : adminView === 'teams' && isSuperAdmin ? (
+            <div className="space-y-5">
+              {teamEditSettingsLoading && teamEditSettings.length === 0 && (
+                <Text className="text-sm text-gray-400 dark:text-slate-500">Loading team permissions...</Text>
+              )}
+              {[
+                { label: 'Open', teams: openTeams },
+                { label: 'Women', teams: womenTeams },
+              ].map(group => (
+                <div key={group.label} className="space-y-3">
+                  <div className="text-xs font-bold uppercase tracking-[0.16em] text-gray-500 dark:text-slate-500">{group.label}</div>
+                  {group.teams.length === 0 ? (
+                    <Text className="text-sm text-gray-400 dark:text-slate-500">No teams available.</Text>
+                  ) : (
+                    group.teams.map(team => {
+                      const saving = savingTeamId === team.id;
+                      return (
+                        <div
+                          key={team.id}
+                          className="flex items-center justify-between rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800 px-4 py-3"
+                        >
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900 dark:text-white">
+                              {getAdminDisplayTeamName(team.name, team.abbreviation)}
+                            </div>
+                            <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                              {team.allow_edits
+                                ? 'Team can edit roster entries, team short name, and logos.'
+                                : 'Team edits are locked. Reporting and post-match actions stay available.'}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => toggleTeamEditSetting(team.id, !team.allow_edits)}
+                            disabled={saving}
+                            className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold transition disabled:opacity-60 ${
+                              team.allow_edits
+                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                                : 'bg-gray-200 text-gray-600 dark:bg-slate-700 dark:text-slate-300'
+                            }`}
+                          >
+                            {team.allow_edits ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                            {team.allow_edits ? 'Enabled' : 'Locked'}
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              ))}
             </div>
           ) : (
             <div className="space-y-2">

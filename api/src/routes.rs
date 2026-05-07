@@ -108,6 +108,14 @@ fn super_routes() -> Router<AppState> {
             put(matches::update_reporting_round_setting),
         )
         .route(
+            "/super/team-edit-settings",
+            get(team::get_team_edit_settings),
+        )
+        .route(
+            "/super/teams/:id/allow-edits",
+            put(team::update_team_edit_setting),
+        )
+        .route(
             "/super/matches/:id/score",
             put(matches::update_incomplete_match_score),
         )

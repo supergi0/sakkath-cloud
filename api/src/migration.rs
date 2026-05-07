@@ -98,6 +98,20 @@ async fn table_column_is_not_null(
     Ok(matches!(not_null, Some((1,))))
 }
 
+async fn table_column_default(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let query = format!("SELECT dflt_value FROM pragma_table_info('{table}') WHERE name = ?");
+    let default_value: Option<(Option<String>,)> = sqlx::query_as(&query)
+        .bind(column)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(default_value.and_then(|(value,)| value))
+}
+
 async fn table_has_foreign_key_target(
     pool: &SqlitePool,
     table: &str,
@@ -442,7 +456,7 @@ async fn normalize_field_names(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-fn reporting_round_defaults() -> [(i64, &'static str, bool); 9] {
+fn reporting_round_defaults() -> [(i64, &'static str, bool); 8] {
     [
         (1, "Round 1", false),
         (2, "Round 2", false),
@@ -452,8 +466,18 @@ fn reporting_round_defaults() -> [(i64, &'static str, bool); 9] {
         (6, "Round 6", false),
         (1001, "Playoffs", false),
         (1002, "Finals", false),
-        (10001, "Allow Team Edits", true),
     ]
+}
+
+async fn prune_legacy_reporting_round_settings(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"DELETE FROM reporting_round_settings
+           WHERE round_key = 10001 OR label = 'Allow Team Edits'"#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 async fn seed_persistent_random_state(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -574,6 +598,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             location VARCHAR(255),
             full_logo TEXT,
             small_logo TEXT,
+            allow_edits INTEGER NOT NULL DEFAULT 0,
             roster_moves_remaining INTEGER NOT NULL DEFAULT 3,
             init_rank INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -760,6 +785,32 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         )
         .execute(pool)
         .await?;
+    }
+
+    if !table_has_column(pool, "teams", "allow_edits").await? {
+        sqlx::query("ALTER TABLE teams ADD COLUMN allow_edits INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+
+    sqlx::query("UPDATE teams SET allow_edits = COALESCE(allow_edits, 0)")
+        .execute(pool)
+        .await?;
+
+    if !table_column_is_not_null(pool, "teams", "allow_edits").await? {
+        return Err(sqlx::Error::Configuration(
+            "Column teams.allow_edits must be NOT NULL".into(),
+        ));
+    }
+
+    if table_column_default(pool, "teams", "allow_edits")
+        .await?
+        .as_deref()
+        != Some("0")
+    {
+        return Err(sqlx::Error::Configuration(
+            "Column teams.allow_edits must default to 0".into(),
+        ));
     }
 
     if !table_has_column(pool, "users", "common_name").await? {
@@ -966,6 +1017,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
 
     seed_reporting_round_settings(pool).await?;
+    prune_legacy_reporting_round_settings(pool).await?;
     seed_persistent_random_state(pool).await?;
     normalize_field_names(pool).await?;
 
@@ -1048,6 +1100,12 @@ pub async fn verify_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     if !table_has_column(pool, "teams", "roster_moves_remaining").await? {
         return Err(sqlx::Error::Configuration(
             "Column teams.roster_moves_remaining not found".into(),
+        ));
+    }
+
+    if !table_has_column(pool, "teams", "allow_edits").await? {
+        return Err(sqlx::Error::Configuration(
+            "Column teams.allow_edits not found".into(),
         ));
     }
 

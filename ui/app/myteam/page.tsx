@@ -15,6 +15,7 @@ interface Team {
   location: string | null;
   full_logo: string | null;
   small_logo: string | null;
+  allow_edits: boolean;
   roster_moves_remaining: number;
 }
 
@@ -88,12 +89,6 @@ interface ScoreConfirmRow {
   t2_score: number;
 }
 
-interface ReportingRoundSetting {
-  round_key: number;
-  label: string;
-  is_enabled: boolean;
-}
-
 // Per-match post-game form: opponent spirit + self spirit + score confirm
 interface PostMatchForm {
   t1_score: string;
@@ -143,7 +138,6 @@ type MockConfirmAction = 'start' | 'save' | 'undo' | 'end';
 type FeedbackState = { type: 'error' | 'success'; message: string } | null;
 
 const MAX_TEAM_PLAYERS = 22;
-const TEAM_EDITS_ROUND_KEY = 10001;
 const TEAM_EDITS_LOCKED_MESSAGE = 'Team edits are currently locked by the super admin.';
 const MOCK_MATCH_ID = -1;
 const MOCK_TEST_TEAM_ID = -99;
@@ -683,24 +677,20 @@ export default function MyTeamPage() {
   const fetchData = async () => {
     if (!token) return;
     try {
-      const [teamRes, playersRes, matchesRes, settingsRes] = await Promise.all([
+      const [teamRes, playersRes, matchesRes] = await Promise.all([
         fetch(apiUrl('/v1/poc/team'), { headers: { Authorization: `Bearer ${token}` } }),
         fetch(apiUrl('/v1/poc/players'), { headers: { Authorization: `Bearer ${token}` } }),
         fetch(apiUrl('/v1/poc/matches'), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl('/v1/admin/reporting-rounds'), { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (teamRes.ok) {
-        const teamData = await teamRes.json();
+        const teamData: Team = await teamRes.json();
         setTeam(teamData);
         setTeamAbbreviation(teamData.abbreviation || '');
+        setTeamEditsEnabled(teamData.allow_edits);
       }
       if (playersRes.ok) setPlayers(await playersRes.json());
       if (matchesRes.ok) setMatches(await matchesRes.json());
-      if (settingsRes.ok) {
-        const settings: ReportingRoundSetting[] = await settingsRes.json();
-        const teamEditSetting = settings.find((setting) => setting.round_key === TEAM_EDITS_ROUND_KEY);
-        setTeamEditsEnabled(teamEditSetting ? teamEditSetting.is_enabled : true);
-      } else {
+      if (!teamRes.ok) {
         setTeamEditsEnabled(true);
       }
     } catch (err) { console.error(err); }
