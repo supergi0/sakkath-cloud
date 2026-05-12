@@ -1,16 +1,28 @@
 'use client';
 
 import { useTheme } from 'next-themes';
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import { Sun, Moon } from 'lucide-react';
 
-export function ThemeToggle() {
-  const [mounted, setMounted] = useState(false);
-  const { theme, setTheme } = useTheme();
+function subscribeToHydration() {
+  return () => {};
+}
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+function getHydratedSnapshot() {
+  return true;
+}
+
+function getServerHydratedSnapshot() {
+  return false;
+}
+
+export function ThemeToggle() {
+  const mounted = useSyncExternalStore(
+    subscribeToHydration,
+    getHydratedSnapshot,
+    getServerHydratedSnapshot,
+  );
+  const { theme, setTheme } = useTheme();
 
   if (!mounted) {
     return <div className="w-10 h-10" />;

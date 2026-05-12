@@ -2,16 +2,17 @@
 
 ## Timings
 
-- Opens Swiss games are 60 minutes.
-- Opens Playoff and Final games are 75 minutes.
-- All Women's games are 75 minutes.
+- All Swiss games are 65 minutes.
+- Sunday playoff and placement games are 75 minutes.
+- Swiss games may finish as draws.
+- Sunday playoff and placement games must produce a winner.
 - Teams should begin soft cap procedures early to ensure the game ends within the allotted time. (Soft cap: finish the current point, then play one additional point)
 - A hard stop is called on extension of 10 minutes, play must end immediately regardless of the score.
 
 ## Timeouts
 
-- For 60-minute games, each team gets **1 timeout** per game.
-- Timeouts cannot be taken within the last 5 minutes of a 60-minute game.
+- For 65-minute games, each team gets **1 timeout** per game.
+- Timeouts cannot be taken within the last 5 minutes of a 65-minute game.
 - For 75-minute games, each team gets **1 timeout per half**.
 - Timeouts cannot be taken within the last 5 minutes of a 75-minute game.
 

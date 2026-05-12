@@ -97,14 +97,13 @@ impl PasswordManifest {
         entries
             .iter()
             .find(|entry| {
-                entry
-                    .team
-                    .as_deref()
-                    .map(normalize_key)
-                    .as_deref()
-                    == Some(team_key.as_str())
+                entry.team.as_deref().map(normalize_key).as_deref() == Some(team_key.as_str())
             })
-            .or_else(|| entries.iter().find(|entry| normalize_key(&entry.email) == email_key))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|entry| normalize_key(&entry.email) == email_key)
+            })
             .map(|entry| entry.password.clone())
     }
 }
@@ -217,7 +216,11 @@ pub async fn populate_from_teams_csv(
         }
 
         let admin_password = resolve_seed_password(
-            existing_manifest.find_division_password(row.division, &row.admin_email, &row.team_name),
+            existing_manifest.find_division_password(
+                row.division,
+                &row.admin_email,
+                &row.team_name,
+            ),
             &jwt_secret,
             &row.admin_email,
         )?;
@@ -304,9 +307,7 @@ fn load_super_admin_emails() -> Result<Vec<String>, sqlx::Error> {
     let mut seen = HashSet::new();
     for value in parsed {
         let email = normalize_email(Some(&value)).ok_or_else(|| {
-            sqlx::Error::Configuration(
-                format!("Invalid email in SUPER_ADMINS: {value}").into(),
-            )
+            sqlx::Error::Configuration(format!("Invalid email in SUPER_ADMINS: {value}").into())
         })?;
 
         if !seen.insert(email.clone()) {
@@ -401,9 +402,7 @@ fn write_password_manifest(
     manifest: &PasswordManifest,
 ) -> Result<(), sqlx::Error> {
     let json = serde_json::to_string_pretty(manifest).map_err(|err| {
-        sqlx::Error::Configuration(
-            format!("Failed to serialize password manifest: {err}").into(),
-        )
+        sqlx::Error::Configuration(format!("Failed to serialize password manifest: {err}").into())
     })?;
 
     fs::write(manifest_path, format!("{json}\n")).map_err(|err| {

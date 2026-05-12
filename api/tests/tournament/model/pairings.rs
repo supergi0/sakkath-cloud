@@ -20,7 +20,6 @@ pub(crate) struct SortMetrics {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExpectedSwissRound {
-    pub(crate) pairings: Vec<(i64, i64)>,
     pub(crate) naive_had_rematch: bool,
     pub(crate) diagnostics: RoundPairingDiagnostics,
 }
@@ -63,7 +62,10 @@ pub(crate) fn build_scoring_groups(sorted: &[SortMetrics]) -> Vec<Vec<i64>> {
     groups.push(current_group);
 
     fix_odd_groups(&mut groups);
-    groups.into_iter().filter(|group| !group.is_empty()).collect()
+    groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 pub(crate) fn naive_pairings(groups: &[Vec<i64>]) -> Vec<(i64, i64)> {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Text } from "../components/Text";
 import { apiUrl } from "../lib/api";
@@ -37,21 +37,71 @@ const STATS_PREFS_KEY = 'sakkath:stats:preferences';
 
 const PAGE_SIZE = 32;
 
+function readStatsPreferences(): StatsPreferences {
+  if (typeof window === 'undefined') {
+    return { division: 'all', teamFilter: null };
+  }
+
+  const savedPreferences = localStorage.getItem(STATS_PREFS_KEY);
+  if (!savedPreferences) {
+    return { division: 'all', teamFilter: null };
+  }
+
+  try {
+    const parsed: StatsPreferences = JSON.parse(savedPreferences);
+    const division =
+      parsed.division === 'all' || parsed.division === 'open' || parsed.division === 'women'
+        ? parsed.division
+        : 'all';
+    const teamFilter = typeof parsed.teamFilter === 'number' || parsed.teamFilter === null
+      ? parsed.teamFilter
+      : null;
+    return { division, teamFilter };
+  } catch {
+    return { division: 'all', teamFilter: null };
+  }
+}
+
 function getTotalStat(player: Pick<PlayerStat, 'goals' | 'assists' | 'blocks' | 'turnovers'>) {
   return player.goals + player.assists + player.blocks - player.turnovers;
+}
+
+interface SortHeaderProps {
+  field: SortField;
+  label: string;
+  className?: string;
+  sortField: SortField;
+  sortDir: SortDir;
+  onSort: (field: SortField) => void;
+}
+
+function SortHeader({ field, label, className = '', sortField, sortDir, onSort }: SortHeaderProps) {
+  return (
+    <th
+      className={`py-3 px-1 md:px-2 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 whitespace-nowrap ${className} ${
+        sortField === field ? 'text-gray-900 dark:text-white font-bold' : 'text-gray-500 dark:text-gray-400'
+      }`}
+      onClick={() => onSort(field)}
+    >
+      <div className="flex items-center justify-center gap-1">
+        <span className="text-xs md:text-sm">{label}</span>
+        {sortField === field && (
+          sortDir === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
+        )}
+      </div>
+    </th>
+  );
 }
 
 export default function Stats() {
   const [players, setPlayers] = useState<PlayerStat[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
-  const [division, setDivision] = useState<'all' | 'open' | 'women'>('all');
-  const [teamFilter, setTeamFilter] = useState<number | null>(null);
+  const [division, setDivision] = useState<'all' | 'open' | 'women'>(() => readStatsPreferences().division);
+  const [teamFilter, setTeamFilter] = useState<number | null>(() => readStatsPreferences().teamFilter);
   const [sortField, setSortField] = useState<SortField>('total');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [page, setPage] = useState(1);
-  const [tableStickyTop, setTableStickyTop] = useState(112);
-  const headerRef = useRef<HTMLDivElement | null>(null);
   const [showingCommonNames, setShowingCommonNames] = useState<Record<number, boolean>>({});
 
   const togglePlayerName = (playerId: number) => {
@@ -98,20 +148,6 @@ export default function Stats() {
   };
 
   useEffect(() => {
-    const savedPreferences = localStorage.getItem(STATS_PREFS_KEY);
-    if (savedPreferences) {
-      try {
-        const parsed: StatsPreferences = JSON.parse(savedPreferences);
-        if (parsed.division === 'all' || parsed.division === 'open' || parsed.division === 'women') {
-          setDivision(parsed.division);
-        }
-        if (typeof parsed.teamFilter === 'number' || parsed.teamFilter === null) {
-          setTeamFilter(parsed.teamFilter);
-        }
-      } catch {
-      }
-    }
-
     Promise.all([
       fetch(apiUrl('/v1/player-stats')).then(r => r.json()),
       fetch(apiUrl('/v1/teams')).then(r => r.json()),
@@ -126,19 +162,6 @@ export default function Stats() {
     const preferences: StatsPreferences = { division, teamFilter };
     localStorage.setItem(STATS_PREFS_KEY, JSON.stringify(preferences));
   }, [division, teamFilter]);
-
-  useEffect(() => {
-    const updateStickyTop = () => {
-      const navbarHeight = 56;
-      const headerHeight = headerRef.current?.offsetHeight ?? 0;
-      setTableStickyTop(navbarHeight + headerHeight);
-    };
-
-    updateStickyTop();
-    window.addEventListener('resize', updateStickyTop);
-
-    return () => window.removeEventListener('resize', updateStickyTop);
-  }, []);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -187,22 +210,6 @@ export default function Stats() {
   const totalPages = Math.ceil(sortedPlayers.length / PAGE_SIZE);
   const paginatedPlayers = sortedPlayers.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const SortHeader = ({ field, label, className = '' }: { field: SortField; label: string; className?: string }) => (
-    <th 
-      className={`py-3 px-1 md:px-2 font-medium cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 whitespace-nowrap ${className} ${
-        sortField === field ? 'text-gray-900 dark:text-white font-bold' : 'text-gray-500 dark:text-gray-400'
-      }`}
-      onClick={() => handleSort(field)}
-    >
-      <div className="flex items-center justify-center gap-1">
-        <span className="text-xs md:text-sm">{label}</span>
-        {sortField === field && (
-          sortDir === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />
-        )}
-      </div>
-    </th>
-  );
-
   const filteredTeams = teams.filter(t => {
     if (division === 'open') return t.division === 0;
     if (division === 'women') return t.division === 1;
@@ -225,7 +232,7 @@ export default function Stats() {
   return (
     <div className="bg-gray-100 dark:bg-slate-950 pb-2 sm:pb-4">
       <div className="sticky top-14 z-30 bg-gray-100 dark:bg-slate-950">
-        <div ref={headerRef} className="px-4 py-3 sm:mx-auto sm:max-w-7xl sm:px-4">
+        <div className="px-4 py-3 sm:mx-auto sm:max-w-7xl sm:px-4">
           <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
             <Text as="h1" variant="primary" className="text-xl">
               Player Statistics
@@ -266,17 +273,17 @@ export default function Stats() {
           <table className="w-full min-w-[780px] text-xs sm:min-w-[860px] sm:text-sm">
             <thead className="sticky top-0 z-20 bg-white dark:bg-slate-900 shadow-[0_2px_4px_rgba(0,0,0,0.05)] dark:shadow-[0_2px_4px_rgba(0,0,0,0.2)]">
               <tr className="border-b border-gray-200 dark:border-slate-700">
-                  <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30 w-[140px] max-w-[140px]" />
-                  <SortHeader field="total" label="Tot" />
-                  <SortHeader field="goals" label="Gls" />
-                  <SortHeader field="assists" label="Ast" />
-                  <SortHeader field="blocks" label="Blk" />
-                  <SortHeader field="turnovers" label="Tvr" />
-                  <SortHeader field="matches" label="M" />
-                  <SortHeader field="gpm" label="G/M" />
-                  <SortHeader field="apm" label="A/M" />
-                  <SortHeader field="bpm" label="B/M" />
-                  <SortHeader field="tpm" label="T/M" />
+                  <SortHeader field="name" label="Player" className="text-left sticky left-0 bg-white dark:bg-slate-900 z-30 w-[140px] max-w-[140px]" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="total" label="Tot" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="goals" label="Gls" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="assists" label="Ast" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="blocks" label="Blk" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="turnovers" label="Tvr" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="matches" label="M" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="gpm" label="G/M" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="apm" label="A/M" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="bpm" label="B/M" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+                  <SortHeader field="tpm" label="T/M" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
                 </tr>
               </thead>
               <tbody>

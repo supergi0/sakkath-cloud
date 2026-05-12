@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { MapPin, Users, Trophy, Target, ArrowUp, ArrowDown, Star, TrendingUp, TrendingDown, Sparkle, AlignStartVertical, Play, Circle, ChevronUp, ChevronDown } from "lucide-react";
@@ -229,7 +230,14 @@ function TeamContent() {
           <div className="flex flex-col md:flex-row items-center gap-6">
             <div className="flex-shrink-0 w-[120px] h-[120px] relative bg-gray-100 dark:bg-slate-800 rounded-full flex items-center justify-center overflow-hidden">
               {team.full_logo ? (
-                <img src={team.full_logo} alt={team.name} className="w-full h-full object-cover" />
+                <Image
+                  src={team.full_logo}
+                  alt={team.name}
+                  fill
+                  unoptimized
+                  sizes="120px"
+                  className="object-cover"
+                />
               ) : (
                 <Text variant="secondary" className="text-4xl font-bold">{team.name.charAt(0).toUpperCase()}</Text>
               )}
@@ -367,7 +375,6 @@ function TeamContent() {
                 const theirScore = isT1 ? match.t2_score : match.t1_score;
                 const ourSpirit = isT1 ? match.t1_spirit : match.t2_spirit;
                 const theirSpirit = isT1 ? match.t2_spirit : match.t1_spirit;
-                const opponent = isT1 ? match.t2_name : match.t1_name;
                 const ourDisplayName = getCardTeamName(team.name, team.abbreviation);
                 const opponentDisplayName = isT1
                   ? getCardTeamName(match.t2_name, match.t2_abbreviation)

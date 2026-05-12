@@ -9,12 +9,7 @@ use crate::helpers::{cache, rounds, sorting};
 
 const MAX_TEAM_PLAYERS: i64 = 22;
 
-type PocPlayerCurrentRow = (
-    i64,
-    String,
-    Option<String>,
-    i64,
-);
+type PocPlayerCurrentRow = (i64, String, Option<String>, i64);
 
 #[derive(Deserialize)]
 pub struct DivisionQuery {
@@ -435,12 +430,8 @@ pub async fn get_team_seed_timeline(
         } else {
             total_rounds
         };
-        let swiss_order = sorting::get_generation_standings_through_round(
-            &state.db,
-            division,
-            swiss_round,
-        )
-        .await;
+        let swiss_order =
+            sorting::get_generation_standings_through_round(&state.db, division, swiss_round).await;
         let playoff_seed_order =
             rounds::build_seed_order_after_playoffs(&swiss_order, &playoff_results);
 
@@ -691,12 +682,8 @@ pub async fn update_poc_player(
     .await
     .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let (
-        team_id,
-        current_name,
-        current_common_name,
-        remaining_moves,
-    ) = current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
+    let (team_id, current_name, current_common_name, remaining_moves) =
+        current.ok_or(axum::http::StatusCode::FORBIDDEN)?;
 
     let current_common_name = current_common_name
         .as_deref()
@@ -921,10 +908,7 @@ async fn invalidate_team_caches(db: &sqlx::SqlitePool, team_id: i64) {
     cache::invalidate_teams_list().await;
 }
 
-async fn resolve_poc_team_id(
-    db: &SqlitePool,
-    email: &str,
-) -> Result<i64, axum::http::StatusCode> {
+async fn resolve_poc_team_id(db: &SqlitePool, email: &str) -> Result<i64, axum::http::StatusCode> {
     let team_id: Option<(i64,)> = sqlx::query_as(
         "SELECT team_id FROM users WHERE email = ? AND role = 3 AND deleted_at IS NULL",
     )

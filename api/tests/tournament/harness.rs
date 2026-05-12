@@ -1,11 +1,9 @@
+use super::config::{deterministic_global_coin_toss_seed, deterministic_stage_coin_toss_seed};
 use super::model::{
     LoginResponse, MatchDetailResponse, PlayerStatResponse, ReportingRoundSettingResponse,
     ScheduleGridResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse,
     StandingRowResponse, StatsResponse, TeamDetailResponse, TeamMatchResponse, TeamResponse,
     TournamentTracker, UpcomingMatchResponse,
-};
-use super::config::{
-    deterministic_global_coin_toss_seed, deterministic_stage_coin_toss_seed,
 };
 use api::{AppState, build_api_only_app, migration};
 use axum::body::{Body, to_bytes};
@@ -411,9 +409,8 @@ async fn seed_deterministic_coin_toss_rows(db: &SqlitePool, base_seed: u64) -> T
 
     for division in [0_i64, 1_i64] {
         for stage_key in [1_i64, 2, 3, 4, 5, 6, 1001, 1002] {
-            let seed =
-                (deterministic_stage_coin_toss_seed(base_seed, division, stage_key) & i64::MAX as u64)
-                    as i64;
+            let seed = (deterministic_stage_coin_toss_seed(base_seed, division, stage_key)
+                & i64::MAX as u64) as i64;
             let name = format!("standings_c7_coin_toss_division_{division}_stage_{stage_key}");
             sqlx::query(
                 r#"INSERT INTO persistent_random_state (name, seed)

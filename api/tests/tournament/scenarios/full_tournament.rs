@@ -120,12 +120,8 @@ fn describe_round_generation_diagnostics(diagnostics: &RoundPairingDiagnostics) 
         diagnostics.kept_candidates,
         diagnostics.total_simulations_run,
         timing,
-        format_optional_probability(
-            diagnostics.chosen_worst_case_same_point_miss_probability,
-        ),
-        format_optional_probability(
-            diagnostics.best_kept_worst_case_same_point_miss_probability,
-        ),
+        format_optional_probability(diagnostics.chosen_worst_case_same_point_miss_probability,),
+        format_optional_probability(diagnostics.best_kept_worst_case_same_point_miss_probability,),
         format_optional_probability(
             diagnostics.average_kept_worst_case_same_point_miss_probability,
         ),
@@ -197,6 +193,7 @@ pub(crate) async fn run_with_summary(
                         &harness,
                         &mut tracker,
                         &staff,
+                        &mut simulation,
                         schedule_match.id,
                         outcome,
                     )
@@ -237,9 +234,8 @@ pub(crate) async fn run_with_summary(
     }
 
     for division in [0, 1] {
-        if division == 0 {
-            let playoff_round_one =
-                load_round_matches(&harness, &mut tracker, division, 1001).await?;
+        let playoff_round_one = load_round_matches(&harness, &mut tracker, division, 1001).await?;
+        if !playoff_round_one.is_empty() {
             enable_reporting_round(&harness, staff.super_admin.as_str(), 1001).await?;
             let playoff_seed_ranks: HashMap<i64, i64> = harness
                 .get_standings(division)
@@ -271,6 +267,7 @@ pub(crate) async fn run_with_summary(
                         &harness,
                         &mut tracker,
                         &staff,
+                        &mut simulation,
                         schedule_match.id,
                         outcome,
                     )
@@ -324,34 +321,24 @@ pub(crate) async fn run_with_summary(
             &tracker,
         )?;
 
-        let final_swiss_order = tracker.swiss_summary(division);
-        if division == 0 && final_swiss_order.len() >= 2 {
-            let bottom_one = final_swiss_order[final_swiss_order.len() - 2].team_id;
-            let bottom_two = final_swiss_order[final_swiss_order.len() - 1].team_id;
-            assert!(
-                tracker
-                    .match_ids_for_team_and_type(bottom_one, 1002)
-                    .is_empty()
-            );
-            assert!(
-                tracker
-                    .match_ids_for_team_and_type(bottom_two, 1002)
-                    .is_empty()
-            );
-        }
-
         for schedule_match in &playoff_round_two {
             let note = if schedule_match.possession.unwrap_or(0) < 3 {
                 let outcome = simulation.playoff_round_two_outcome(&tracker, schedule_match);
-                finish_match_to_outcome(&harness, &mut tracker, &staff, schedule_match.id, outcome)
-                    .await?;
+                finish_match_to_outcome(
+                    &harness,
+                    &mut tracker,
+                    &staff,
+                    &mut simulation,
+                    schedule_match.id,
+                    outcome,
+                )
+                .await?;
                 format!("seeded {}", outcome.label())
             } else {
                 "pre-existing completed match snapshot".to_string()
             };
 
-            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, true)
-                .await?;
+            submit_standard_post_match(&mut harness, &mut tracker, schedule_match.id, true).await?;
             reporter.record_match_result(
                 "full-tournament",
                 division,
@@ -438,7 +425,8 @@ fn build_division_summary(
     let final_swiss = tracker.swiss_summary(division);
     let swiss_history = match_history(tracker, division, true);
     let (swiss_rematches, _swiss_team_rematches) = count_rematches(tracker, division, true);
-    let (tournament_rematches, tournament_team_rematches) = count_rematches(tracker, division, false);
+    let (tournament_rematches, tournament_team_rematches) =
+        count_rematches(tracker, division, false);
     let mut team_tournament_rematches: Vec<_> = tournament_team_rematches.into_iter().collect();
     team_tournament_rematches.sort_by_key(|(team_id, _)| *team_id);
 
@@ -490,7 +478,12 @@ fn build_boundary_meetings(
     final_swiss: &[SortMetrics],
     swiss_history: &HashMap<i64, HashSet<i64>>,
 ) -> Vec<BoundaryMeetingSummary> {
-    let targets = [(4usize, 5usize, "4v5"), (3, 6, "3v6"), (8, 9, "8v9"), (7, 10, "7v10")];
+    let targets = [
+        (4usize, 5usize, "4v5"),
+        (3, 6, "3v6"),
+        (8, 9, "8v9"),
+        (7, 10, "7v10"),
+    ];
 
     targets
         .into_iter()
@@ -503,7 +496,8 @@ fn build_boundary_meetings(
             let right_team = final_swiss[right_rank - 1].team_id;
             Some(BoundaryMeetingSummary {
                 label,
-                same_points: final_swiss[left_rank - 1].points == final_swiss[right_rank - 1].points,
+                same_points: final_swiss[left_rank - 1].points
+                    == final_swiss[right_rank - 1].points,
                 met: swiss_history
                     .get(&left_team)
                     .map(|opponents| opponents.contains(&right_team))
@@ -528,8 +522,14 @@ fn match_history(
             continue;
         }
 
-        history.entry(state.t1_id).or_insert_with(HashSet::new).insert(state.t2_id);
-        history.entry(state.t2_id).or_insert_with(HashSet::new).insert(state.t1_id);
+        history
+            .entry(state.t1_id)
+            .or_insert_with(HashSet::new)
+            .insert(state.t2_id);
+        history
+            .entry(state.t2_id)
+            .or_insert_with(HashSet::new)
+            .insert(state.t1_id);
     }
 
     history
@@ -572,9 +572,5 @@ fn count_rematches(
 }
 
 fn division_label(division: i64) -> &'static str {
-    if division == 0 {
-        "Open"
-    } else {
-        "Women"
-    }
+    if division == 0 { "Open" } else { "Women" }
 }

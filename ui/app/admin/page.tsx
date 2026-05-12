@@ -168,7 +168,6 @@ function MatchTimer({ startedAt, serverTime }: { startedAt?: string | null; serv
   useEffect(() => {
     if (!startedAt) {
       initializedRef.current = false;
-      setElapsedSeconds(0);
       return;
     }
 

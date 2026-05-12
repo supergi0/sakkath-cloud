@@ -1,5 +1,5 @@
 use super::model::{ScheduleMatchResponse, TournamentTracker};
-use rand::{RngCore, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngCore, SeedableRng, rngs::StdRng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutcomeKind {
@@ -36,7 +36,7 @@ impl TournamentSimulation {
         schedule_match: &ScheduleMatchResponse,
         tracker: &TournamentTracker,
     ) -> OutcomeKind {
-        if self.percent() < 20 {
+        if self.percent() < 5 {
             return OutcomeKind::Draw;
         }
 
@@ -79,6 +79,36 @@ impl TournamentSimulation {
         self.biased_winner(favorite_is_t1, favorite_base + gap * gap_factor)
     }
 
+    pub(crate) fn target_scores(
+        &mut self,
+        match_type: i64,
+        current_t1: i64,
+        current_t2: i64,
+        outcome: OutcomeKind,
+    ) -> (i64, i64) {
+        match outcome {
+            OutcomeKind::T1Win => {
+                let winner_score = self.winner_score(match_type, current_t1.max(current_t2));
+                let loser_score = self.loser_score(current_t2, winner_score);
+                (winner_score, loser_score)
+            }
+            OutcomeKind::T2Win => {
+                let winner_score = self.winner_score(match_type, current_t1.max(current_t2));
+                let loser_score = self.loser_score(current_t1, winner_score);
+                (loser_score, winner_score)
+            }
+            OutcomeKind::Draw => {
+                let draw_floor = if match_type >= 1000 { 10 } else { 8 };
+                let draw_ceiling = if match_type >= 1000 { 13 } else { 11 };
+                let target = self
+                    .rng
+                    .random_range(draw_floor..=draw_ceiling)
+                    .max(current_t1.max(current_t2));
+                (target, target)
+            }
+        }
+    }
+
     fn biased_winner(&mut self, favorite_is_t1: bool, favorite_percent: u8) -> OutcomeKind {
         let roll = self.percent();
         if favorite_is_t1 {
@@ -96,5 +126,20 @@ impl TournamentSimulation {
 
     fn percent(&mut self) -> u8 {
         (self.rng.next_u64() % 100) as u8
+    }
+
+    fn winner_score(&mut self, match_type: i64, current_max: i64) -> i64 {
+        let winner_floor = if match_type >= 1000 { 10 } else { 8 };
+        let winner_ceiling = if match_type >= 1000 { 13 } else { 12 };
+
+        self.rng
+            .random_range(winner_floor..=winner_ceiling)
+            .max(current_max + 1)
+    }
+
+    fn loser_score(&mut self, current_score: i64, winner_score: i64) -> i64 {
+        let desired_margin = self.rng.random_range(1..=4) as i64;
+        let preferred_score = winner_score.saturating_sub(desired_margin);
+        preferred_score.clamp(current_score, winner_score - 1)
     }
 }

@@ -706,19 +706,20 @@ pub async fn start_match(
         ));
     }
 
-    let current: Option<(i64, Option<i64>, i64)> =
-        sqlx::query_as("SELECT t1_id, possession, type FROM matches WHERE id = ? AND deleted_at IS NULL")
-            .bind(match_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|error| {
-                match_error_status(
-                    match_id,
-                    "start",
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to load match before start: {error}"),
-                )
-            })?;
+    let current: Option<(i64, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT t1_id, possession, type FROM matches WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(match_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        match_error_status(
+            match_id,
+            "start",
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load match before start: {error}"),
+        )
+    })?;
 
     let (t1_id, current_possession, match_type) = current.ok_or_else(|| {
         match_error_status(
@@ -743,19 +744,21 @@ pub async fn start_match(
 
     if reopening_ended_match {
         clear_post_match_state(&state.db, match_id).await?;
-        sqlx::query("UPDATE matches SET possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
-            .bind(possession)
-            .bind(match_id)
-            .execute(&state.db)
-            .await
-            .map_err(|error| {
-                match_error_status(
-                    match_id,
-                    "start",
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to reopen match: {error}"),
-                )
-            })?;
+        sqlx::query(
+            "UPDATE matches SET possession = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(possession)
+        .bind(match_id)
+        .execute(&state.db)
+        .await
+        .map_err(|error| {
+            match_error_status(
+                match_id,
+                "start",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to reopen match: {error}"),
+            )
+        })?;
 
         let division = load_division_for_team(&state.db, t1_id).await?;
         sorting::refresh_intermediate_standings_cache(&state.db, division).await;
@@ -834,15 +837,14 @@ pub async fn end_match(
         )
     })?;
 
-    let (possession, division, match_type, t1_score, t2_score) =
-        info.ok_or_else(|| {
-            match_error_status(
-                match_id,
-                "end",
-                axum::http::StatusCode::NOT_FOUND,
-                "match not found",
-            )
-        })?;
+    let (possession, division, match_type, t1_score, t2_score) = info.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "end",
+            axum::http::StatusCode::NOT_FOUND,
+            "match not found",
+        )
+    })?;
     if possession.is_none() || possession.unwrap_or(0) >= 3 {
         return Err(match_error_status(
             match_id,
@@ -889,11 +891,8 @@ pub async fn end_match(
         }),
     );
 
-    let auto_action = crate::controllers::scheduling::auto_advance_division_if_ready(
-        &state.db,
-        division,
-    )
-    .await;
+    let auto_action =
+        crate::controllers::scheduling::auto_advance_division_if_ready(&state.db, division).await;
 
     let (started_at, updated_at, server_time) =
         load_match_timing_snapshot(&state.db, match_id).await?;
@@ -938,15 +937,14 @@ pub async fn record_event(
             )
         })?;
 
-    let (t1_id, t2_id, mut t1_score, mut t2_score, possession) =
-        match_info.ok_or_else(|| {
-            match_error_status(
-                match_id,
-                "record_event",
-                axum::http::StatusCode::NOT_FOUND,
-                "match not found",
-            )
-        })?;
+    let (t1_id, t2_id, mut t1_score, mut t2_score, possession) = match_info.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "record_event",
+            axum::http::StatusCode::NOT_FOUND,
+            "match not found",
+        )
+    })?;
 
     let current_pos = possession.ok_or_else(|| {
         match_error_status(
@@ -980,16 +978,14 @@ pub async fn record_event(
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let player_team_id = player_team
-            .map(|t| t.0)
-            .ok_or_else(|| {
-                match_error_status(
-                    match_id,
-                    "record_event",
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "player not found or not active",
-                )
-            })?;
+        let player_team_id = player_team.map(|t| t.0).ok_or_else(|| {
+            match_error_status(
+                match_id,
+                "record_event",
+                axum::http::StatusCode::BAD_REQUEST,
+                "player not found or not active",
+            )
+        })?;
         if player_team_id != t1_id && player_team_id != t2_id {
             return Err(match_error_status(
                 match_id,
@@ -1218,15 +1214,14 @@ pub async fn undo_event(
         )
     })?;
 
-    let (t1_id, _t2_id, mut t1_score, mut t2_score, possession) =
-        match_info.ok_or_else(|| {
-            match_error_status(
-                match_id,
-                "undo_event",
-                axum::http::StatusCode::NOT_FOUND,
-                "match not found",
-            )
-        })?;
+    let (t1_id, _t2_id, mut t1_score, mut t2_score, possession) = match_info.ok_or_else(|| {
+        match_error_status(
+            match_id,
+            "undo_event",
+            axum::http::StatusCode::NOT_FOUND,
+            "match not found",
+        )
+    })?;
 
     let mut current_pos = possession.unwrap_or(1);
     if current_pos >= 3 {
@@ -1466,7 +1461,9 @@ async fn load_team_matches(db: &sqlx::SqlitePool, team_id: i64) -> Vec<TeamMatch
 
     let mut matches = Vec::with_capacity(rows.len());
     for row in rows {
-        let is_complete = match_post_match_is_complete(db, row.id).await.unwrap_or(false);
+        let is_complete = match_post_match_is_complete(db, row.id)
+            .await
+            .unwrap_or(false);
         matches.push(TeamMatch {
             id: row.id,
             t1_id: row.t1_id,
@@ -1772,7 +1769,9 @@ pub async fn submit_wfdf_spirit(
 
     state.live_updates.publish_match_updated(match_id);
 
-    Ok(Json(serde_json::json!({"success": true, "is_complete": is_complete, "auto_action": auto_action})))
+    Ok(Json(
+        serde_json::json!({"success": true, "is_complete": is_complete, "auto_action": auto_action}),
+    ))
 }
 
 // Get spirit scores for a match

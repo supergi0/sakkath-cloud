@@ -159,7 +159,8 @@ impl IterationAggregate {
                 lookahead.runs += 1;
                 lookahead.explored_candidates_total +=
                     lookahead_round.diagnostics.explored_candidates as u64;
-                lookahead.kept_candidates_total += lookahead_round.diagnostics.kept_candidates as u64;
+                lookahead.kept_candidates_total +=
+                    lookahead_round.diagnostics.kept_candidates as u64;
                 lookahead.total_simulations_run +=
                     lookahead_round.diagnostics.total_simulations_run as u64;
                 lookahead
@@ -171,16 +172,16 @@ impl IterationAggregate {
                 lookahead
                     .simulation_timing
                     .record(lookahead_round.diagnostics.simulation_time_ms);
-                if let Some(probability) =
-                    lookahead_round.diagnostics.chosen_worst_case_same_point_miss_probability
+                if let Some(probability) = lookahead_round
+                    .diagnostics
+                    .chosen_worst_case_same_point_miss_probability
                 {
                     lookahead.chosen_worst_case_probability_total += probability;
                     lookahead.chosen_worst_case_probability_samples += 1;
                 }
-                if let Some(probability) =
-                    lookahead_round
-                        .diagnostics
-                        .best_kept_worst_case_same_point_miss_probability
+                if let Some(probability) = lookahead_round
+                    .diagnostics
+                    .best_kept_worst_case_same_point_miss_probability
                 {
                     lookahead.best_kept_worst_case_probability_total += probability;
                     lookahead.best_kept_worst_case_probability_samples += 1;
@@ -204,7 +205,11 @@ impl IterationAggregate {
                     .rank_points
                     .resize_with(division_summary.final_swiss_points_by_rank.len(), Vec::new);
             }
-            for (index, points) in division_summary.final_swiss_points_by_rank.iter().enumerate() {
+            for (index, points) in division_summary
+                .final_swiss_points_by_rank
+                .iter()
+                .enumerate()
+            {
                 aggregate.rank_points[index].push(*points);
             }
 
@@ -350,10 +355,16 @@ impl IterationAggregate {
 
             if !aggregate.lookahead_by_round.is_empty() {
                 lines.push(String::new());
-                lines.push(format!("## {} Round 4/5/6 Generation Timing", division_label(division)));
+                lines.push(format!(
+                    "## {} Round 4/5/6 Generation Timing",
+                    division_label(division)
+                ));
                 lines.push(String::new());
                 lines.push("| Round | Avg Total | Best Total | Worst Total | Avg Explore | Best Explore | Worst Explore | Avg Sim | Best Sim | Worst Sim |".to_string());
-                lines.push("| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |".to_string());
+                lines.push(
+                    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+                        .to_string(),
+                );
                 for round in [4_i64, 5_i64, 6_i64] {
                     let Some(lookahead) = aggregate.lookahead_by_round.get(&round) else {
                         continue;
@@ -376,7 +387,10 @@ impl IterationAggregate {
 
             if !aggregate.lookahead_by_round.is_empty() {
                 lines.push(String::new());
-                lines.push(format!("## {} Round 5/6 Lookahead Diagnostics", division_label(division)));
+                lines.push(format!(
+                    "## {} Round 5/6 Lookahead Diagnostics",
+                    division_label(division)
+                ));
                 lines.push(String::new());
                 lines.push("| Round | Avg Explored Candidates | Avg Kept Candidates | Avg Simulations Run | Chosen Worst-Case Miss | Best Kept Worst-Case Miss | Mean Kept Worst-Case Miss |".to_string());
                 lines.push("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |".to_string());
@@ -407,7 +421,10 @@ impl IterationAggregate {
             }
 
             lines.push(String::new());
-            lines.push(format!("## {} Final Swiss Points By Rank", division_label(division)));
+            lines.push(format!(
+                "## {} Final Swiss Points By Rank",
+                division_label(division)
+            ));
             lines.push(String::new());
             lines.push("| Rank | Mean Points | Median Points |".to_string());
             lines.push("| ---: | ---: | ---: |".to_string());
@@ -452,10 +469,12 @@ where
                 iterations = parse_positive_u64(arg.trim_start_matches("itr="), "itr")?;
             }
             _ if arg.starts_with("--iterations=") => {
-                iterations = parse_positive_u64(arg.trim_start_matches("--iterations="), "iterations")?;
+                iterations =
+                    parse_positive_u64(arg.trim_start_matches("--iterations="), "iterations")?;
             }
             _ if arg.starts_with("iterations=") => {
-                iterations = parse_positive_u64(arg.trim_start_matches("iterations="), "iterations")?;
+                iterations =
+                    parse_positive_u64(arg.trim_start_matches("iterations="), "iterations")?;
             }
             _ if arg.starts_with("--N=") => {
                 iterations = parse_positive_u64(arg.trim_start_matches("--N="), "iterations")?;
@@ -580,9 +599,5 @@ fn median(values: &[i64]) -> f64 {
 }
 
 fn division_label(division: i64) -> &'static str {
-    if division == 0 {
-        "Open"
-    } else {
-        "Women"
-    }
+    if division == 0 { "Open" } else { "Women" }
 }

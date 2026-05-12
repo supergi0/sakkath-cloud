@@ -80,18 +80,8 @@ const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
   'O P1-02': '2 v 3',
   'O P1-03': '5 v 8',
   'O P1-04': '6 v 7',
-  'O P1-05': '9 v 12',
-  'O P1-06': '10 v 11',
-  'O P1-07': '13 v 16',
-  'O P1-08': '14 v 15',
-  'O P1-09': '17 v 20',
-  'O P1-10': '18 v 19',
-  'O P1-11': '21 v 22',
   'W P1-01': '1 v 4',
   'W P1-02': '2 v 3',
-  'W P1-03': '5 v 8',
-  'W P1-04': '6 v 7',
-  'W P1-05': '9 v 10',
   'O P2-01': '1 v 2',
   'O P2-02': '3 v 4',
   'O P2-03': '5 v 6',
@@ -102,15 +92,13 @@ const PLAYOFF_PLACEHOLDER_SEEDS: Record<string, string> = {
   'O P2-08': '15 v 16',
   'O P2-09': '17 v 18',
   'O P2-10': '19 v 20',
+  'O P2-11': '21 v 22',
   'W P2-01': '1 v 2',
   'W P2-02': '3 v 4',
   'W P2-03': '5 v 6',
   'W P2-04': '7 v 8',
   'W P2-05': '9 v 10',
 };
-
-const WOMEN_SWISS_OVERFLOW_NOTE =
-  '* Game will start as soon as field is available and can extend into the next 15 mins, for a total of 75 mins. There is a hardstop when the next game is about to start.';
 
 function formatCompactTime(value: string) {
   return value.replace(/^0/, '').replace(':', '.');
@@ -165,16 +153,6 @@ function getSeedLabel(cell: ScheduleGridCell) {
   return `${seedA} v ${seedB}`;
 }
 
-function getRowDurationMinutes(row: ScheduleGridRow) {
-  const [startHour, startMinute] = row.start_time.split(':').map(Number);
-  const [endHour, endMinute] = row.end_time.split(':').map(Number);
-  return endHour * 60 + endMinute - (startHour * 60 + startMinute);
-}
-
-function showsWomenSwissOverflowNote(row: ScheduleGridRow, cell: ScheduleGridCell) {
-  return cell.division === 1 && (cell.match_type ?? 1000) < 1000 && getRowDurationMinutes(row) === 60;
-}
-
 function isStageBreak(previousRow: ScheduleGridRow | undefined, currentRow: ScheduleGridRow) {
   if (!previousRow) {
     return false;
@@ -214,7 +192,6 @@ function ScheduleDetailModal({
   onClose: () => void;
 }) {
   const stageLabel = getStageLabel(cell);
-  const showWomenSwissOverflowNote = showsWomenSwissOverflowNote(row, cell);
   const hasMatch = cell.match_id !== null;
   const t1Id = cell.data?.[0] ?? null;
   const t2Id = cell.data?.[1] ?? null;
@@ -232,7 +209,7 @@ function ScheduleDetailModal({
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-500 dark:text-slate-400">
-              {showWomenSwissOverflowNote ? `${stageLabel}*` : stageLabel}
+              {stageLabel}
             </p>
             <Text as="h2" variant="primary" className="mt-2 text-lg font-semibold">
               {getRowTitle(row.label)}
@@ -244,12 +221,6 @@ function ScheduleDetailModal({
               <span className="rounded-full bg-gray-100 px-3 py-1 dark:bg-slate-800">{cell.field_name}</span>
               <span className="rounded-full bg-gray-100 px-3 py-1 dark:bg-slate-800">{getStatusLabel(cell.status)}</span>
             </div>
-
-            {showWomenSwissOverflowNote ? (
-              <Text variant="secondary" className="mt-3 text-xs leading-5">
-                {WOMEN_SWISS_OVERFLOW_NOTE}
-              </Text>
-            ) : null}
           </div>
           <button
             type="button"
@@ -541,7 +512,6 @@ export default function SchedulePage() {
     );
     const droppable = isSuperAdmin && isEditMode && canDropIntoCell(cell);
     const stageLabel = getStageLabel(cell);
-    const showWomenSwissOverflow = showsWomenSwissOverflowNote(row, cell);
     const seedLabel = getSeedLabel(cell);
     const cellKey = `${row.key}-${cell.field_index}`;
     const t1Id = cell.data?.[0] ?? null;
@@ -614,7 +584,7 @@ export default function SchedulePage() {
             <div className="flex items-start justify-between gap-1 overflow-hidden">
               <div className="min-w-0">
                 <p className="truncate text-[9px] font-bold uppercase tracking-wider sm:text-[10px]">
-                  {showWomenSwissOverflow ? `${stageLabel}*` : stageLabel}
+                  {stageLabel}
                 </p>
               </div>
               <div className="relative flex shrink-0 items-center justify-end">

@@ -3,7 +3,6 @@
 import { useEffect } from 'react';
 import { useTheme } from 'next-themes';
 import { X } from 'lucide-react';
-import { Text } from './Text';
 
 interface ToastProps {
   message: string;

@@ -1,12 +1,24 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { Calendar, ChevronDown, ChevronUp, Clock, LayoutGrid, MapPin, Target, Trophy, Users } from 'lucide-react';
 import { Text } from './components/Text';
 import { apiUrl } from './lib/api';
 import { getTeamAbbreviation } from './lib/team-name';
+
+function subscribeToHydration() {
+  return () => {};
+}
+
+function getHydratedSnapshot() {
+  return true;
+}
+
+function getServerHydratedSnapshot() {
+  return false;
+}
 
 interface TeamStanding {
   id: number;
@@ -39,6 +51,27 @@ interface DashboardPreferences {
 
 const DASHBOARD_PREFS_KEY = 'sakkath:dashboard:preferences';
 
+function readDashboardPreferences(): DashboardPreferences {
+  if (typeof window === 'undefined') {
+    return { division: 'open' };
+  }
+
+  const savedPreferences = localStorage.getItem(DASHBOARD_PREFS_KEY);
+  if (!savedPreferences) {
+    return { division: 'open' };
+  }
+
+  try {
+    const parsed: DashboardPreferences = JSON.parse(savedPreferences);
+    if (parsed.division === 'open' || parsed.division === 'women') {
+      return parsed;
+    }
+  } catch {
+  }
+
+  return { division: 'open' };
+}
+
 const STANDINGS_COLUMN_CLASSES = {
   rank: 'w-10 min-w-[40px]',
   team: 'w-[172px] min-w-[172px]',
@@ -63,8 +96,12 @@ function StandingsSortIndicator({ active, direction }: { active: boolean; direct
 }
 
 export function HomeContent() {
-  const [mounted, setMounted] = useState(false);
-  const [division, setDivision] = useState<'open' | 'women'>('open');
+  const mounted = useSyncExternalStore(
+    subscribeToHydration,
+    getHydratedSnapshot,
+    getServerHydratedSnapshot,
+  );
+  const [division, setDivision] = useState<'open' | 'women'>(() => readDashboardPreferences().division);
   const [standingsSortField, setStandingsSortField] = useState<StandingsSortField>('rank');
   const [standingsSortDir, setStandingsSortDir] = useState<'asc' | 'desc'>('asc');
   const [openStandings, setOpenStandings] = useState<TeamStanding[]>([]);
@@ -82,19 +119,6 @@ export function HomeContent() {
   };
 
   useEffect(() => {
-    setMounted(true);
-
-    const savedPreferences = localStorage.getItem(DASHBOARD_PREFS_KEY);
-    if (savedPreferences) {
-      try {
-        const parsed: DashboardPreferences = JSON.parse(savedPreferences);
-        if (parsed.division === 'open' || parsed.division === 'women') {
-          setDivision(parsed.division);
-        }
-      } catch {
-      }
-    }
-
     Promise.all([
       fetch(apiUrl('/v1/standings?division=0')).then((response) => response.json()),
       fetch(apiUrl('/v1/standings?division=1')).then((response) => response.json()),
@@ -108,10 +132,9 @@ export function HomeContent() {
   }, []);
 
   useEffect(() => {
-    if (!mounted) return;
     const preferences: DashboardPreferences = { division };
     localStorage.setItem(DASHBOARD_PREFS_KEY, JSON.stringify(preferences));
-  }, [mounted, division]);
+  }, [division]);
 
   const sortStandings = (standings: Array<TeamStanding & { rank: number }>) => {
     return [...standings].sort((a, b) => {
@@ -418,9 +441,16 @@ export function HomeContent() {
                       </td>
                       <td className={`${STANDINGS_COLUMN_CLASSES.team} px-1.5 py-3 overflow-hidden sm:px-2`}>
                         <Link href={`/teams?team_id=${team.id}`} className="flex items-center gap-1.5 hover:underline sm:gap-2" title={team.name}>
-                          <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-900 text-xs font-bold text-white sm:h-6 sm:w-6">
+                          <div className="relative flex h-7 w-7 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-blue-900 text-xs font-bold text-white sm:h-6 sm:w-6">
                             {team.small_logo ? (
-                              <img src={team.small_logo} alt={team.name} className="h-full w-full object-cover" />
+                              <Image
+                                src={team.small_logo}
+                                alt={team.name}
+                                fill
+                                unoptimized
+                                sizes="28px"
+                                className="object-cover"
+                              />
                             ) : (
                               initial
                             )}

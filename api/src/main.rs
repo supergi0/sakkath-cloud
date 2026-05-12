@@ -1,4 +1,6 @@
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware as axum_middleware;
+use axum::response::IntoResponse;
 use axum::routing::{get, get_service};
 use std::net::SocketAddr;
 use std::process;
@@ -17,12 +19,37 @@ enum CliCommand {
     MockDatabase(helpers::mock_seed::MockDatabaseRequest),
 }
 
+async fn serve_handbook_markdown(filename: &'static str) -> impl IntoResponse {
+    match tokio::fs::read_to_string(format!("../ui/{filename}")).await {
+        Ok(content) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/markdown; charset=utf-8"),
+                ),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+                ),
+                (header::PRAGMA, HeaderValue::from_static("no-cache")),
+                (header::EXPIRES, HeaderValue::from_static("0")),
+            ],
+            content,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::warn!("Failed to serve handbook markdown {filename}: {error}");
+            StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
 fn seed_database_csv_usage() -> &'static str {
     "Usage: sakkath-api seed-database csv [path] [--replace_password true|false]"
 }
 
 fn mock_database_usage() -> &'static str {
-    "Usage: sakkath-api mock-database <round> [games]\n  round: 1..6, P, or F\n  games: optional integer between 1 and 15"
+    "Usage: sakkath-api mock-database <round> [games]\n  round: 1..6, P, or F\n  games: optional integer between 1 and the stage total (P max 6, swiss/finals max 16)"
 }
 
 fn parse_bool_flag(value: &str, flag_name: &str) -> Result<bool, String> {
@@ -263,7 +290,9 @@ async fn main() {
 
     helpers::sorting::initialize_persistent_coin_toss_seed(&db_pool)
         .await
-        .unwrap_or_else(|err| exit_with_error(&format!("Failed to load persistent tiebreak seed: {err}")));
+        .unwrap_or_else(|err| {
+            exit_with_error(&format!("Failed to load persistent tiebreak seed: {err}"))
+        });
 
     // Init redis cache (non-blocking, works without redis)
     helpers::cache::init_redis().await;
@@ -300,6 +329,22 @@ async fn main() {
         Router::new()
             .merge(telemetry_routes)
             .nest("/v1", api_routes)
+            .route(
+                "/rules.md",
+                get(|| async { serve_handbook_markdown("rules.md").await }),
+            )
+            .route(
+                "/format.md",
+                get(|| async { serve_handbook_markdown("format.md").await }),
+            )
+            .route(
+                "/reporting.md",
+                get(|| async { serve_handbook_markdown("reporting.md").await }),
+            )
+            .route(
+                "/edit-team.md",
+                get(|| async { serve_handbook_markdown("edit-team.md").await }),
+            )
             .fallback_service(
                 get_service(ServeDir::new("../ui"))
                     .layer(middleware::rate_limit::ui_rate_limit_layer()),

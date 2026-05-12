@@ -3,7 +3,7 @@ use super::model::{
     MatchDetailResponse, MatchPlayerResponse, MutationResponse, ScheduleMatchResponse,
     TournamentTracker,
 };
-use super::simulation::OutcomeKind;
+use super::simulation::{OutcomeKind, TournamentSimulation};
 use axum::http::Method;
 
 pub(crate) struct StaffTokens {
@@ -137,6 +137,7 @@ pub(crate) async fn finish_match_to_outcome(
     harness: &Harness,
     tracker: &mut TournamentTracker,
     staff: &StaffTokens,
+    simulation: &mut TournamentSimulation,
     match_id: i64,
     outcome: OutcomeKind,
 ) -> TestResult {
@@ -146,7 +147,8 @@ pub(crate) async fn finish_match_to_outcome(
 
     let t1_players = players_for_team(&detail, detail.t1_id);
     let t2_players = players_for_team(&detail, detail.t2_id);
-    let (target_t1, target_t2) = resolve_target_scores(detail.t1_score, detail.t2_score, outcome);
+    let (target_t1, target_t2) =
+        simulation.target_scores(detail.match_type, detail.t1_score, detail.t2_score, outcome);
     let scoring_sequence = build_scoring_sequence(
         detail.t1_id,
         detail.t2_id,
@@ -384,41 +386,6 @@ pub(crate) fn players_for_team(
         .collect();
     players.sort_by_key(|player| player.id);
     players
-}
-
-fn resolve_target_scores(current_t1: i64, current_t2: i64, outcome: OutcomeKind) -> (i64, i64) {
-    match outcome {
-        OutcomeKind::T1Win => {
-            if current_t1 == 0 && current_t2 == 0 {
-                (2, 1)
-            } else if current_t1 > current_t2 {
-                (current_t1, current_t2)
-            } else {
-                (current_t2 + 1, current_t2)
-            }
-        }
-        OutcomeKind::T2Win => {
-            if current_t1 == 0 && current_t2 == 0 {
-                (1, 2)
-            } else if current_t2 > current_t1 {
-                (current_t1, current_t2)
-            } else {
-                (current_t1, current_t1 + 1)
-            }
-        }
-        OutcomeKind::Draw => {
-            if current_t1 == current_t2 {
-                if current_t1 == 0 {
-                    (1, 1)
-                } else {
-                    (current_t1, current_t2)
-                }
-            } else {
-                let target = current_t1.max(current_t2);
-                (target, target)
-            }
-        }
-    }
 }
 
 fn build_scoring_sequence(

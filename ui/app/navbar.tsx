@@ -5,7 +5,6 @@ import { useTheme } from 'next-themes';
 import { Sun, Moon, Menu, X} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Text } from './components/Text';
 import { Toast } from './components/Toast';
 import { useAuth } from './auth-provider';
 

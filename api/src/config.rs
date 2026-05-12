@@ -17,6 +17,5 @@ pub mod swiss_pairing {
     pub const LOOKAHEAD_CANDIDATE_LIMIT: usize = 192;
     pub const LOOKAHEAD_EXPLORATION_LIMIT: usize = 384;
 
-    pub const LOOKAHEAD_BOUNDARY_TARGETS: [(usize, usize); 4] =
-        [(4, 5), (3, 6), (8, 9), (7, 10)];
+    pub const LOOKAHEAD_BOUNDARY_TARGETS: [(usize, usize); 4] = [(4, 5), (3, 6), (8, 9), (7, 10)];
 }

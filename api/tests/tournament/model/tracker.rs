@@ -2,6 +2,9 @@ use super::api_types::{
     MatchDetailResponse, ScheduleMatchResponse, ScoreConfirmRowResponse, SpiritScoreRowResponse,
     TeamResponse,
 };
+use super::pairings::{
+    ExpectedSwissRound, SortMetrics, build_scoring_groups, naive_pairings, sort_metrics_with_seed,
+};
 use crate::tournament::config::deterministic_stage_coin_toss_seed;
 use api::helpers::{
     rounds::{
@@ -12,10 +15,6 @@ use api::helpers::{
     sorting::TeamSortData,
 };
 use chrono::{Duration, NaiveDateTime};
-use super::pairings::{
-    ExpectedSwissRound, SortMetrics, build_scoring_groups, naive_pairings,
-    sort_metrics_with_seed,
-};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -289,20 +288,6 @@ impl TournamentTracker {
             .collect()
     }
 
-    pub(crate) fn match_ids_for_team_and_type(
-        &self,
-        team_id: i64,
-        match_type: i64,
-    ) -> HashSet<i64> {
-        self.matches
-            .values()
-            .filter(|state| {
-                (state.t1_id == team_id || state.t2_id == team_id) && state.match_type == match_type
-            })
-            .map(|state| state.id)
-            .collect()
-    }
-
     pub(crate) fn game_gap_minutes(&self, division: i64) -> Vec<i64> {
         let mut gaps = Vec::new();
         let canonical_starts = self.canonical_gap_start_times(division);
@@ -338,7 +323,10 @@ impl TournamentTracker {
                     continue;
                 }
                 let current_end = current_start
-                    + Duration::minutes(match_duration_minutes(current_match.division, current_match.match_type));
+                    + Duration::minutes(match_duration_minutes(
+                        current_match.division,
+                        current_match.match_type,
+                    ));
                 gaps.push(next_start.signed_duration_since(current_end).num_minutes());
             }
         }
@@ -599,14 +587,8 @@ impl TournamentTracker {
             .collect();
         let pairing_result =
             live_generate_round_pairings_with_diagnostics(&live_standings, &history, next_round);
-        let pairings = pairing_result
-            .pairings
-            .into_iter()
-            .map(|pairing| (pairing.t1, pairing.t2))
-            .collect();
 
         ExpectedSwissRound {
-            pairings,
             naive_had_rematch,
             diagnostics: pairing_result.diagnostics,
         }
@@ -776,12 +758,8 @@ impl TournamentTracker {
     }
 }
 
-fn match_duration_minutes(division: i64, match_type: i64) -> i64 {
-    if match_type >= 1000 || division == 1 {
-        75
-    } else {
-        60
-    }
+fn match_duration_minutes(_division: i64, match_type: i64) -> i64 {
+    if match_type >= 1000 { 75 } else { 65 }
 }
 
 fn parse_match_time(value: &str) -> Option<NaiveDateTime> {
@@ -789,7 +767,12 @@ fn parse_match_time(value: &str) -> Option<NaiveDateTime> {
 }
 
 fn parse_ground_index(value: &str) -> Option<usize> {
-    match value.chars().filter(|char| char.is_ascii_digit()).collect::<String>().as_str() {
+    match value
+        .chars()
+        .filter(|char| char.is_ascii_digit())
+        .collect::<String>()
+        .as_str()
+    {
         "1" => Some(0),
         "2" => Some(1),
         "3" => Some(2),
@@ -800,21 +783,57 @@ fn parse_ground_index(value: &str) -> Option<usize> {
 
 fn canonical_gap_stage_start_times(division: i64, match_type: i64) -> Option<Vec<NaiveDateTime>> {
     Some(match (division, match_type) {
-        (0, 1) => expand_gap_times("2026-05-22", &[("06:00:00", 4), ("07:15:00", 3), ("10:00:00", 4)]),
-        (0, 2) => expand_gap_times("2026-05-22", &[("12:45:00", 3), ("14:00:00", 4), ("15:15:00", 4)]),
-        (0, 3) => expand_gap_times("2026-05-22", &[("18:00:00", 3), ("19:15:00", 4), ("20:30:00", 4)]),
-        (0, 4) => expand_gap_times("2026-05-23", &[("06:00:00", 4), ("07:15:00", 3), ("10:00:00", 4)]),
-        (0, 5) => expand_gap_times("2026-05-23", &[("12:45:00", 3), ("14:00:00", 4), ("15:15:00", 4)]),
-        (0, 6) => expand_gap_times("2026-05-23", &[("18:00:00", 3), ("19:15:00", 4), ("20:30:00", 4)]),
-        (0, 1001) => expand_gap_times("2026-05-24", &[("06:30:00", 4), ("08:00:00", 4), ("09:30:00", 3)]),
-        (0, 1002) => expand_gap_times("2026-05-24", &[("11:00:00", 3), ("12:30:00", 3), ("14:00:00", 3), ("15:30:00", 1)]),
-        (1, 1) => expand_gap_times("2026-05-22", &[("07:15:00", 1), ("08:30:00", 4)]),
-        (1, 2) => expand_gap_times("2026-05-22", &[("11:15:00", 4), ("12:45:00", 1)]),
-        (1, 3) => expand_gap_times("2026-05-22", &[("16:30:00", 4), ("18:00:00", 1)]),
-        (1, 4) => expand_gap_times("2026-05-23", &[("07:15:00", 1), ("08:30:00", 4)]),
-        (1, 5) => expand_gap_times("2026-05-23", &[("11:15:00", 4), ("12:45:00", 1)]),
-        (1, 6) => expand_gap_times("2026-05-23", &[("16:30:00", 4), ("18:00:00", 1)]),
-        (1, 1002) => expand_gap_times("2026-05-24", &[("09:30:00", 1), ("11:00:00", 1), ("12:30:00", 1), ("14:00:00", 1), ("16:50:00", 1)]),
+        (0, 1) => expand_gap_times(
+            "2026-05-22",
+            &[("06:00:00", 4), ("07:20:00", 3), ("10:00:00", 4)],
+        ),
+        (0, 2) => expand_gap_times(
+            "2026-05-22",
+            &[("12:40:00", 3), ("14:00:00", 4), ("15:20:00", 4)],
+        ),
+        (0, 3) => expand_gap_times(
+            "2026-05-22",
+            &[("18:10:00", 3), ("19:30:00", 4), ("20:50:00", 4)],
+        ),
+        (0, 4) => expand_gap_times(
+            "2026-05-23",
+            &[("06:00:00", 4), ("07:20:00", 3), ("10:00:00", 4)],
+        ),
+        (0, 5) => expand_gap_times(
+            "2026-05-23",
+            &[("12:40:00", 3), ("14:00:00", 4), ("15:20:00", 4)],
+        ),
+        (0, 6) => expand_gap_times(
+            "2026-05-23",
+            &[("18:10:00", 3), ("19:30:00", 4), ("20:50:00", 4)],
+        ),
+        (0, 1001) => expand_gap_times("2026-05-24", &[("06:15:00", 4)]),
+        (0, 1002) => expand_gap_times(
+            "2026-05-24",
+            &[
+                ("07:50:00", 1),
+                ("09:25:00", 4),
+                ("11:00:00", 3),
+                ("12:35:00", 2),
+                ("15:40:00", 1),
+            ],
+        ),
+        (1, 1) => expand_gap_times("2026-05-22", &[("07:20:00", 1), ("08:40:00", 4)]),
+        (1, 2) => expand_gap_times("2026-05-22", &[("11:20:00", 4), ("12:40:00", 1)]),
+        (1, 3) => expand_gap_times("2026-05-22", &[("16:50:00", 4), ("18:10:00", 1)]),
+        (1, 4) => expand_gap_times("2026-05-23", &[("07:20:00", 1), ("08:40:00", 4)]),
+        (1, 5) => expand_gap_times("2026-05-23", &[("11:20:00", 4), ("12:40:00", 1)]),
+        (1, 6) => expand_gap_times("2026-05-23", &[("16:50:00", 4), ("18:10:00", 1)]),
+        (1, 1001) => expand_gap_times("2026-05-24", &[("07:50:00", 2)]),
+        (1, 1002) => expand_gap_times(
+            "2026-05-24",
+            &[
+                ("07:50:00", 1),
+                ("11:00:00", 1),
+                ("12:35:00", 2),
+                ("14:10:00", 1),
+            ],
+        ),
         _ => return None,
     })
 }

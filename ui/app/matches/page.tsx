@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { ArrowLeft, ChevronDown, ChevronUp, Circle, Play } from "lucide-react";
@@ -129,7 +130,6 @@ function MatchTimer({ startedAt, serverTime }: { startedAt?: string | null; serv
   useEffect(() => {
     if (!startedAt) {
       initializedRef.current = false;
-      setElapsedSeconds(0);
       return;
     }
 
@@ -393,9 +393,16 @@ function MatchContent() {
               }`}
             >
               <div className="flex items-center gap-2 mb-1">
-                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                <div className="relative w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
                   {match.t1_small_logo ? (
-                    <img src={match.t1_small_logo} alt={match.t1_name} className="w-full h-full object-cover" />
+                    <Image
+                      src={match.t1_small_logo}
+                      alt={match.t1_name}
+                      fill
+                      unoptimized
+                      sizes="32px"
+                      className="object-cover"
+                    />
                   ) : (
                     <span className="text-sm font-bold text-gray-500">{match.t1_name.charAt(0)}</span>
                   )}
@@ -423,9 +430,16 @@ function MatchContent() {
             >
               <div className="flex items-center gap-2 justify-end mb-1">
                 <span className="text-sm font-semibold text-gray-900 dark:text-white break-words leading-tight" title={match.t2_name}>{displayT2Name}</span>
-                <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
+                <div className="relative w-8 h-8 rounded-full bg-gray-200 dark:bg-slate-700 flex items-center justify-center overflow-hidden shrink-0">
                   {match.t2_small_logo ? (
-                    <img src={match.t2_small_logo} alt={match.t2_name} className="w-full h-full object-cover" />
+                    <Image
+                      src={match.t2_small_logo}
+                      alt={match.t2_name}
+                      fill
+                      unoptimized
+                      sizes="32px"
+                      className="object-cover"
+                    />
                   ) : (
                     <span className="text-sm font-bold text-gray-500">{match.t2_name.charAt(0)}</span>
                   )}

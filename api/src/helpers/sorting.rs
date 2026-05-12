@@ -32,6 +32,17 @@ pub struct TeamSortData {
 }
 
 type TeamIdentityRow = (i64, String, Option<String>, Option<String>, i64);
+type CompletedSwissMatchRow = (i64, i64, i64, i64, i64, Option<i64>, Option<i64>);
+type LiveSwissMatchRow = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
 
 #[derive(Clone, Default)]
 struct DisplayStats {
@@ -79,11 +90,10 @@ async fn ensure_stage_coin_toss_seed(
     .execute(db)
     .await?;
 
-    let (seed,): (i64,) =
-        sqlx::query_as("SELECT seed FROM persistent_random_state WHERE name = ?")
-            .bind(&name)
-            .fetch_one(db)
-            .await?;
+    let (seed,): (i64,) = sqlx::query_as("SELECT seed FROM persistent_random_state WHERE name = ?")
+        .bind(&name)
+        .fetch_one(db)
+        .await?;
 
     Ok(seed.max(0) as u64)
 }
@@ -151,7 +161,10 @@ fn hash_team_tiebreak_state(team: &TeamSortData, points_map: &HashMap<i64, i64>)
 }
 
 fn tie_group_signature(group: &[TeamSortData], snapshot: &[TeamSortData]) -> u64 {
-    let points_map: HashMap<i64, i64> = snapshot.iter().map(|team| (team.team_id, team.points)).collect();
+    let points_map: HashMap<i64, i64> = snapshot
+        .iter()
+        .map(|team| (team.team_id, team.points))
+        .collect();
     let mut team_hashes: Vec<(i64, u64)> = group
         .iter()
         .map(|team| (team.team_id, hash_team_tiebreak_state(team, &points_map)))
@@ -182,8 +195,8 @@ async fn fetch_sort_data_with_round_limit(
     ).bind(division).fetch_all(db).await.unwrap_or_default();
 
     // All completed swiss matches for this division
-        let matches: Vec<(i64, i64, i64, i64, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
-                r#"SELECT m.id, m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit
+    let matches: Vec<CompletedSwissMatchRow> = sqlx::query_as(
+        r#"SELECT m.id, m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.t1_spirit, m.t2_spirit
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
            WHERE t.division = ? AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
@@ -315,7 +328,7 @@ async fn fetch_live_sort_data_with_round_limit(
         "SELECT id, name, abbreviation, small_logo, COALESCE(init_rank, 9999) FROM teams WHERE division = ? AND deleted_at IS NULL ORDER BY init_rank ASC"
     ).bind(division).fetch_all(db).await.unwrap_or_default();
 
-    let matches: Vec<(i64, i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+    let matches: Vec<LiveSwissMatchRow> = sqlx::query_as(
         r#"SELECT m.id, m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
@@ -514,7 +527,11 @@ pub fn c7_random_coin_toss() -> i64 {
     i64::from(rand::random::<bool>())
 }
 
-fn compare_teams_through_c6(a: &TeamSortData, b: &TeamSortData, snapshot: &[TeamSortData]) -> Ordering {
+fn compare_teams_through_c6(
+    a: &TeamSortData,
+    b: &TeamSortData,
+    snapshot: &[TeamSortData],
+) -> Ordering {
     let mut ord = c1_points(a, b);
     if ord != Ordering::Equal {
         return ord;
@@ -545,7 +562,11 @@ fn compare_teams_through_c6(a: &TeamSortData, b: &TeamSortData, snapshot: &[Team
     c6_momentum_score(a, b)
 }
 
-fn apply_c7_random_coin_toss_with_seed(teams: &mut [TeamSortData], snapshot: &[TeamSortData], seed: u64) {
+fn apply_c7_random_coin_toss_with_seed(
+    teams: &mut [TeamSortData],
+    snapshot: &[TeamSortData],
+    seed: u64,
+) {
     let mut start = 0usize;
     while start < teams.len() {
         let mut end = start + 1;
@@ -674,7 +695,8 @@ pub async fn get_cached_intermediate_standings(
     db: &SqlitePool,
     division: i64,
 ) -> Vec<TeamSortData> {
-    if let Some(mut cached) = cache::get_intermediate_standings::<Vec<TeamSortData>>(division).await {
+    if let Some(mut cached) = cache::get_intermediate_standings::<Vec<TeamSortData>>(division).await
+    {
         let stage_key = current_generated_stage_key(db, division).await;
         let seed = ensure_stage_coin_toss_seed(db, division, stage_key)
             .await
@@ -714,7 +736,7 @@ async fn fetch_stage_results(
         let is_live = matches!(possession, Some(value) if value < 3);
         let is_ended = matches!(possession, Some(value) if value >= 3);
 
-        if !is_ended && !(include_live && is_live) {
+        if !(is_ended || include_live && is_live) {
             continue;
         }
 
@@ -746,7 +768,16 @@ async fn fetch_display_stats(
     division: i64,
     include_live: bool,
 ) -> HashMap<i64, DisplayStats> {
-    type DisplayMatchRow = (i64, i64, i64, i64, i64, Option<i64>, Option<i64>, Option<i64>);
+    type DisplayMatchRow = (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
 
     let matches: Vec<DisplayMatchRow> = sqlx::query_as(
         r#"SELECT m.id, m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
@@ -763,7 +794,7 @@ async fn fetch_display_stats(
     let mut stats_by_team: HashMap<i64, DisplayStats> = HashMap::new();
 
     for (_match_id, t1_id, t2_id, t1_score, t2_score, possession, t1_spirit, t2_spirit) in matches {
-        let is_started = matches!(possession, Some(_));
+        let is_started = possession.is_some();
         let should_include = if include_live {
             is_started
         } else {
@@ -773,20 +804,8 @@ async fn fetch_display_stats(
             continue;
         }
 
-        apply_display_result(
-            &mut stats_by_team,
-            t1_id,
-            t1_score,
-            t2_score,
-            t1_spirit,
-        );
-        apply_display_result(
-            &mut stats_by_team,
-            t2_id,
-            t2_score,
-            t1_score,
-            t2_spirit,
-        );
+        apply_display_result(&mut stats_by_team, t1_id, t1_score, t2_score, t1_spirit);
+        apply_display_result(&mut stats_by_team, t2_id, t2_score, t1_score, t2_spirit);
     }
 
     stats_by_team
@@ -1030,7 +1049,10 @@ mod tests {
 
         sort_teams(&mut teams);
 
-        assert_eq!(teams.iter().map(|team| team.team_id).collect::<Vec<_>>(), vec![10, 20, 30]);
+        assert_eq!(
+            teams.iter().map(|team| team.team_id).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
     }
 
     #[test]
@@ -1118,6 +1140,9 @@ mod tests {
             },
         ];
 
-        assert_eq!(c3_buchholz(&contender, &challenger, &all), Ordering::Greater);
+        assert_eq!(
+            c3_buchholz(&contender, &challenger, &all),
+            Ordering::Greater
+        );
     }
 }

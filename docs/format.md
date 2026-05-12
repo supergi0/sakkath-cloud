@@ -6,8 +6,13 @@ Both divisions play 6 Swiss rounds.
 
 After Swiss:
 
-- Open goes into Sunday playoff and finals placement rounds.
-- Women goes straight into Sunday direct placement games.
+- Open seeds 1-8 go into Sunday semifinal and placement rounds, while seeds 9-22 go straight into Sunday direct placement games.
+- Women seeds 1-4 go into Sunday semifinal and placement rounds, while seeds 5-10 go straight into Sunday direct placement games.
+
+All Swiss games run for 65 minutes, with 15 minutes between scheduled starts.
+Sunday playoff and placement games run for 75 minutes.
+Swiss games may finish as draws.
+Sunday playoff and placement games must finish with a winner.
 
 ## Swiss goals
 
@@ -49,7 +54,7 @@ The standings order is:
 4. Point difference
 5. Points scored
 6. Momentum
-7. Starting seed
+7. Random fallback
 
 ## Pairing search
 

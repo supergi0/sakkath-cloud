@@ -1,18 +1,19 @@
 use crate::{AppState, build_api_only_app};
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
-use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 use tower::ServiceExt;
 
 const CLI_JWT_SECRET: &str = "mock-database-cli-secret";
-const MAX_PARTIAL_GAMES: usize = 15;
+const MAX_SWISS_OR_FINAL_GAMES: usize = 16;
+const MAX_PLAYOFF_GAMES: usize = 6;
 
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 type MockResult<T = ()> = Result<T, DynError>;
@@ -93,6 +94,13 @@ impl MockRoundTarget {
             }
         }
     }
+
+    fn max_partial_games(self) -> usize {
+        match self {
+            Self::Swiss(_) | Self::Finals => MAX_SWISS_OR_FINAL_GAMES,
+            Self::Playoffs => MAX_PLAYOFF_GAMES,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -103,11 +111,13 @@ pub struct MockDatabaseRequest {
 
 impl MockDatabaseRequest {
     pub fn new(target: MockRoundTarget, games: Option<usize>) -> Result<Self, String> {
+        let max_games = target.max_partial_games();
         if let Some(games) = games
-            && (games == 0 || games > MAX_PARTIAL_GAMES)
+            && (games == 0 || games > max_games)
         {
             return Err(format!(
-                "games must be an integer between 1 and {MAX_PARTIAL_GAMES}"
+                "games must be an integer between 1 and {max_games} for {}",
+                target.label()
             ));
         }
 
@@ -318,6 +328,8 @@ struct ScheduleMatchResponse {
     time: String,
     field_name: String,
     possession: Option<i64>,
+    #[serde(skip)]
+    division: i64,
 }
 
 #[derive(Deserialize, Clone)]
@@ -369,11 +381,19 @@ struct LoginResponse {
     token: String,
 }
 
+#[derive(Clone, Copy)]
+enum MatchOutcome {
+    T1Win,
+    T2Win,
+    Draw,
+}
+
 pub async fn mock_existing_database(
     pool: &SqlitePool,
     request: MockDatabaseRequest,
 ) -> MockResult<MockDatabaseSummary> {
     ensure_cli_jwt_secret();
+    crate::controllers::scheduling::auto_generate_initial_rounds(pool).await;
     validate_existing_progress(pool, request.target).await?;
     crate::helpers::sorting::initialize_persistent_coin_toss_seed(pool).await?;
 
@@ -465,9 +485,7 @@ async fn process_stage(
                 )));
             }
 
-            if round_key != 1002 {
-                pending_matches.shuffle(rng);
-            }
+            pending_matches = order_pending_matches(round_key, pending_matches);
             pending_matches.truncate(needed);
             pending_matches
         }
@@ -533,7 +551,10 @@ async fn ensure_stage_matches_for_division(
         return Ok(Vec::new());
     }
 
-    let mut stage_matches = client.get_schedule_matches(division, round_key).await?;
+    let mut stage_matches = assign_match_division(
+        client.get_schedule_matches(division, round_key).await?,
+        division,
+    );
     if !stage_matches.is_empty() {
         return Ok(stage_matches);
     }
@@ -560,7 +581,10 @@ async fn ensure_stage_matches_for_division(
             crate::controllers::scheduling::auto_advance_division_if_ready(pool, division).await;
     }
 
-    stage_matches = client.get_schedule_matches(division, round_key).await?;
+    stage_matches = assign_match_division(
+        client.get_schedule_matches(division, round_key).await?,
+        division,
+    );
     if stage_matches.is_empty() {
         return Err(error(format!(
             "failed to materialize {} for {} division",
@@ -581,14 +605,65 @@ async fn fetch_stage_matches(
         if !stage_applies_to_division(round_key, division) {
             continue;
         }
-        stage_matches.extend(client.get_schedule_matches(division, round_key).await?);
+        stage_matches.extend(assign_match_division(
+            client.get_schedule_matches(division, round_key).await?,
+            division,
+        ));
     }
     sort_stage_matches(&mut stage_matches);
     Ok(stage_matches)
 }
 
 fn stage_applies_to_division(round_key: i64, division: i64) -> bool {
-    !(round_key == 1001 && division == 1)
+    matches!((round_key, division), (1..=6, 0 | 1) | (1001 | 1002, 0 | 1))
+}
+
+fn assign_match_division(
+    matches: Vec<ScheduleMatchResponse>,
+    division: i64,
+) -> Vec<ScheduleMatchResponse> {
+    matches
+        .into_iter()
+        .map(|mut schedule_match| {
+            schedule_match.division = division;
+            schedule_match
+        })
+        .collect()
+}
+
+fn order_pending_matches(
+    round_key: i64,
+    pending_matches: Vec<ScheduleMatchResponse>,
+) -> Vec<ScheduleMatchResponse> {
+    match round_key {
+        1001 => order_playoff_matches_for_partial_completion(pending_matches),
+        _ => pending_matches,
+    }
+}
+
+fn order_playoff_matches_for_partial_completion(
+    pending_matches: Vec<ScheduleMatchResponse>,
+) -> Vec<ScheduleMatchResponse> {
+    let (open_matches, women_matches): (Vec<_>, Vec<_>) = pending_matches
+        .into_iter()
+        .partition(|schedule_match| schedule_match.division == 0);
+    let mut open_matches = VecDeque::from(open_matches);
+    let mut women_matches = VecDeque::from(women_matches);
+    let mut ordered = Vec::new();
+
+    for _ in 0..3 {
+        if let Some(schedule_match) = open_matches.pop_front() {
+            ordered.push(schedule_match);
+        }
+    }
+
+    if let Some(schedule_match) = women_matches.pop_front() {
+        ordered.push(schedule_match);
+    }
+
+    ordered.extend(open_matches);
+    ordered.extend(women_matches);
+    ordered
 }
 
 fn sort_stage_matches(stage_matches: &mut [ScheduleMatchResponse]) {
@@ -640,8 +715,8 @@ async fn finish_match(
     let t1_players = players_for_team(&detail, detail.t1_id)?;
     let t2_players = players_for_team(&detail, detail.t2_id)?;
     let (t1_rank, t2_rank) = fetch_init_ranks(pool, detail.t1_id, detail.t2_id).await?;
-    let t1_wins = choose_t1_winner(detail.match_type, t1_rank, t2_rank, rng);
-    let (target_t1_score, target_t2_score) = build_target_scores(&detail, t1_wins, rng);
+    let outcome = choose_match_outcome(detail.match_type, t1_rank, t2_rank, rng);
+    let (target_t1_score, target_t2_score) = build_target_scores(&detail, outcome, rng);
     let scoring_sequence = build_scoring_sequence(
         detail.t1_id,
         detail.t2_id,
@@ -1027,7 +1102,16 @@ async fn load_credentials(pool: &SqlitePool) -> MockResult<MockCredentials> {
     })
 }
 
-fn choose_t1_winner(match_type: i64, t1_rank: i64, t2_rank: i64, rng: &mut StdRng) -> bool {
+fn choose_match_outcome(
+    match_type: i64,
+    t1_rank: i64,
+    t2_rank: i64,
+    rng: &mut StdRng,
+) -> MatchOutcome {
+    if match_type < 1000 && rng.random_range(0..100) < 5 {
+        return MatchOutcome::Draw;
+    }
+
     let favorite_is_t1 = t1_rank <= t2_rank;
     let gap = t1_rank.abs_diff(t2_rank).min(6) as i64;
     let base_percent = if match_type >= 1000 { 60 } else { 54 };
@@ -1035,28 +1119,46 @@ fn choose_t1_winner(match_type: i64, t1_rank: i64, t2_rank: i64, rng: &mut StdRn
     let roll = rng.random_range(0..100) as i64;
 
     if favorite_is_t1 {
-        roll < favorite_percent
+        if roll < favorite_percent {
+            MatchOutcome::T1Win
+        } else {
+            MatchOutcome::T2Win
+        }
+    } else if roll >= favorite_percent {
+        MatchOutcome::T1Win
     } else {
-        roll >= favorite_percent
+        MatchOutcome::T2Win
     }
 }
 
 fn build_target_scores(
     detail: &MatchDetailResponse,
-    t1_wins: bool,
+    outcome: MatchOutcome,
     rng: &mut StdRng,
 ) -> (i64, i64) {
     let winner_floor = if detail.match_type >= 1000 { 10 } else { 8 };
     let winner_ceiling = if detail.match_type >= 1000 { 13 } else { 12 };
     let current_max = detail.t1_score.max(detail.t2_score);
-    let winner_score = (rng.random_range(winner_floor..=winner_ceiling)).max(current_max + 1);
-
-    if t1_wins {
-        let loser_score = choose_loser_score(detail.t2_score, winner_score, rng);
-        (winner_score, loser_score)
-    } else {
-        let loser_score = choose_loser_score(detail.t1_score, winner_score, rng);
-        (loser_score, winner_score)
+    match outcome {
+        MatchOutcome::T1Win => {
+            let winner_score =
+                (rng.random_range(winner_floor..=winner_ceiling)).max(current_max + 1);
+            let loser_score = choose_loser_score(detail.t2_score, winner_score, rng);
+            (winner_score, loser_score)
+        }
+        MatchOutcome::T2Win => {
+            let winner_score =
+                (rng.random_range(winner_floor..=winner_ceiling)).max(current_max + 1);
+            let loser_score = choose_loser_score(detail.t1_score, winner_score, rng);
+            (loser_score, winner_score)
+        }
+        MatchOutcome::Draw => {
+            let draw_ceiling = if detail.match_type >= 1000 { 13 } else { 11 };
+            let target_score = rng
+                .random_range(winner_floor..=draw_ceiling)
+                .max(current_max);
+            (target_score, target_score)
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::config::swiss_pairing;
 use crate::helpers::sorting::TeamSortData;
-use rand::{SeedableRng, rngs::StdRng};
 use rand::RngCore;
+use rand::{SeedableRng, rngs::StdRng};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -96,10 +96,7 @@ impl LookaheadEvaluation {
         self.boundary_outcomes
             .into_iter()
             .filter_map(BoundaryOutcomeCounts::miss_probability)
-            .max_by(|left, right| {
-                left.partial_cmp(right)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
     }
 }
 
@@ -153,6 +150,78 @@ struct RoundPairingSettings {
     lookahead_scenarios: usize,
     candidate_limit: usize,
     exploration_limit: usize,
+}
+
+struct RoundCandidateSearch<'a> {
+    sorted_teams: &'a [TeamSortData],
+    allowed_opponents: &'a [Vec<usize>],
+    boundary_state: &'a BoundaryState,
+    settings: RoundPairingSettings,
+}
+
+impl RoundCandidateSearch<'_> {
+    fn collect_recursive(
+        &self,
+        remaining: u32,
+        feasibility_cache: &mut HashMap<u32, bool>,
+        current_pairings: &mut Vec<Pairing>,
+        current_score: RoundPairingScore,
+        collection: &mut RoundCandidateCollection,
+    ) -> bool {
+        if remaining == 0 {
+            collection.explored_candidates += 1;
+            collection.candidates.push(RoundPairingCandidate {
+                pairings: current_pairings.clone(),
+                score: current_score,
+                lookahead_evaluation: LookaheadEvaluation::default(),
+            });
+            return collection.explored_candidates >= self.settings.exploration_limit.max(1);
+        }
+
+        let first_index = first_remaining_index(remaining);
+        let ordered_opponents = ordered_remaining_opponents(
+            first_index,
+            remaining,
+            self.sorted_teams,
+            self.allowed_opponents,
+            self.boundary_state,
+            self.settings,
+        );
+
+        for opponent_index in ordered_opponents {
+            let next_remaining = remove_pair_from_mask(remaining, first_index, opponent_index);
+            if !can_complete_pairing(next_remaining, self.allowed_opponents, feasibility_cache) {
+                continue;
+            }
+
+            let pairing = Pairing {
+                t1: self.sorted_teams[first_index].team_id,
+                t2: self.sorted_teams[opponent_index].team_id,
+            };
+            current_pairings.push(pairing.clone());
+            if self.collect_recursive(
+                next_remaining,
+                feasibility_cache,
+                current_pairings,
+                combine_round_pairing_scores(
+                    current_score,
+                    score_pairing(
+                        &pairing,
+                        self.sorted_teams,
+                        self.boundary_state,
+                        self.settings,
+                    ),
+                ),
+                collection,
+            ) {
+                current_pairings.pop();
+                return true;
+            }
+            current_pairings.pop();
+        }
+
+        false
+    }
 }
 
 fn round_pairing_settings(round: i64, allow_lookahead: bool) -> RoundPairingSettings {
@@ -209,7 +278,9 @@ fn build_boundary_state(
         .into_iter()
         .map(|cutline| BoundaryBand {
             cutline,
-            start_rank: cutline.saturating_sub(settings.band_radius.saturating_sub(1)).max(1),
+            start_rank: cutline
+                .saturating_sub(settings.band_radius.saturating_sub(1))
+                .max(1),
             end_rank: (cutline + settings.band_radius).min(sorted_teams.len()),
         })
         .collect();
@@ -281,14 +352,23 @@ fn generate_round_pairings_with_settings(
         }
         if let Some(best_candidate) = candidates.iter().max_by(|left, right| {
             compare_optional_probability(
-                left.lookahead_evaluation.same_point_boundary_stats.probability(),
-                right.lookahead_evaluation.same_point_boundary_stats.probability(),
+                left.lookahead_evaluation
+                    .same_point_boundary_stats
+                    .probability(),
+                right
+                    .lookahead_evaluation
+                    .same_point_boundary_stats
+                    .probability(),
             )
         }) {
-            diagnostics.best_same_point_cases =
-                best_candidate.lookahead_evaluation.same_point_boundary_stats.cases;
-            diagnostics.best_same_point_met =
-                best_candidate.lookahead_evaluation.same_point_boundary_stats.met;
+            diagnostics.best_same_point_cases = best_candidate
+                .lookahead_evaluation
+                .same_point_boundary_stats
+                .cases;
+            diagnostics.best_same_point_met = best_candidate
+                .lookahead_evaluation
+                .same_point_boundary_stats
+                .met;
         }
 
         let worst_case_samples: Vec<f64> = candidates
@@ -302,17 +382,12 @@ fn generate_round_pairings_with_settings(
         diagnostics.best_kept_worst_case_same_point_miss_probability = worst_case_samples
             .iter()
             .copied()
-            .min_by(|left, right| {
-                left.partial_cmp(right)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            .min_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         diagnostics.average_kept_worst_case_same_point_miss_probability =
             if worst_case_samples.is_empty() {
                 None
             } else {
-                Some(
-                    worst_case_samples.iter().sum::<f64>() / worst_case_samples.len() as f64,
-                )
+                Some(worst_case_samples.iter().sum::<f64>() / worst_case_samples.len() as f64)
             };
 
         let probability_samples: Vec<f64> = candidates
@@ -402,12 +477,14 @@ fn collect_round_pairing_candidates(
     let mut feasibility_cache = HashMap::new();
     let mut collection = RoundCandidateCollection::default();
     let mut current_pairings = Vec::new();
-
-    collect_round_pairing_candidates_recursive(
+    let search = RoundCandidateSearch {
         sorted_teams,
-        &allowed_opponents,
+        allowed_opponents: &allowed_opponents,
         boundary_state,
         settings,
+    };
+
+    search.collect_recursive(
         remaining_mask(sorted_teams.len()),
         &mut feasibility_cache,
         &mut current_pairings,
@@ -422,71 +499,6 @@ fn collect_round_pairing_candidates(
         .candidates
         .truncate(settings.candidate_limit.max(1));
     collection
-}
-
-fn collect_round_pairing_candidates_recursive(
-    sorted_teams: &[TeamSortData],
-    allowed_opponents: &[Vec<usize>],
-    boundary_state: &BoundaryState,
-    settings: RoundPairingSettings,
-    remaining: u32,
-    feasibility_cache: &mut HashMap<u32, bool>,
-    current_pairings: &mut Vec<Pairing>,
-    current_score: RoundPairingScore,
-    collection: &mut RoundCandidateCollection,
-) -> bool {
-    if remaining == 0 {
-        collection.explored_candidates += 1;
-        collection.candidates.push(RoundPairingCandidate {
-            pairings: current_pairings.clone(),
-            score: current_score,
-            lookahead_evaluation: LookaheadEvaluation::default(),
-        });
-        return collection.explored_candidates >= settings.exploration_limit.max(1);
-    }
-
-    let first_index = first_remaining_index(remaining);
-    let ordered_opponents = ordered_remaining_opponents(
-        first_index,
-        remaining,
-        sorted_teams,
-        allowed_opponents,
-        boundary_state,
-        settings,
-    );
-
-    for opponent_index in ordered_opponents {
-        let next_remaining = remove_pair_from_mask(remaining, first_index, opponent_index);
-        if !can_complete_pairing(next_remaining, allowed_opponents, feasibility_cache) {
-            continue;
-        }
-
-        let pairing = Pairing {
-            t1: sorted_teams[first_index].team_id,
-            t2: sorted_teams[opponent_index].team_id,
-        };
-        current_pairings.push(pairing.clone());
-        if collect_round_pairing_candidates_recursive(
-            sorted_teams,
-            allowed_opponents,
-            boundary_state,
-            settings,
-            next_remaining,
-            feasibility_cache,
-            current_pairings,
-            combine_round_pairing_scores(
-                current_score,
-                score_pairing(&pairing, sorted_teams, boundary_state, settings),
-            ),
-            collection,
-        ) {
-            current_pairings.pop();
-            return true;
-        }
-        current_pairings.pop();
-    }
-
-    false
 }
 
 fn build_allowed_opponents(
@@ -583,9 +595,12 @@ fn ordered_remaining_opponents(
             t1: sorted_teams[first_index].team_id,
             t2: sorted_teams[*right].team_id,
         };
-        score_pairing(&right_pairing, sorted_teams, boundary_state, settings).cmp(
-            &score_pairing(&left_pairing, sorted_teams, boundary_state, settings),
-        )
+        score_pairing(&right_pairing, sorted_teams, boundary_state, settings).cmp(&score_pairing(
+            &left_pairing,
+            sorted_teams,
+            boundary_state,
+            settings,
+        ))
     });
 
     opponents
@@ -615,7 +630,8 @@ fn score_pairing(
         reverse_point_gap_sum: -point_gap,
         reverse_rank_gap_sum: -rank_gap,
         natural_pairs: i64::from(rank_gap == 1),
-        boundary_band_score: boundary_band_pair_score(pairing, boundary_state) * settings.band_weight,
+        boundary_band_score: boundary_band_pair_score(pairing, boundary_state)
+            * settings.band_weight,
         lookahead: LookaheadScore::default(),
     }
 }
@@ -641,11 +657,27 @@ fn compare_round_pairing_candidates(
     left.score
         .lookahead
         .cmp(&right.score.lookahead)
-        .then_with(|| left.score.same_score_pairs.cmp(&right.score.same_score_pairs))
-        .then_with(|| left.score.reverse_point_gap_sum.cmp(&right.score.reverse_point_gap_sum))
-        .then_with(|| left.score.reverse_rank_gap_sum.cmp(&right.score.reverse_rank_gap_sum))
+        .then_with(|| {
+            left.score
+                .same_score_pairs
+                .cmp(&right.score.same_score_pairs)
+        })
+        .then_with(|| {
+            left.score
+                .reverse_point_gap_sum
+                .cmp(&right.score.reverse_point_gap_sum)
+        })
+        .then_with(|| {
+            left.score
+                .reverse_rank_gap_sum
+                .cmp(&right.score.reverse_rank_gap_sum)
+        })
         .then_with(|| left.score.natural_pairs.cmp(&right.score.natural_pairs))
-        .then_with(|| left.score.boundary_band_score.cmp(&right.score.boundary_band_score))
+        .then_with(|| {
+            left.score
+                .boundary_band_score
+                .cmp(&right.score.boundary_band_score)
+        })
 }
 
 fn remaining_mask(team_count: usize) -> u32 {
@@ -900,11 +932,7 @@ fn forecast_seed(pairing: &Pairing, round: i64, scenario_index: u64) -> u64 {
         ^ right.rotate_left(29)
 }
 
-fn apply_forecast_result(
-    t1: &mut TeamSortData,
-    t2: &mut TeamSortData,
-    result: ForecastResult,
-) {
+fn apply_forecast_result(t1: &mut TeamSortData, t2: &mut TeamSortData, result: ForecastResult) {
     let (t1_score, t2_score, t1_round_result, t2_round_result) = match result {
         ForecastResult::T1Win => (2, 1, 1, -1),
         ForecastResult::T2Win => (1, 2, -1, 1),
@@ -948,14 +976,17 @@ fn score_final_boundary_meetings(
 ) -> LookaheadEvaluation {
     let mut evaluation = LookaheadEvaluation::default();
 
-    for (index, (left_rank, right_rank)) in swiss_pairing::LOOKAHEAD_BOUNDARY_TARGETS.iter().enumerate() {
+    for (index, (left_rank, right_rank)) in
+        swiss_pairing::LOOKAHEAD_BOUNDARY_TARGETS.iter().enumerate()
+    {
         if *right_rank > final_sorted.len() {
             continue;
         }
 
         let left_team = final_sorted[*left_rank - 1].team_id;
         let right_team = final_sorted[*right_rank - 1].team_id;
-        let same_points = final_sorted[*left_rank - 1].points == final_sorted[*right_rank - 1].points;
+        let same_points =
+            final_sorted[*left_rank - 1].points == final_sorted[*right_rank - 1].points;
         let met = teams_have_played(history, left_team, right_team);
 
         evaluation.same_point_boundary_stats.total_slots += 1;
@@ -1265,6 +1296,13 @@ pub fn build_final_pairings_from_playoff_results(
         offset += 4;
     }
 
+    if offset + 1 < seed_order.len() {
+        finals.push(Pairing {
+            t1: seed_order[offset],
+            t2: seed_order[offset + 1],
+        });
+    }
+
     finals
 }
 
@@ -1480,8 +1518,14 @@ mod tests {
             (7, 8),
             (9, 10),
         ] {
-            history.entry(left).or_insert_with(HashSet::new).insert(right);
-            history.entry(right).or_insert_with(HashSet::new).insert(left);
+            history
+                .entry(left)
+                .or_insert_with(HashSet::new)
+                .insert(right);
+            history
+                .entry(right)
+                .or_insert_with(HashSet::new)
+                .insert(left);
         }
 
         let pairings = generate_round_pairings(&teams, &history, 5);
@@ -1522,8 +1566,7 @@ mod tests {
             Pairing { t1: 4, t2: 6 },
         ];
 
-        let boundary_score =
-            evaluate_round_lookahead(&teams, &history, 5, &boundary_pairings, 12);
+        let boundary_score = evaluate_round_lookahead(&teams, &history, 5, &boundary_pairings, 12);
         let off_boundary_score =
             evaluate_round_lookahead(&teams, &history, 5, &off_boundary_pairings, 12);
 
@@ -1628,6 +1671,30 @@ mod tests {
         assert_eq!(finals.len(), 5);
         assert_eq!(finals[0], Pairing { t1: 1, t2: 2 });
         assert_eq!(finals[4], Pairing { t1: 9, t2: 10 });
+    }
+
+    #[test]
+    fn build_final_pairings_from_playoff_results_keeps_trailing_direct_pair() {
+        let teams: Vec<TeamSortData> = (1..=10)
+            .map(|team_id| team(team_id, 0, 0, team_id))
+            .collect();
+        let playoff_results = vec![
+            PlayedMatchResult {
+                t1: 1,
+                t2: 4,
+                winner: 1,
+            },
+            PlayedMatchResult {
+                t1: 2,
+                t2: 3,
+                winner: 2,
+            },
+        ];
+
+        let finals = build_final_pairings_from_playoff_results(&teams, &playoff_results);
+
+        assert_eq!(finals.len(), 5);
+        assert!(finals.contains(&Pairing { t1: 9, t2: 10 }));
     }
 
     #[test]

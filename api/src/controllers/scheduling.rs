@@ -219,6 +219,14 @@ struct ScheduleGridMatchRecord {
     match_type: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct ExistingStageMatchRecord {
+    id: i64,
+    field_id: Option<i64>,
+    time: Option<String>,
+    possession: Option<i64>,
+}
+
 #[derive(Clone)]
 struct FieldSlot {
     id: i64,
@@ -242,11 +250,10 @@ pub async fn auto_advance_division_if_ready(
         let (total, completed) = stage_progress(db, division, round).await;
 
         if total == 0
-            && (round == 1
-                || {
-                    let prev = stage_progress(db, division, round - 1).await;
-                    prev.0 > 0 && prev.0 == prev.1
-                })
+            && (round == 1 || {
+                let prev = stage_progress(db, division, round - 1).await;
+                prev.0 > 0 && prev.0 == prev.1
+            })
         {
             record_schedule_info(
                 "schedule.start",
@@ -289,6 +296,8 @@ pub async fn auto_advance_division_if_ready(
         }
     }
 
+    let mut generated_actions = Vec::new();
+
     match create_playoffs_if_needed(db, division).await {
         Ok(true) => {
             record_schedule_info(
@@ -308,7 +317,7 @@ pub async fn auto_advance_division_if_ready(
                     "action": "generated_playoff_1"
                 }),
             );
-            return Some("generated_playoff_1".to_string());
+            generated_actions.push("generated_playoff_1");
         }
         Ok(false) => {}
         Err(error) => {
@@ -341,7 +350,7 @@ pub async fn auto_advance_division_if_ready(
                     "action": "generated_playoff_2"
                 }),
             );
-            return Some("generated_playoff_2".to_string());
+            generated_actions.push("generated_playoff_2");
         }
         Ok(false) => {}
         Err(error) => {
@@ -355,7 +364,11 @@ pub async fn auto_advance_division_if_ready(
         }
     }
 
-    None
+    if generated_actions.is_empty() {
+        None
+    } else {
+        Some(generated_actions.join(","))
+    }
 }
 
 pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
@@ -374,6 +387,14 @@ pub async fn auto_generate_initial_rounds(db: &sqlx::SqlitePool) {
             && let Err(err) = generate_r1_from_seeding(db, division).await
         {
             tracing::error!("Failed to generate R1 for division {}: {}", division, err);
+        } else if match_count.0 > 0
+            && let Err(err) = sync_existing_round_one_schedule(db, division).await
+        {
+            tracing::error!(
+                "Failed to sync R1 schedule for division {}: {}",
+                division,
+                err
+            );
         }
     }
 }
@@ -434,7 +455,7 @@ async fn load_seeded_round_one_team_ids(
 fn seeded_round_one_pairings_from_team_ids(
     team_ids: &[i64],
 ) -> Result<Vec<rounds::Pairing>, &'static str> {
-    if team_ids.len() % 2 != 0 {
+    if !team_ids.len().is_multiple_of(2) {
         return Err("odd number of teams; cannot generate pairings");
     }
 
@@ -457,6 +478,60 @@ async fn build_seeded_round_one_pairings(
     let team_ids = load_seeded_round_one_team_ids(db, division).await?;
     seeded_round_one_pairings_from_team_ids(&team_ids)
         .map_err(|message| sqlx::Error::Protocol(message.into()))
+}
+
+async fn sync_existing_round_one_schedule(
+    db: &sqlx::SqlitePool,
+    division: i64,
+) -> Result<bool, sqlx::Error> {
+    let slots = get_slot_assignments(db, division, 1).await?;
+    if slots.is_empty() {
+        return Ok(false);
+    }
+
+    let existing_matches: Vec<ExistingStageMatchRecord> = sqlx::query_as(
+        r#"SELECT m.id, m.field_id, m.time, m.possession
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = 1 AND m.deleted_at IS NULL
+           ORDER BY COALESCE(m.time, ''), COALESCE(m.field_id, 0), m.id ASC"#,
+    )
+    .bind(division)
+    .fetch_all(db)
+    .await?;
+
+    if existing_matches.len() != slots.len()
+        || existing_matches
+            .iter()
+            .any(|record| record.possession.is_some())
+    {
+        return Ok(false);
+    }
+
+    let mut updated = false;
+    for (existing_match, (field_id, start_time)) in existing_matches.iter().zip(slots.iter()) {
+        if existing_match.field_id == Some(*field_id)
+            && existing_match.time.as_deref() == Some(start_time.as_str())
+        {
+            continue;
+        }
+
+        sqlx::query(
+            "UPDATE matches SET field_id = ?, time = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        )
+        .bind(*field_id)
+        .bind(start_time)
+        .bind(existing_match.id)
+        .execute(db)
+        .await?;
+        updated = true;
+    }
+
+    if updated {
+        cache::invalidate_division(division).await;
+    }
+
+    Ok(updated)
 }
 
 pub async fn read_tournament_state(
@@ -506,6 +581,8 @@ pub async fn read_tournament_state(
 
     let phase = if current_round <= total_rounds {
         format!("swiss_R{current_round}")
+    } else if playoff_one.0 > 0 && playoff_one.1 < playoff_one.0 {
+        "playoff_1".to_string()
     } else if playoff_two.0 > 0 {
         if playoff_two.1 < playoff_two.0 {
             "playoff_2".to_string()
@@ -513,11 +590,7 @@ pub async fn read_tournament_state(
             "complete".to_string()
         }
     } else if playoff_one.0 > 0 {
-        if playoff_one.1 < playoff_one.0 {
-            "playoff_1".to_string()
-        } else {
-            "playoff_2_pending".to_string()
-        }
+        "playoff_2_pending".to_string()
     } else {
         "playoff_1_pending".to_string()
     };
@@ -753,9 +826,7 @@ pub async fn update_schedule_row(
     let query = format!(
         "UPDATE matches SET time = ?, updated_at = CURRENT_TIMESTAMP WHERE deleted_at IS NULL AND time = ? AND field_id IN ({placeholders})"
     );
-    let mut update_query = sqlx::query(&query)
-        .bind(&new_time)
-        .bind(&old_time);
+    let mut update_query = sqlx::query(&query).bind(&new_time).bind(&old_time);
     for field_id in field_ids {
         update_query = update_query.bind(field_id);
     }
@@ -984,7 +1055,8 @@ pub async fn generate_next_round(
         }
     } else {
         let history = rounds::fetch_match_history(&state.db, division).await;
-        let sorted = sorting::get_generation_standings_for_stage(&state.db, division, next_round).await;
+        let sorted =
+            sorting::get_generation_standings_for_stage(&state.db, division, next_round).await;
         if sorted.len() % 2 != 0 {
             record_schedule_error(serde_json::json!({
                 "source": "manual_generate",
@@ -1080,11 +1152,10 @@ pub async fn check_and_populate_gates(
     for round in 1..=total_rounds {
         let (total, completed) = stage_progress(&state.db, division, round).await;
         if total == 0
-            && (round == 1
-                || {
-                    let prev = stage_progress(&state.db, division, round - 1).await;
-                    prev.0 > 0 && prev.0 == prev.1
-                })
+            && (round == 1 || {
+                let prev = stage_progress(&state.db, division, round - 1).await;
+                prev.0 > 0 && prev.0 == prev.1
+            })
         {
             record_schedule_info(
                 "schedule.start",
@@ -1137,9 +1208,72 @@ pub async fn check_and_populate_gates(
         }
     }
 
+    let mut generated_actions = Vec::new();
+
+    match create_playoffs_if_needed(&state.db, division).await {
+        Ok(true) => {
+            cache::invalidate_all().await;
+            generated_actions.push("generated_playoff_1");
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "check_gates",
+                "division": division,
+                "stage": "playoff_1",
+                "message": error.to_string()
+            }));
+            return Json(serde_json::json!({
+                "action": "error",
+                "next_gate": "playoff_1_generation_failed",
+            }));
+        }
+    }
+
+    match create_finals_if_needed(&state.db, division).await {
+        Ok(true) => {
+            cache::invalidate_all().await;
+            generated_actions.push("generated_playoff_2");
+        }
+        Ok(false) => {}
+        Err(error) => {
+            record_schedule_error(serde_json::json!({
+                "source": "check_gates",
+                "division": division,
+                "stage": "playoff_2",
+                "message": error.to_string()
+            }));
+            return Json(serde_json::json!({
+                "action": "error",
+                "next_gate": "playoff_2_generation_failed",
+            }));
+        }
+    }
+
+    let playoff_one = stage_progress(&state.db, division, 1001).await;
+    let playoff_two = stage_progress(&state.db, division, 1002).await;
+    let next_gate = if playoff_one.0 > 0 && playoff_one.1 < playoff_one.0 {
+        "playoff_1_completion".to_string()
+    } else if playoff_two.0 > 0 && playoff_two.1 < playoff_two.0 {
+        "playoff_2_completion".to_string()
+    } else if playoff_one.0 > 0 && playoff_two.0 == 0 {
+        "playoff_2_generation".to_string()
+    } else if playoff_two.0 > 0 {
+        "complete".to_string()
+    } else {
+        "playoff_1_generation".to_string()
+    };
+
+    if !generated_actions.is_empty() {
+        return Json(serde_json::json!({
+            "action": generated_actions.join(","),
+            "next_gate": next_gate,
+        }));
+    }
+
     Json(serde_json::json!({
         "action": "none",
-        "next_gate": "playoff_1_or_complete"
+        "next_gate": next_gate
     }))
 }
 
@@ -1259,10 +1393,6 @@ async fn create_playoffs_if_needed(
     db: &sqlx::SqlitePool,
     division: i64,
 ) -> Result<bool, sqlx::Error> {
-    if division == 1 {
-        return Ok(false);
-    }
-
     let existing_playoffs: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL",
     )
@@ -1275,11 +1405,17 @@ async fn create_playoffs_if_needed(
     }
 
     let sorted = sorting::get_generation_standings_for_stage(db, division, 1001).await;
-    if sorted.len() < 2 {
+    let playoff_team_count = playoff_bracket_team_count(division, sorted.len());
+    if playoff_team_count == 0 {
         return Ok(false);
     }
 
-    let bracket_rounds = rounds::build_playoff_brackets(&sorted);
+    let expected_playoff_matches = (playoff_team_count / 2) as i64;
+    if existing_playoffs.0 >= expected_playoff_matches || existing_playoffs.0 > 0 {
+        return Ok(false);
+    }
+
+    let bracket_rounds = rounds::build_playoff_brackets(&sorted[..playoff_team_count]);
     let Some(playoff_round) = bracket_rounds.iter().find(|round| round.name == "playoffs") else {
         return Ok(false);
     };
@@ -1331,34 +1467,66 @@ async fn create_finals_if_needed(
     .fetch_one(db)
     .await?;
 
-    if finals_existing.0 > 0 {
+    let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
+    if sorted.len() < 2 {
         return Ok(false);
     }
 
-    let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
-    let final_pairings = if division == 1 {
-        rounds::build_direct_final_pairings(&sorted)
-    } else {
-        let playoff_stats = stage_progress(db, division, 1001).await;
+    let playoff_pair_count = playoff_bracket_team_count(division, sorted.len()) / 2;
+    let playoff_stats = stage_progress(db, division, 1001).await;
+    let playoffs_complete = playoff_pair_count == 0
+        || (playoff_stats.0 == playoff_pair_count as i64 && playoff_stats.1 == playoff_stats.0);
 
-        if playoff_stats.0 == 0 || playoff_stats.1 < playoff_stats.0 {
-            return Ok(false);
-        }
-
-        let playoff_results = fetch_completed_playoff_results(db, division).await?;
-        if playoff_results.len() as i64 != playoff_stats.0 {
-            return Ok(false);
-        }
-
-        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results)
-    };
+    let playoff_results = fetch_completed_playoff_results(db, division).await?;
+    let final_pairings =
+        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
 
     if final_pairings.is_empty() {
         return Ok(false);
     }
 
-    insert_pairings_into_slots(db, division, 1002, &final_pairings).await?;
-    Ok(true)
+    let ready_direct_pairings = &final_pairings[playoff_pair_count.min(final_pairings.len())..];
+    let existing_finals = finals_existing.0 as usize;
+
+    if existing_finals == final_pairings.len() {
+        return Ok(false);
+    }
+
+    if existing_finals == 0 {
+        if playoffs_complete || playoff_pair_count == 0 {
+            insert_pairings_into_slots(db, division, 1002, &final_pairings).await?;
+            return Ok(true);
+        }
+
+        if ready_direct_pairings.is_empty() {
+            return Ok(false);
+        }
+
+        insert_pairings_into_slots_with_offset(
+            db,
+            division,
+            1002,
+            ready_direct_pairings,
+            playoff_pair_count,
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    if playoffs_complete && playoff_pair_count > 0 && existing_finals == ready_direct_pairings.len()
+    {
+        insert_pairings_into_slots_with_offset(
+            db,
+            division,
+            1002,
+            &final_pairings[..playoff_pair_count],
+            0,
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 async fn insert_pairings_into_slots(
@@ -1367,11 +1535,21 @@ async fn insert_pairings_into_slots(
     match_type: i64,
     pairings: &[rounds::Pairing],
 ) -> Result<(), sqlx::Error> {
+    insert_pairings_into_slots_with_offset(db, division, match_type, pairings, 0).await
+}
+
+async fn insert_pairings_into_slots_with_offset(
+    db: &sqlx::SqlitePool,
+    division: i64,
+    match_type: i64,
+    pairings: &[rounds::Pairing],
+    slot_offset: usize,
+) -> Result<(), sqlx::Error> {
     let slots = get_slot_assignments(db, division, match_type).await?;
-    if pairings.len() > slots.len() {
+    if slot_offset > slots.len() || pairings.len() + slot_offset > slots.len() {
         return Err(sqlx::Error::Protocol(format!(
             "not enough fixed schedule slots for division {division} type {match_type}: {} pairings for {} slots",
-            pairings.len(),
+            pairings.len() + slot_offset,
             slots.len()
         )));
     }
@@ -1381,7 +1559,10 @@ async fn insert_pairings_into_slots(
         arrange_pairings_for_slots(pairings, match_type, &mut rng)
     };
 
-    for (pairing, (field_id, start_time)) in scheduled_pairings.iter().zip(slots.iter()) {
+    for (pairing, (field_id, start_time)) in scheduled_pairings
+        .iter()
+        .zip(slots.iter().skip(slot_offset))
+    {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, ?)",
         )
@@ -1396,6 +1577,14 @@ async fn insert_pairings_into_slots(
 
     cache::invalidate_division(division).await;
     Ok(())
+}
+
+fn playoff_bracket_team_count(division: i64, team_count: usize) -> usize {
+    match division {
+        0 if team_count >= 8 => 8,
+        1 if team_count >= 4 => 4,
+        _ => 0,
+    }
 }
 
 fn arrange_pairings_for_slots<R: rand::Rng + ?Sized>(
@@ -1455,11 +1644,11 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     let sunday = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
 
     let friday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
-    let friday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
+    let friday_end = NaiveTime::from_hms_opt(21, 55, 0).unwrap();
     let saturday_start = NaiveTime::from_hms_opt(6, 0, 0).unwrap();
-    let saturday_end = NaiveTime::from_hms_opt(21, 30, 0).unwrap();
-    let sunday_start = NaiveTime::from_hms_opt(6, 30, 0).unwrap();
-    let sunday_end = NaiveTime::from_hms_opt(18, 5, 0).unwrap();
+    let saturday_end = NaiveTime::from_hms_opt(21, 55, 0).unwrap();
+    let sunday_start = NaiveTime::from_hms_opt(6, 15, 0).unwrap();
+    let sunday_end = NaiveTime::from_hms_opt(16, 55, 0).unwrap();
 
     let mut rows = vec![
         build_row(
@@ -1471,7 +1660,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday_start,
             friday_end,
             "06:00",
-            "07:00",
+            "07:05",
             vec![
                 open_slot(1, 1, 1),
                 open_slot(2, 1, 2),
@@ -1487,8 +1676,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "07:15",
-            "08:15",
+            "07:20",
+            "08:25",
             vec![
                 open_slot(1, 1, 5),
                 open_slot(2, 1, 6),
@@ -1504,7 +1693,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "08:30",
+            "08:40",
             "09:45",
             vec![
                 women_slot(1, 1, 2),
@@ -1522,7 +1711,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday_start,
             friday_end,
             "10:00",
-            "11:00",
+            "11:05",
             vec![
                 open_slot(1, 1, 8),
                 open_slot(2, 1, 9),
@@ -1538,8 +1727,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "11:15",
-            "12:30",
+            "11:20",
+            "12:25",
             vec![
                 women_slot(1, 2, 1),
                 women_slot(2, 2, 2),
@@ -1555,7 +1744,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "12:45",
+            "12:40",
             "13:45",
             vec![
                 open_slot(1, 2, 1),
@@ -1589,8 +1778,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "15:15",
-            "16:15",
+            "15:20",
+            "16:25",
             vec![
                 open_slot(1, 2, 8),
                 open_slot(2, 2, 9),
@@ -1606,8 +1795,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "16:30",
-            "17:45",
+            "16:50",
+            "17:55",
             vec![
                 women_slot(1, 3, 1),
                 women_slot(2, 3, 2),
@@ -1623,8 +1812,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "18:00",
-            "19:00",
+            "18:10",
+            "19:15",
             vec![
                 open_slot(1, 3, 1),
                 women_slot(2, 3, 5),
@@ -1640,8 +1829,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "19:15",
-            "20:15",
+            "19:30",
+            "20:35",
             vec![
                 open_slot(1, 3, 4),
                 open_slot(2, 3, 5),
@@ -1657,8 +1846,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "20:30",
-            "21:30",
+            "20:50",
+            "21:55",
             vec![
                 open_slot(1, 3, 8),
                 open_slot(2, 3, 9),
@@ -1675,7 +1864,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday_start,
             saturday_end,
             "06:00",
-            "07:00",
+            "07:05",
             vec![
                 open_slot(1, 4, 1),
                 open_slot(2, 4, 2),
@@ -1691,8 +1880,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "07:15",
-            "08:15",
+            "07:20",
+            "08:25",
             vec![
                 women_slot(1, 4, 1),
                 open_slot(2, 4, 5),
@@ -1708,7 +1897,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "08:30",
+            "08:40",
             "09:45",
             vec![
                 women_slot(1, 4, 2),
@@ -1726,7 +1915,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday_start,
             saturday_end,
             "10:00",
-            "11:00",
+            "11:05",
             vec![
                 open_slot(1, 4, 8),
                 open_slot(2, 4, 9),
@@ -1742,8 +1931,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "11:15",
-            "12:30",
+            "11:20",
+            "12:25",
             vec![
                 women_slot(1, 5, 1),
                 women_slot(2, 5, 2),
@@ -1759,7 +1948,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "12:45",
+            "12:40",
             "13:45",
             vec![
                 open_slot(1, 5, 1),
@@ -1793,8 +1982,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "15:15",
-            "16:15",
+            "15:20",
+            "16:25",
             vec![
                 open_slot(1, 5, 8),
                 open_slot(2, 5, 9),
@@ -1810,8 +1999,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "16:30",
-            "17:45",
+            "16:50",
+            "17:55",
             vec![
                 women_slot(1, 6, 1),
                 women_slot(2, 6, 2),
@@ -1827,8 +2016,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "18:00",
-            "19:00",
+            "18:10",
+            "19:15",
             vec![
                 open_slot(1, 6, 1),
                 open_slot(2, 6, 2),
@@ -1844,8 +2033,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "19:15",
-            "20:15",
+            "19:30",
+            "20:35",
             vec![
                 open_slot(1, 6, 4),
                 open_slot(2, 6, 5),
@@ -1861,8 +2050,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "20:30",
-            "21:30",
+            "20:50",
+            "21:55",
             vec![
                 open_slot(1, 6, 8),
                 open_slot(2, 6, 9),
@@ -1878,13 +2067,13 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "06:30",
-            "07:45",
+            "06:15",
+            "07:30",
             vec![
-                playoff_open_slot(1, 1, 5),
-                playoff_open_slot(2, 1, 6),
-                playoff_open_slot(3, 1, 7),
-                playoff_open_slot(4, 1, 8),
+                playoff_open_slot(1, 1, 1),
+                playoff_open_slot(2, 1, 2),
+                playoff_open_slot(3, 1, 3),
+                playoff_open_slot(4, 1, 4),
             ],
         ),
         build_row(
@@ -1895,30 +2084,13 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "08:00",
-            "09:15",
+            "07:50",
+            "09:05",
             vec![
-                playoff_open_slot(1, 1, 3),
-                playoff_open_slot(2, 1, 4),
-                playoff_open_slot(3, 1, 9),
-                playoff_open_slot(4, 1, 10),
-            ],
-        ),
-        build_row(
-            "sun-p1-c",
-            "sun",
-            "Sunday",
-            "Playoff 1 · Row C",
-            sunday,
-            sunday_start,
-            sunday_end,
-            "09:30",
-            "10:45",
-            vec![
-                playoff_open_slot(1, 1, 1),
-                playoff_open_slot(2, 1, 2),
-                playoff_open_slot(3, 1, 11),
-                playoff_women_slot(4, 2, 5),
+                playoff_women_slot(1, 1, 1),
+                playoff_women_slot(2, 1, 2),
+                playoff_women_slot(3, 2, 4),
+                playoff_open_slot(4, 2, 6),
             ],
         ),
         build_row(
@@ -1929,13 +2101,13 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "11:00",
-            "12:15",
+            "09:25",
+            "10:40",
             vec![
                 playoff_open_slot(1, 2, 4),
                 playoff_open_slot(2, 2, 5),
-                playoff_women_slot(3, 2, 4),
-                playoff_open_slot(4, 2, 6),
+                playoff_open_slot(3, 2, 7),
+                playoff_open_slot(4, 2, 8),
             ],
         ),
         build_row(
@@ -1946,13 +2118,13 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "12:30",
-            "13:45",
+            "11:00",
+            "12:15",
             vec![
                 playoff_open_slot(1, 2, 3),
                 playoff_women_slot(2, 2, 3),
-                playoff_open_slot(3, 2, 7),
-                playoff_open_slot(4, 2, 8),
+                playoff_open_slot(3, 2, 9),
+                playoff_open_slot(4, 2, 10),
             ],
         ),
         build_row(
@@ -1963,13 +2135,13 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "14:00",
-            "15:15",
+            "12:35",
+            "13:50",
             vec![
                 playoff_women_slot(1, 2, 2),
                 playoff_open_slot(2, 2, 2),
-                playoff_open_slot(3, 2, 9),
-                playoff_open_slot(4, 2, 10),
+                playoff_open_slot(3, 2, 11),
+                playoff_women_slot(4, 2, 5),
             ],
         ),
         build_row(
@@ -1980,9 +2152,9 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "15:30",
-            "16:45",
-            vec![playoff_open_slot(1, 2, 1)],
+            "14:10",
+            "15:25",
+            vec![playoff_women_slot(1, 2, 1)],
         ),
         build_row(
             "sun-p2-e",
@@ -1992,9 +2164,9 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             sunday,
             sunday_start,
             sunday_end,
-            "16:50",
-            "18:05",
-            vec![playoff_women_slot(1, 2, 1)],
+            "15:40",
+            "16:55",
+            vec![playoff_open_slot(1, 2, 1)],
         ),
     ];
 
@@ -2018,6 +2190,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_row(
     key: &str,
     day_key: &'static str,
@@ -2414,9 +2587,9 @@ mod tests {
                 .filter(|slot| slot.match_type == round)
             {
                 if slot.division == 0 {
-                        open_slots += 1;
-                    } else {
-                        women_slots += 1;
+                    open_slots += 1;
+                } else {
+                    women_slots += 1;
                 }
             }
 
@@ -2456,9 +2629,9 @@ mod tests {
             .filter(|slot| slot.match_type == 1002 && slot.division == 1)
             .count();
 
-        assert_eq!(playoff_one_open, 11);
-        assert_eq!(playoff_one_women, 0);
-        assert_eq!(playoff_two_open, 10);
+        assert_eq!(playoff_one_open, 4);
+        assert_eq!(playoff_one_women, 2);
+        assert_eq!(playoff_two_open, 11);
         assert_eq!(playoff_two_women, 5);
     }
 
@@ -2480,11 +2653,17 @@ mod tests {
                 "round {round} should expose 16 total swiss slots"
             );
             assert_eq!(
-                slot_divisions.iter().filter(|division| **division == 0).count(),
+                slot_divisions
+                    .iter()
+                    .filter(|division| **division == 0)
+                    .count(),
                 11
             );
             assert_eq!(
-                slot_divisions.iter().filter(|division| **division == 1).count(),
+                slot_divisions
+                    .iter()
+                    .filter(|division| **division == 1)
+                    .count(),
                 5
             );
         }
@@ -2509,8 +2688,10 @@ mod tests {
 
         assert_ne!(scheduled, pairings);
 
-        let original_set: HashSet<(i64, i64)> =
-            pairings.iter().map(|pairing| (pairing.t1, pairing.t2)).collect();
+        let original_set: HashSet<(i64, i64)> = pairings
+            .iter()
+            .map(|pairing| (pairing.t1, pairing.t2))
+            .collect();
         let scheduled_set: HashSet<(i64, i64)> = scheduled
             .iter()
             .map(|pairing| (pairing.t1, pairing.t2))

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
 import { Text } from "../components/Text";
 
 type HandbookSectionKey = 'rules' | 'format' | 'reporting' | 'edit-team';
@@ -12,65 +12,155 @@ const HANDBOOK_SECTIONS: { key: HandbookSectionKey; label: string; file: string 
   { key: 'edit-team', label: 'Edit Team', file: '/edit-team.md' },
 ];
 
+const INLINE_MARKDOWN_PATTERN = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/;
+
+type HandbookContents = Record<HandbookSectionKey, string>;
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const elements: ReactNode[] = [];
+  let remaining = text;
+  let index = 0;
+
+  while (remaining.length > 0) {
+    const match = INLINE_MARKDOWN_PATTERN.exec(remaining);
+
+    if (!match || match.index === undefined) {
+      elements.push(<span key={`${keyPrefix}-${index++}`}>{remaining}</span>);
+      break;
+    }
+
+    if (match.index > 0) {
+      elements.push(
+        <span key={`${keyPrefix}-${index++}`}>
+          {remaining.slice(0, match.index)}
+        </span>
+      );
+    }
+
+    const token = match[0];
+    const content = token.slice(token.startsWith('**') ? 2 : 1, token.endsWith('**') ? -2 : -1);
+
+    if (token.startsWith('**') && token.endsWith('**')) {
+      elements.push(
+        <strong key={`${keyPrefix}-${index++}`} className="font-bold">
+          {content}
+        </strong>
+      );
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      elements.push(
+        <code
+          key={`${keyPrefix}-${index++}`}
+          className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.95em] text-blue-900 dark:bg-slate-800 dark:text-cyan-200"
+        >
+          {content}
+        </code>
+      );
+    } else {
+      elements.push(
+        <em key={`${keyPrefix}-${index++}`} className="italic">
+          {content}
+        </em>
+      );
+    }
+
+    remaining = remaining.slice(match.index + token.length);
+  }
+
+  return elements;
+}
+
+function isItalicOnlyLine(line: string) {
+  const trimmed = line.trim();
+  return trimmed.startsWith('*') && trimmed.endsWith('*') && !trimmed.startsWith('**') && trimmed.length > 2;
+}
+
+function listIndentStyle(line: string) {
+  const indent = line.match(/^\s*/)?.[0].length ?? 0;
+  return { marginLeft: `${1.5 + Math.floor(indent / 2)}rem` };
+}
+
+async function loadHandbookContents(): Promise<HandbookContents> {
+  const cacheBust = Date.now();
+
+  const entries = await Promise.all(
+    HANDBOOK_SECTIONS.map(async (section) => {
+      const response = await fetch(`${section.file}?v=${cacheBust}`, {
+        cache: 'no-store',
+        headers: { 'cache-control': 'no-cache' },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to load ${section.file}`);
+      }
+
+      const text = await response.text();
+      return [section.key, text] as const;
+    })
+  );
+
+  return {
+    rules: entries.find(([key]) => key === 'rules')?.[1] ?? '',
+    format: entries.find(([key]) => key === 'format')?.[1] ?? '',
+    reporting: entries.find(([key]) => key === 'reporting')?.[1] ?? '',
+    'edit-team': entries.find(([key]) => key === 'edit-team')?.[1] ?? '',
+  };
+}
+
 function renderMarkdown(content: string) {
   const lines = content.split('\n');
-  const elements: React.ReactNode[] = [];
+  const elements: ReactNode[] = [];
 
   lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+
     if (line.startsWith('# ')) {
       elements.push(
         <Text key={idx} as="h1" variant="primary" className="text-3xl font-bold mt-6 mb-4">
-          {line.substring(2)}
+          {renderInlineMarkdown(line.substring(2), `h1-${idx}`)}
         </Text>
       );
     } else if (line.startsWith('## ')) {
       elements.push(
         <Text key={idx} as="h2" variant="primary" className="text-2xl font-semibold mt-6 mb-3">
-          {line.substring(3)}
+          {renderInlineMarkdown(line.substring(3), `h2-${idx}`)}
         </Text>
       );
     } else if (line.startsWith('### ')) {
       elements.push(
         <Text key={idx} as="h3" variant="primary" className="text-xl font-medium mt-4 mb-2">
-          {line.substring(4)}
+          {renderInlineMarkdown(line.substring(4), `h3-${idx}`)}
         </Text>
       );
-    } else if (line.startsWith('- ')) {
-      const text = line.substring(2);
-      const boldMatch = text.match(/^\*\*(.+?)\*\*:\s*(.+)/);
-      if (boldMatch) {
-        elements.push(
-          <li key={idx} className="ml-6 mb-2">
-            <Text variant="primary" className="inline">
-              <span className="font-bold">{boldMatch[1]}</span>: {boldMatch[2]}
-            </Text>
-          </li>
-        );
-      } else {
-        elements.push(
-          <li key={idx} className="ml-6 mb-2">
-            <Text variant="primary">{text}</Text>
-          </li>
-        );
-      }
-    } else if (/^\d+\.\s/.test(line)) {
+    } else if (/^\s*-\s+/.test(line)) {
+      const text = line.replace(/^\s*-\s+/, '');
+
       elements.push(
-        <Text key={idx} variant="primary" className="ml-6 mb-2">
-          {line}
-        </Text>
+        <li key={idx} className="mb-2" style={listIndentStyle(line)}>
+          <Text variant="primary" className="inline">
+            {renderInlineMarkdown(text, `li-${idx}`)}
+          </Text>
+        </li>
       );
-    } else if (line.startsWith('*') && line.endsWith('*') && !line.startsWith('**')) {
+    } else if (/^\s*\d+\.\s/.test(line)) {
       elements.push(
-        <Text key={idx} variant="secondary" className="italic text-sm mt-4">
-          {line.substring(1, line.length - 1)}
+        <div key={idx} className="mb-2" style={listIndentStyle(line)}>
+          <Text as="span" variant="primary">
+            {renderInlineMarkdown(trimmed, `ol-${idx}`)}
+          </Text>
+        </div>
+      );
+    } else if (isItalicOnlyLine(line)) {
+      elements.push(
+        <Text key={idx} as="p" variant="secondary" className="italic text-sm mt-4">
+          {renderInlineMarkdown(trimmed.substring(1, trimmed.length - 1), `em-${idx}`)}
         </Text>
       );
-    } else if (line.trim() === '---') {
+    } else if (trimmed === '---') {
       elements.push(<hr key={idx} className="my-6 border-gray-300 dark:border-slate-700" />);
-    } else if (line.trim() !== '') {
+    } else if (trimmed !== '') {
       elements.push(
-        <Text key={idx} variant="primary" className="mb-3">
-          {line}
+        <Text key={idx} as="p" variant="primary" className="mb-3">
+          {renderInlineMarkdown(line, `p-${idx}`)}
         </Text>
       );
     } else {
@@ -83,7 +173,7 @@ function renderMarkdown(content: string) {
 
 export default function Handbook() {
   const [activeSection, setActiveSection] = useState<HandbookSectionKey>('rules');
-  const [contents, setContents] = useState<Record<HandbookSectionKey, string>>({
+  const [contents, setContents] = useState<HandbookContents>({
     rules: '',
     format: '',
     reporting: '',
@@ -92,23 +182,44 @@ export default function Handbook() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all(
-      HANDBOOK_SECTIONS.map(async (section) => {
-        const response = await fetch(section.file);
-        const text = await response.text();
-        return [section.key, text] as const;
-      })
-    )
-      .then((entries) => {
-        setContents({
-          rules: entries.find(([key]) => key === 'rules')?.[1] ?? '',
-          format: entries.find(([key]) => key === 'format')?.[1] ?? '',
-          reporting: entries.find(([key]) => key === 'reporting')?.[1] ?? '',
-          'edit-team': entries.find(([key]) => key === 'edit-team')?.[1] ?? '',
-        });
+    let cancelled = false;
+
+    const loadContents = async () => {
+      try {
+        const nextContents = await loadHandbookContents();
+
+        if (cancelled) {
+          return;
+        }
+
+        setContents(nextContents);
         setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      } catch {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    const handleWindowFocus = () => {
+      void loadContents();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadContents();
+      }
+    };
+
+    void loadContents();
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, []);
 
   if (loading) {

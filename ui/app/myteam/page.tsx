@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useRef } from "react";
+import NextImage from 'next/image';
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Trash2, Edit2, Save, X, User, Upload, AlertTriangle, ChevronDown, ChevronUp, ArrowLeftRight, ChevronLeft, RotateCcw } from "lucide-react";
 import { Text } from "../components/Text";
@@ -529,8 +530,8 @@ export default function MyTeamPage() {
     const actionGroup = currentMatch.events.length === 0
       ? 1
       : Math.max(...currentMatch.events.map((event) => event.action_group)) + 1;
-    let nextEvents = currentMatch.events.slice();
-    let nextEventId = currentMatch.events.length === 0
+    const nextEvents = currentMatch.events.slice();
+    const nextEventId = currentMatch.events.length === 0
       ? 1
       : Math.max(...currentMatch.events.map((event) => event.id)) + 1;
     const eventTeamId = currentMatch.possession === 1 ? currentMatch.t1_id : currentMatch.t2_id;
@@ -664,17 +665,7 @@ export default function MyTeamPage() {
     resetMockState();
   };
 
-  useEffect(() => {
-    if (isLoading) return;
-    if (!isLoggedIn) { router.push('/login'); return; }
-    if (!isPoc) {
-      router.push(roleName === 'SUPER' || roleName === 'ADMIN' ? '/admin' : '/');
-      return;
-    }
-    fetchData();
-  }, [isLoggedIn, isPoc, roleName, router, token, isLoading]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     if (!token) return;
     try {
       const [teamRes, playersRes, matchesRes] = await Promise.all([
@@ -695,7 +686,17 @@ export default function MyTeamPage() {
       }
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (!isLoggedIn) { router.push('/login'); return; }
+    if (!isPoc) {
+      router.push(roleName === 'SUPER' || roleName === 'ADMIN' ? '/admin' : '/');
+      return;
+    }
+    void fetchData();
+  }, [fetchData, isLoading, isLoggedIn, isPoc, roleName, router]);
 
   const handleTeamAbbreviationSave = async () => {
     if (!token || !team) return;
@@ -962,7 +963,7 @@ export default function MyTeamPage() {
     }
   };
 
-  const fetchExistingSpirits = async () => {
+  const fetchExistingSpirits = useCallback(async () => {
     if (!token || !team) return;
     const nextSubmittedSpirits = new Set<number>();
     const nextSubmittedSelfSpirits = new Set<number>();
@@ -1043,11 +1044,13 @@ export default function MyTeamPage() {
       }
       return merged;
     });
-  };
+  }, [expandedMatch, matches, team, token]);
 
   useEffect(() => {
-    if (matches.length > 0 && team) fetchExistingSpirits();
-  }, [matches, team]);
+    if (matches.length > 0 && team) {
+      void fetchExistingSpirits();
+    }
+  }, [fetchExistingSpirits, matches.length, team]);
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (teamEditsLocked) {
@@ -1609,9 +1612,16 @@ export default function MyTeamPage() {
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
           <div className="flex items-center gap-3">
             <div className="relative shrink-0">
-              <div className="w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-800 flex items-center justify-center overflow-hidden">
+              <div className="relative w-12 h-12 rounded-full bg-gray-100 dark:bg-slate-800 flex items-center justify-center overflow-hidden">
                 {team.full_logo ? (
-                  <img src={team.full_logo} alt={team.name} className="w-full h-full object-cover" />
+                  <NextImage
+                    src={team.full_logo}
+                    alt={team.name}
+                    fill
+                    unoptimized
+                    sizes="48px"
+                    className="object-cover"
+                  />
                 ) : (
                   <Text variant="secondary" className="text-lg font-bold">{team.name.charAt(0).toUpperCase()}</Text>
                 )}
@@ -1997,9 +2007,16 @@ export default function MyTeamPage() {
             <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl p-5 max-w-sm w-full">
               <Text as="h3" variant="primary" className="text-base font-semibold mb-4">Edit Team Logo</Text>
               <div className="mb-4 flex justify-center">
-                <div className="w-36 h-36 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-800 flex items-center justify-center">
-                  <img src={logoPreview} alt="Preview" className="w-full h-full object-cover"
-                    style={{ transform: `rotate(${rotation}deg) scale(${scale})`, transformOrigin: 'center' }} />
+                <div className="relative w-36 h-36 rounded-full overflow-hidden bg-gray-100 dark:bg-slate-800 flex items-center justify-center">
+                  <NextImage
+                    src={logoPreview}
+                    alt="Preview"
+                    fill
+                    unoptimized
+                    sizes="144px"
+                    className="object-cover"
+                    style={{ transform: `rotate(${rotation}deg) scale(${scale})`, transformOrigin: 'center' }}
+                  />
                 </div>
               </div>
               <div className="space-y-3 mb-5">
