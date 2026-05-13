@@ -319,7 +319,7 @@ async fn fetch_sort_data_with_round_limit(
     data_map.into_values().collect()
 }
 
-async fn fetch_live_sort_data_with_round_limit(
+async fn fetch_ended_current_sort_data_with_round_limit(
     db: &SqlitePool,
     division: i64,
     max_round: Option<i64>,
@@ -332,7 +332,7 @@ async fn fetch_live_sort_data_with_round_limit(
         r#"SELECT m.id, m.t1_id, m.t2_id, m.t1_score, m.t2_score, m.possession, m.t1_spirit, m.t2_spirit
            FROM matches m
            JOIN teams t ON m.t1_id = t.id
-           WHERE t.division = ? AND m.possession IS NOT NULL AND m.deleted_at IS NULL AND m.type < 1000
+                     WHERE t.division = ? AND m.possession >= 3 AND m.deleted_at IS NULL AND m.type < 1000
              AND (? IS NULL OR m.type <= ?)
            ORDER BY m.type ASC, m.id ASC"#,
     )
@@ -455,24 +455,140 @@ pub fn c1_points(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b.points.cmp(&a.points)
 }
 
-// C2: Head-to-head. If a beat b, a ranks higher.
-pub fn c2_head_to_head(a: &TeamSortData, b: &TeamSortData) -> Ordering {
-    match a.h2h.get(&b.team_id) {
-        Some(1) => Ordering::Less,     // a beat b
-        Some(-1) => Ordering::Greater, // b beat a
-        _ => Ordering::Equal,          // draw or never played
+fn point_group_has_complete_head_to_head(group: &[&TeamSortData]) -> bool {
+    for left_index in 0..group.len() {
+        for right_index in left_index + 1..group.len() {
+            let left = group[left_index];
+            let right = group[right_index];
+            if !left.h2h.contains_key(&right.team_id) || !right.h2h.contains_key(&left.team_id) {
+                return false;
+            }
+        }
     }
+
+    true
+}
+
+// C2: Use mini-table points only when the tied group is a complete round robin.
+fn build_complete_mini_table_points(group: &[&TeamSortData]) -> Option<HashMap<i64, i64>> {
+    if !point_group_has_complete_head_to_head(group) {
+        return None;
+    }
+
+    let mut mini_table_points: HashMap<i64, i64> =
+        group.iter().map(|team| (team.team_id, 0)).collect();
+
+    for left_index in 0..group.len() {
+        for right_index in left_index + 1..group.len() {
+            let left = group[left_index];
+            let right = group[right_index];
+            let left_result = left.h2h.get(&right.team_id).copied().unwrap_or_default();
+
+            match left_result {
+                1 => {
+                    *mini_table_points.entry(left.team_id).or_default() += 2;
+                }
+                -1 => {
+                    *mini_table_points.entry(right.team_id).or_default() += 2;
+                }
+                0 => {
+                    *mini_table_points.entry(left.team_id).or_default() += 1;
+                    *mini_table_points.entry(right.team_id).or_default() += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(mini_table_points)
+}
+
+fn compare_teams_after_c2(
+    a: &TeamSortData,
+    b: &TeamSortData,
+    snapshot: &[TeamSortData],
+) -> Ordering {
+    let mut ord = c3_median_buchholz(a, b, snapshot);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    ord = c4_buchholz(a, b, snapshot);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    ord = c5_point_difference(a, b);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    ord = c6_points_scored(a, b);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+
+    c7_momentum_score(a, b)
+}
+
+fn compare_point_group_teams(
+    a: &TeamSortData,
+    b: &TeamSortData,
+    snapshot: &[TeamSortData],
+    mini_table_points: Option<&HashMap<i64, i64>>,
+) -> Ordering {
+    if let Some(mini_table_points) = mini_table_points {
+        let a_mini_points = mini_table_points
+            .get(&a.team_id)
+            .copied()
+            .unwrap_or_default();
+        let b_mini_points = mini_table_points
+            .get(&b.team_id)
+            .copied()
+            .unwrap_or_default();
+        let ord = b_mini_points.cmp(&a_mini_points);
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    compare_teams_after_c2(a, b, snapshot)
+}
+
+fn collect_point_tie_groups(teams: &[TeamSortData]) -> Vec<Vec<&TeamSortData>> {
+    let mut ordered: Vec<&TeamSortData> = teams.iter().collect();
+    ordered.sort_by(|a, b| c1_points(a, b).then_with(|| a.team_id.cmp(&b.team_id)));
+
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    while start < ordered.len() {
+        let mut end = start + 1;
+        while end < ordered.len() && ordered[end].points == ordered[start].points {
+            end += 1;
+        }
+        groups.push(ordered[start..end].to_vec());
+        start = end;
+    }
+
+    groups
 }
 
 // C3: Median Buchholz score - sum of opponent swiss points after dropping
 // the highest and lowest opponent totals when at least three exist.
-pub fn c3_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
+pub fn c3_median_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
     let points_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.points)).collect();
 
     let a_buch = median_buchholz_score(a, &points_map);
     let b_buch = median_buchholz_score(b, &points_map);
 
     b_buch.cmp(&a_buch)
+}
+
+fn buchholz_score(team: &TeamSortData, points_map: &HashMap<i64, i64>) -> i64 {
+    team.opponents
+        .iter()
+        .filter_map(|opponent_id| points_map.get(opponent_id).copied())
+        .sum()
 }
 
 fn median_buchholz_score(team: &TeamSortData, points_map: &HashMap<i64, i64>) -> i64 {
@@ -490,20 +606,30 @@ fn median_buchholz_score(team: &TeamSortData, points_map: &HashMap<i64, i64>) ->
     }
 }
 
-// C4: Point difference (goals scored - goals allowed), descending
-pub fn c4_point_difference(a: &TeamSortData, b: &TeamSortData) -> Ordering {
+// C4: Full Buchholz score - sum of all opponent swiss points.
+pub fn c4_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
+    let points_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.points)).collect();
+
+    let a_buch = buchholz_score(a, &points_map);
+    let b_buch = buchholz_score(b, &points_map);
+
+    b_buch.cmp(&a_buch)
+}
+
+// C5: Goal difference (goals scored - goals allowed), descending
+pub fn c5_point_difference(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     let a_diff = a.points_for - a.points_against;
     let b_diff = b.points_for - b.points_against;
     b_diff.cmp(&a_diff)
 }
 
-// C5: Points scored (total goals), descending
-pub fn c5_points_scored(a: &TeamSortData, b: &TeamSortData) -> Ordering {
+// C6: Points scored (total goals), descending
+pub fn c6_points_scored(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b.points_for.cmp(&a.points_for)
 }
 
-// C6: Momentum score - cumulative points after each round (higher = earlier wins)
-pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
+// C7: Momentum score - cumulative points after each round (higher = earlier wins)
+pub fn c7_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     let momentum = |results: &[i8]| -> i64 {
         let mut cumulative = 0i64;
         let mut total = 0i64;
@@ -522,56 +648,23 @@ pub fn c6_momentum_score(a: &TeamSortData, b: &TeamSortData) -> Ordering {
     b_mom.cmp(&a_mom)
 }
 
-// C7: Random coin toss fallback for teams still tied after c1-c6.
-pub fn c7_random_coin_toss() -> i64 {
+// C8: Random coin toss fallback for teams still tied after c1-c7.
+pub fn c8_random_coin_toss() -> i64 {
     i64::from(rand::random::<bool>())
 }
 
-fn compare_teams_through_c6(
-    a: &TeamSortData,
-    b: &TeamSortData,
-    snapshot: &[TeamSortData],
-) -> Ordering {
-    let mut ord = c1_points(a, b);
-    if ord != Ordering::Equal {
-        return ord;
-    }
-
-    if tied_team_count(a.points, snapshot) == 2 {
-        ord = c2_head_to_head(a, b);
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-
-    ord = c3_buchholz(a, b, snapshot);
-    if ord != Ordering::Equal {
-        return ord;
-    }
-
-    ord = c4_point_difference(a, b);
-    if ord != Ordering::Equal {
-        return ord;
-    }
-
-    ord = c5_points_scored(a, b);
-    if ord != Ordering::Equal {
-        return ord;
-    }
-
-    c6_momentum_score(a, b)
-}
-
-fn apply_c7_random_coin_toss_with_seed(
+fn apply_c8_random_coin_toss_with_seed<F>(
     teams: &mut [TeamSortData],
     snapshot: &[TeamSortData],
     seed: u64,
-) {
+    compare_without_c7: F,
+) where
+    F: Fn(&TeamSortData, &TeamSortData) -> Ordering,
+{
     let mut start = 0usize;
     while start < teams.len() {
         let mut end = start + 1;
-        while end < teams.len()
-            && compare_teams_through_c6(&teams[start], &teams[end], snapshot) == Ordering::Equal
+        while end < teams.len() && compare_without_c7(&teams[start], &teams[end]) == Ordering::Equal
         {
             end += 1;
         }
@@ -597,7 +690,7 @@ fn team_has_standings_data(team: &TeamSortData) -> bool {
         || team.points_against != 0
 }
 
-// Master sort: apply all criteria in order c1..c7
+// Master sort: apply all criteria in order c1..c8
 pub fn sort_teams(teams: &mut [TeamSortData]) {
     sort_teams_with_seed(teams, persistent_coin_toss_seed());
 }
@@ -609,13 +702,30 @@ pub fn sort_teams_with_seed(teams: &mut [TeamSortData], seed: u64) {
     }
 
     let snapshot: Vec<TeamSortData> = teams.to_vec();
+    let mut by_id: HashMap<i64, TeamSortData> = snapshot
+        .iter()
+        .cloned()
+        .map(|team| (team.team_id, team))
+        .collect();
+    let mut ordered = Vec::with_capacity(snapshot.len());
 
-    teams.sort_by(|a, b| compare_teams_through_c6(a, b, &snapshot));
-    apply_c7_random_coin_toss_with_seed(teams, &snapshot, seed);
-}
+    for point_group in collect_point_tie_groups(&snapshot) {
+        let mini_table_points = build_complete_mini_table_points(&point_group);
+        let mut point_group_teams: Vec<TeamSortData> = point_group
+            .iter()
+            .filter_map(|team| by_id.remove(&team.team_id))
+            .collect();
+        point_group_teams
+            .sort_by(|a, b| compare_point_group_teams(a, b, &snapshot, mini_table_points.as_ref()));
+        apply_c8_random_coin_toss_with_seed(&mut point_group_teams, &snapshot, seed, |a, b| {
+            compare_point_group_teams(a, b, &snapshot, mini_table_points.as_ref())
+        });
+        ordered.extend(point_group_teams);
+    }
 
-fn tied_team_count(points: i64, teams: &[TeamSortData]) -> usize {
-    teams.iter().filter(|team| team.points == points).count()
+    for (slot, team) in teams.iter_mut().zip(ordered) {
+        *slot = team;
+    }
 }
 
 // Full pipeline: fetch data and return sorted standings for a division (completed matches only)
@@ -677,11 +787,10 @@ pub async fn get_generation_standings_through_round(
     teams
 }
 
-// Intermediate rankings: includes live/in-progress match scores for display purposes.
-// Uses current scores from ongoing games on top of completed results.
-// NOT used for round generation — only for live standings display.
+// Current public standings: update as soon as a match is ended, but do not
+// wait for post-match confirmations/spirit completion and do not include live games.
 pub async fn get_intermediate_standings(db: &SqlitePool, division: i64) -> Vec<TeamSortData> {
-    let mut teams = fetch_live_sort_data_with_round_limit(db, division, None).await;
+    let mut teams = fetch_ended_current_sort_data_with_round_limit(db, division, None).await;
     let stage_key = current_generated_stage_key(db, division).await;
     let seed = ensure_stage_coin_toss_seed(db, division, stage_key)
         .await
@@ -918,8 +1027,8 @@ pub async fn get_display_intermediate_standings(
     division: i64,
 ) -> Vec<TeamSortData> {
     let teams = get_cached_intermediate_standings(db, division).await;
-    let ordered = apply_post_swiss_seed_order(db, division, teams, true).await;
-    let display_stats = fetch_display_stats(db, division, true).await;
+    let ordered = apply_post_swiss_seed_order(db, division, teams, false).await;
+    let display_stats = fetch_display_stats(db, division, false).await;
     apply_display_stats(ordered, &display_stats)
 }
 
@@ -953,6 +1062,50 @@ mod tests {
         }
     }
 
+    fn fresh_tied_team(team_id: i64, seed: i64) -> TeamSortData {
+        TeamSortData {
+            wins: 3,
+            losses: 0,
+            draws: 0,
+            points: 6,
+            points_for: 0,
+            points_against: 0,
+            round_results: vec![1, 1, 1],
+            opponents: Vec::new(),
+            h2h: HashMap::new(),
+            ..team(team_id, seed)
+        }
+    }
+
+    fn record_h2h_win(winner: &mut TeamSortData, loser: &mut TeamSortData) {
+        winner.opponents.push(loser.team_id);
+        loser.opponents.push(winner.team_id);
+        winner.h2h.insert(loser.team_id, 1);
+        loser.h2h.insert(winner.team_id, -1);
+    }
+
+    fn record_h2h_draw(first: &mut TeamSortData, second: &mut TeamSortData) {
+        first.opponents.push(second.team_id);
+        second.opponents.push(first.team_id);
+        first.h2h.insert(second.team_id, 0);
+        second.h2h.insert(first.team_id, 0);
+    }
+
+    fn standings_only_team(team_id: i64, seed: i64, points: i64) -> TeamSortData {
+        TeamSortData {
+            points,
+            wins: points / 2,
+            draws: points % 2,
+            losses: 0,
+            points_for: 0,
+            points_against: 0,
+            round_results: Vec::new(),
+            opponents: Vec::new(),
+            h2h: HashMap::new(),
+            ..team(team_id, seed)
+        }
+    }
+
     #[test]
     fn sort_teams_uses_head_to_head_before_later_tiebreakers() {
         let mut first = team(1, 2);
@@ -968,34 +1121,154 @@ mod tests {
     }
 
     #[test]
-    fn sort_teams_skips_pairwise_head_to_head_for_three_way_ties() {
-        let mut first = team(1, 1);
-        let mut second = team(2, 2);
-        let mut third = team(3, 3);
+    fn build_complete_mini_table_points_requires_every_pair_to_have_played() {
+        let mut first = fresh_tied_team(1, 3);
+        let mut second = fresh_tied_team(2, 2);
+        let third = fresh_tied_team(3, 1);
 
-        first.h2h.insert(2, 1);
-        first.h2h.insert(3, -1);
-        second.h2h.insert(1, -1);
-        second.h2h.insert(3, 1);
-        third.h2h.insert(1, 1);
-        third.h2h.insert(2, -1);
+        record_h2h_win(&mut first, &mut second);
 
-        let teams = vec![third, second, first];
+        let teams = [first, second, third];
+        let group: Vec<&TeamSortData> = teams.iter().collect();
+
+        assert!(build_complete_mini_table_points(&group).is_none());
+    }
+
+    #[test]
+    fn sort_teams_uses_complete_group_mini_table_before_later_tiebreakers() {
+        let mut first = fresh_tied_team(1, 3);
+        let mut second = fresh_tied_team(2, 2);
+        let mut third = fresh_tied_team(3, 1);
+
+        record_h2h_win(&mut first, &mut second);
+        record_h2h_win(&mut first, &mut third);
+        record_h2h_win(&mut second, &mut third);
+
+        third.points_for = 100;
+        third.points_against = 0;
+
+        let mut teams = vec![third, second, first];
+        sort_teams_with_seed(&mut teams, 0);
 
         assert_eq!(
-            compare_teams_through_c6(&teams[2], &teams[1], &teams),
-            Ordering::Equal
-        );
-        assert_eq!(
-            compare_teams_through_c6(&teams[1], &teams[0], &teams),
-            Ordering::Equal
+            teams.iter().map(|team| team.team_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
         );
     }
 
     #[test]
-    fn c7_random_coin_toss_returns_binary_values() {
+    fn sort_teams_skips_incomplete_group_head_to_head_and_uses_later_criteria() {
+        let mut first = fresh_tied_team(1, 3);
+        let mut second = fresh_tied_team(2, 2);
+        let mut third = fresh_tied_team(3, 1);
+        let fourth = standings_only_team(10, 10, 0);
+        let fifth = standings_only_team(11, 11, 0);
+        let sixth = standings_only_team(12, 12, 3);
+        let seventh = standings_only_team(13, 13, 3);
+
+        record_h2h_win(&mut first, &mut second);
+
+        first.opponents.push(10);
+        second.opponents.push(11);
+        third.opponents.push(12);
+        third.opponents.push(13);
+
+        first.points_for = 10;
+        first.points_against = 0;
+        second.points_for = 20;
+        second.points_against = 0;
+        third.points_for = 30;
+        third.points_against = 0;
+
+        let mut teams = vec![third, second, first, fourth, fifth, sixth, seventh];
+        sort_teams_with_seed(&mut teams, 0);
+
+        assert_eq!(
+            teams[..3]
+                .iter()
+                .map(|team| team.team_id)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn sort_teams_uses_median_buchholz_after_a_mini_table_tie() {
+        let mut first = fresh_tied_team(1, 3);
+        let mut second = fresh_tied_team(2, 2);
+        let mut third = fresh_tied_team(3, 1);
+        let fourth = standings_only_team(10, 10, 9);
+        let fifth = standings_only_team(11, 11, 9);
+        let sixth = standings_only_team(12, 12, 0);
+        let seventh = standings_only_team(13, 13, 9);
+        let eighth = standings_only_team(14, 14, 5);
+        let ninth = standings_only_team(15, 15, 5);
+
+        record_h2h_draw(&mut first, &mut second);
+        record_h2h_win(&mut first, &mut third);
+        record_h2h_win(&mut second, &mut third);
+
+        first.points = 30;
+        second.points = 30;
+        third.points = 30;
+
+        first.opponents.push(10);
+        first.opponents.push(11);
+        first.opponents.push(12);
+        second.opponents.push(13);
+        second.opponents.push(14);
+        second.opponents.push(15);
+
+        let mut teams = vec![
+            second, third, first, fourth, fifth, sixth, seventh, eighth, ninth,
+        ];
+        sort_teams_with_seed(&mut teams, 0);
+
+        assert_eq!(
+            teams[..3]
+                .iter()
+                .map(|team| team.team_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn sort_teams_uses_full_buchholz_before_goal_difference() {
+        let mut first = fresh_tied_team(1, 1);
+        let mut second = fresh_tied_team(2, 2);
+
+        first.opponents = vec![10, 11, 12, 13, 14];
+        second.opponents = vec![15, 16, 17, 18, 19];
+        first.points_for = 5;
+        first.points_against = 0;
+        second.points_for = 50;
+        second.points_against = 0;
+
+        let mut teams = vec![second, first];
+        teams.extend(vec![
+            standings_only_team(10, 10, 5),
+            standings_only_team(11, 11, 3),
+            standings_only_team(12, 12, 3),
+            standings_only_team(13, 13, 0),
+            standings_only_team(14, 14, 0),
+            standings_only_team(15, 15, 4),
+            standings_only_team(16, 16, 4),
+            standings_only_team(17, 17, 2),
+            standings_only_team(18, 18, 0),
+            standings_only_team(19, 19, 0),
+        ]);
+
+        sort_teams_with_seed(&mut teams, 0);
+
+        assert_eq!(teams[0].team_id, 1);
+        assert_eq!(teams[1].team_id, 2);
+    }
+
+    #[test]
+    fn c8_random_coin_toss_returns_binary_values() {
         for _ in 0..128 {
-            let toss = c7_random_coin_toss();
+            let toss = c8_random_coin_toss();
             assert!(toss == 0 || toss == 1);
         }
     }
@@ -1056,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn c3_buchholz_uses_median_opponent_points() {
+    fn c3_median_buchholz_uses_median_opponent_points() {
         let contender = TeamSortData {
             team_id: 1,
             name: "Team 1".to_string(),
@@ -1141,8 +1414,61 @@ mod tests {
         ];
 
         assert_eq!(
-            c3_buchholz(&contender, &challenger, &all),
+            c3_median_buchholz(&contender, &challenger, &all),
             Ordering::Greater
         );
+    }
+
+    #[test]
+    fn c4_buchholz_uses_all_opponent_points() {
+        let contender = TeamSortData {
+            team_id: 1,
+            name: "Team 1".to_string(),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: 1,
+            wins: 2,
+            losses: 1,
+            draws: 1,
+            points: 5,
+            points_for: 0,
+            points_against: 0,
+            spirit_avg: 0.0,
+            round_results: vec![1, 1, 0, -1],
+            opponents: vec![10, 11, 12, 13],
+            h2h: HashMap::new(),
+        };
+        let challenger = TeamSortData {
+            team_id: 2,
+            name: "Team 2".to_string(),
+            abbreviation: None,
+            small_logo: None,
+            init_rank: 2,
+            wins: 2,
+            losses: 1,
+            draws: 1,
+            points: 5,
+            points_for: 0,
+            points_against: 0,
+            spirit_avg: 0.0,
+            round_results: vec![1, 1, 0, -1],
+            opponents: vec![14, 15, 16, 17],
+            h2h: HashMap::new(),
+        };
+
+        let all = vec![
+            contender.clone(),
+            challenger.clone(),
+            standings_only_team(10, 10, 12),
+            standings_only_team(11, 11, 6),
+            standings_only_team(12, 12, 4),
+            standings_only_team(13, 13, 0),
+            standings_only_team(14, 14, 10),
+            standings_only_team(15, 15, 6),
+            standings_only_team(16, 16, 4),
+            standings_only_team(17, 17, 1),
+        ];
+
+        assert_eq!(c4_buchholz(&contender, &challenger, &all), Ordering::Less);
     }
 }

@@ -35,3 +35,7 @@ Once the match and spirit circle completes, enter the following steps in the sys
 - Confirm the final score and end the game.
 - Submit spirit scores.
 - Submit MVP and MSP selections.
+
+---
+
+*Last updated: May 2026*

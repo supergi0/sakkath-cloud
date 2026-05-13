@@ -4,14 +4,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
-LOCAL_RELEASE_DIR="$REPO_ROOT/release_v1"
-LOCAL_API_DIR="$LOCAL_RELEASE_DIR/api"
-LOCAL_UI_DIR="$LOCAL_RELEASE_DIR/ui"
 LOCAL_DB_PATH="$REPO_ROOT/sakkath.db"
 ROOT_ENV_FILE="$REPO_ROOT/.env"
+SOURCE_API_ENV_FILE="$REPO_ROOT/api/.env"
 
 DATABASE_REPLACE="false"
 UPLOAD="false"
+PROD="false"
+
+RELEASE_LABEL=""
+RELEASE_PORT=""
+RELEASE_REDIS_NAMESPACE=""
+LOCAL_RELEASE_DIR=""
+LOCAL_API_DIR=""
+LOCAL_UI_DIR=""
 
 REMOTE_SERVICE_STOPPED="false"
 SSH_USER=""
@@ -30,13 +36,56 @@ backup_remote_database() {
 
 usage() {
     cat <<'EOF'
-Usage: ./release.sh [--database_replace true|false] [--upload true|false]
+Usage: ./release.sh [--prod true|false] [--database_replace true|false] [--upload true|false]
 
 Flags:
-  --database_replace true|false   Replace release_v1 database files from the local repo root database. Default: false
-  --upload true|false            Upload the built release to the remote server using root .env credentials. Default: false
-  --help                         Show this help message.
+  --prod true|false               Target prod when true, otherwise staging. Default: false
+  --database_replace true|false   Replace the target release database files from the local repo root database. Default: false
+  --upload true|false             Upload the built release to the remote server using root .env credentials. Default: false
+  --help                          Show this help message.
 EOF
+}
+
+configure_release_mode() {
+    if [[ "$PROD" == "true" ]]; then
+        RELEASE_LABEL="prod"
+        RELEASE_PORT="9000"
+        RELEASE_REDIS_NAMESPACE="sakkath:prod"
+        LOCAL_RELEASE_DIR="$REPO_ROOT/release_v1"
+    else
+        RELEASE_LABEL="staging"
+        RELEASE_PORT="9001"
+        RELEASE_REDIS_NAMESPACE="sakkath:staging"
+        LOCAL_RELEASE_DIR="$REPO_ROOT/release_staging_v1"
+    fi
+
+    LOCAL_API_DIR="$LOCAL_RELEASE_DIR/api"
+    LOCAL_UI_DIR="$LOCAL_RELEASE_DIR/ui"
+}
+
+derive_staging_release_dir() {
+    local prod_release_dir="$1"
+
+    if [[ -z "$prod_release_dir" ]]; then
+        return
+    fi
+
+    printf '%s/release_staging_v1\n' "$(dirname "$prod_release_dir")"
+}
+
+derive_staging_service_name() {
+    local prod_service_name="$1"
+
+    if [[ -z "$prod_service_name" ]]; then
+        printf 'sakkath-staging.service\n'
+        return
+    fi
+
+    if [[ "$prod_service_name" == *.service ]]; then
+        printf '%s-staging.service\n' "${prod_service_name%.service}"
+    else
+        printf '%s-staging\n' "$prod_service_name"
+    fi
 }
 
 normalize_bool() {
@@ -55,6 +104,11 @@ normalize_bool() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --prod)
+                [[ $# -ge 2 ]] || { echo "Missing value for --prod" >&2; usage; exit 1; }
+                PROD="$(normalize_bool "$2")"
+                shift 2
+                ;;
             --database_replace)
                 [[ $# -ge 2 ]] || { echo "Missing value for --database_replace" >&2; usage; exit 1; }
                 DATABASE_REPLACE="$(normalize_bool "$2")"
@@ -103,8 +157,17 @@ load_root_env() {
     SSH_HOST="${DEPLOY_SSH_HOST:-}"
     SSH_PORT="${DEPLOY_SSH_PORT:-22}"
     SSH_KEY_PATH="${DEPLOY_SSH_KEY_PATH:-}"
-    REMOTE_RELEASE_DIR="${DEPLOY_REMOTE_RELEASE_DIR:-}"
-    REMOTE_SERVICE_NAME="${DEPLOY_REMOTE_SERVICE_NAME:-sakkath.service}"
+
+    local prod_remote_release_dir="${DEPLOY_REMOTE_RELEASE_DIR_PROD:-${DEPLOY_REMOTE_RELEASE_DIR:-}}"
+    local prod_remote_service_name="${DEPLOY_REMOTE_SERVICE_NAME_PROD:-${DEPLOY_REMOTE_SERVICE_NAME:-sakkath.service}}"
+
+    if [[ "$PROD" == "true" ]]; then
+        REMOTE_RELEASE_DIR="$prod_remote_release_dir"
+        REMOTE_SERVICE_NAME="$prod_remote_service_name"
+    else
+        REMOTE_RELEASE_DIR="${DEPLOY_REMOTE_RELEASE_DIR_STAGING:-$(derive_staging_release_dir "$prod_remote_release_dir")}"
+        REMOTE_SERVICE_NAME="${DEPLOY_REMOTE_SERVICE_NAME_STAGING:-$(derive_staging_service_name "$prod_remote_service_name")}"
+    fi
 
     local missing=()
     [[ -n "$SSH_USER" ]] || missing+=("DEPLOY_SSH_USER")
@@ -121,6 +184,31 @@ load_root_env() {
         echo "SSH key file not found: $SSH_KEY_PATH" >&2
         exit 1
     fi
+}
+
+upsert_env_assignment() {
+    local file_path="$1"
+    local key="$2"
+    local assignment="$3"
+
+    if grep -Eq "^${key}=" "$file_path"; then
+        sed -i "s|^${key}=.*$|$assignment|" "$file_path"
+    else
+        printf '%s\n' "$assignment" >> "$file_path"
+    fi
+}
+
+sync_release_env() {
+    local release_env_path="$LOCAL_API_DIR/.env"
+
+    if [[ ! -f "$release_env_path" ]]; then
+        require_file "$SOURCE_API_ENV_FILE" "API env template"
+        cp "$SOURCE_API_ENV_FILE" "$release_env_path"
+    fi
+
+    upsert_env_assignment "$release_env_path" "release" "release=true"
+    upsert_env_assignment "$release_env_path" "PORT" "PORT=$RELEASE_PORT"
+    upsert_env_assignment "$release_env_path" "REDIS_NAMESPACE" "REDIS_NAMESPACE=\"$RELEASE_REDIS_NAMESPACE\""
 }
 
 build_release_artifacts() {
@@ -152,21 +240,19 @@ sync_local_release() {
     rm -rf "$LOCAL_UI_DIR"
     mkdir -p "$LOCAL_UI_DIR"
 
-    echo "Updating local API binary in release_v1/api..."
+    echo "Updating local API binary in $LOCAL_API_DIR..."
     cp "$api_binary" "$LOCAL_API_DIR/sakkath-api"
     chmod +x "$LOCAL_API_DIR/sakkath-api"
 
-    if [[ ! -f "$LOCAL_API_DIR/.env" ]]; then
-        echo "Warning: $LOCAL_API_DIR/.env does not exist. The release API env was left untouched." >&2
-    fi
+    sync_release_env
 
-    echo "Replacing local UI files in release_v1/ui..."
+    echo "Replacing local UI files in $LOCAL_UI_DIR..."
     cp -a "$ui_build_dir"/. "$LOCAL_UI_DIR"/
 
     if [[ "$DATABASE_REPLACE" == "true" ]]; then
         require_file "$LOCAL_DB_PATH" "local database"
 
-        echo "Replacing local database files in release_v1/..."
+        echo "Replacing local database files in $LOCAL_RELEASE_DIR/..."
         cp "$LOCAL_DB_PATH" "$LOCAL_RELEASE_DIR/sakkath.db"
 
         local optional_db
@@ -178,7 +264,7 @@ sync_local_release() {
             fi
         done
     else
-        echo "Leaving existing local release_v1 database files unchanged."
+        echo "Leaving existing local $LOCAL_RELEASE_DIR database files unchanged."
     fi
 }
 
@@ -208,6 +294,9 @@ upload_release() {
     rm -f "$local_ui_archive"
     local_ui_archive="${local_ui_archive}.tar.gz"
 
+    echo "Ensuring remote release directories exist at $REMOTE_RELEASE_DIR..."
+    ssh_cmd "mkdir -p '$REMOTE_RELEASE_DIR/api'"
+
     echo "Stopping remote service $REMOTE_SERVICE_NAME..."
     ssh_cmd "sudo systemctl stop '$REMOTE_SERVICE_NAME'"
     REMOTE_SERVICE_STOPPED="true"
@@ -215,6 +304,9 @@ upload_release() {
     echo "Uploading API binary..."
     scp_file "$LOCAL_API_DIR/sakkath-api" "$REMOTE_RELEASE_DIR/api/sakkath-api"
     ssh_cmd "chmod +x '$REMOTE_RELEASE_DIR/api/sakkath-api'"
+
+    echo "Uploading API env..."
+    scp_file "$LOCAL_API_DIR/.env" "$REMOTE_RELEASE_DIR/api/.env"
 
     echo "Uploading UI bundle..."
     tar -C "$LOCAL_RELEASE_DIR" -czf "$local_ui_archive" ui
@@ -246,9 +338,15 @@ upload_release() {
 
 main() {
     parse_args "$@"
+    configure_release_mode
 
+    echo "prod=$PROD"
+    echo "target=$RELEASE_LABEL"
     echo "database_replace=$DATABASE_REPLACE"
     echo "upload=$UPLOAD"
+    echo "local_release_dir=$LOCAL_RELEASE_DIR"
+    echo "port=$RELEASE_PORT"
+    echo "redis_namespace=$RELEASE_REDIS_NAMESPACE"
 
     build_release_artifacts
     sync_local_release

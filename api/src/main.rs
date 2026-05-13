@@ -182,6 +182,9 @@ async fn run_mock_database(database_url: &str, request: helpers::mock_seed::Mock
         .await
         .unwrap_or_else(|err| exit_with_error(&format!("Failed to verify migrations: {err}")));
 
+    // Let mock-database invalidate the same shared Redis cache that serve mode uses.
+    helpers::cache::init_redis().await;
+
     let summary = helpers::mock_seed::mock_existing_database(&db_pool, request)
         .await
         .unwrap_or_else(|err| exit_with_error(&format!("Failed to mock database: {err}")));

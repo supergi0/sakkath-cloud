@@ -551,6 +551,11 @@ async fn ensure_stage_matches_for_division(
         return Ok(Vec::new());
     }
 
+    if round_key > 1 {
+        let _ =
+            crate::controllers::scheduling::auto_advance_division_if_ready(pool, division).await;
+    }
+
     let mut stage_matches = assign_match_division(
         client.get_schedule_matches(division, round_key).await?,
         division,
@@ -576,9 +581,6 @@ async fn ensure_stage_matches_for_division(
                 division_label(division)
             ),
         )?;
-    } else {
-        let _ =
-            crate::controllers::scheduling::auto_advance_division_if_ready(pool, division).await;
     }
 
     stage_matches = assign_match_division(

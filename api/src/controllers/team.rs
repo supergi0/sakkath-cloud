@@ -286,7 +286,7 @@ pub async fn get_team_players(
     Json(players)
 }
 
-// Standings by division using helper sorting (c1-c7 tiebreakers, includes live scores)
+// Standings by division using helper sorting (c1-c7 tiebreakers, updates once matches are ended)
 pub async fn get_standings(
     State(state): State<crate::AppState>,
     Query(params): Query<DivisionQuery>,

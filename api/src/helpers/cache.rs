@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 static REDIS_CLIENT: OnceLock<Mutex<Option<redis::aio::MultiplexedConnection>>> = OnceLock::new();
+static REDIS_NAMESPACE: OnceLock<String> = OnceLock::new();
 
 // Cache key prefixes
 const STANDINGS_PREFIX: &str = "standings";
@@ -16,6 +17,34 @@ const SCHEDULE_TEAMS_KEY: &str = "schedule_teams";
 const DEFAULT_TTL: u64 = 300; // 5 minutes
 const SCHEDULE_GRID_TTL: u64 = 120; // 2 minutes (explicit invalidation covers most cases)
 
+fn redis_namespace() -> &'static str {
+    REDIS_NAMESPACE.get_or_init(|| {
+        std::env::var("REDIS_NAMESPACE")
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(':')
+            .to_string()
+    })
+}
+
+fn namespaced_key(key: &str) -> String {
+    let namespace = redis_namespace();
+    if namespace.is_empty() {
+        key.to_string()
+    } else {
+        format!("{namespace}:{key}")
+    }
+}
+
+fn namespaced_pattern(pattern: &str) -> String {
+    let namespace = redis_namespace();
+    if namespace.is_empty() {
+        pattern.to_string()
+    } else {
+        format!("{namespace}:{pattern}")
+    }
+}
+
 // Initialize redis connection (call once at startup)
 pub async fn init_redis() -> bool {
     let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -24,7 +53,12 @@ pub async fn init_redis() -> bool {
             Ok(conn) => {
                 let lock = REDIS_CLIENT.get_or_init(|| Mutex::new(None));
                 *lock.lock().await = Some(conn);
-                tracing::info!("Redis connected at {}", url);
+                let namespace = redis_namespace();
+                if namespace.is_empty() {
+                    tracing::info!("Redis connected at {}", url);
+                } else {
+                    tracing::info!("Redis connected at {} with namespace {}", url, namespace);
+                }
                 true
             }
             Err(e) => {
@@ -48,8 +82,9 @@ async fn get_conn() -> Option<redis::aio::MultiplexedConnection> {
 // Generic get: returns None if cache miss or redis down
 pub async fn get<T: DeserializeOwned>(key: &str) -> Option<T> {
     let mut conn = get_conn().await?;
+    let key = namespaced_key(key);
     let val: Option<String> = redis::cmd("GET")
-        .arg(key)
+        .arg(&key)
         .query_async(&mut conn)
         .await
         .ok()?;
@@ -61,8 +96,9 @@ pub async fn set<T: Serialize>(key: &str, value: &T, ttl_secs: u64) {
     if let Some(mut conn) = get_conn().await
         && let Ok(json) = serde_json::to_string(value)
     {
+        let key = namespaced_key(key);
         let _: Result<(), _> = redis::cmd("SETEX")
-            .arg(key)
+            .arg(&key)
             .arg(ttl_secs)
             .arg(json)
             .query_async(&mut conn)
@@ -73,15 +109,17 @@ pub async fn set<T: Serialize>(key: &str, value: &T, ttl_secs: u64) {
 // Delete a key
 pub async fn del(key: &str) {
     if let Some(mut conn) = get_conn().await {
-        let _: Result<(), _> = redis::cmd("DEL").arg(key).query_async(&mut conn).await;
+        let key = namespaced_key(key);
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
     }
 }
 
 // Delete all keys matching a pattern
 pub async fn del_pattern(pattern: &str) {
     if let Some(mut conn) = get_conn().await {
+        let pattern = namespaced_pattern(pattern);
         let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
+            .arg(&pattern)
             .query_async(&mut conn)
             .await
             .unwrap_or_default();
@@ -96,8 +134,9 @@ pub async fn push_json_list<T: Serialize>(key: &str, value: &T) -> bool {
     if let Some(mut conn) = get_conn().await
         && let Ok(json) = serde_json::to_string(value)
     {
+        let key = namespaced_key(key);
         let result: Result<i64, _> = redis::cmd("RPUSH")
-            .arg(key)
+            .arg(&key)
             .arg(json)
             .query_async(&mut conn)
             .await;
@@ -110,8 +149,9 @@ pub async fn push_json_list<T: Serialize>(key: &str, value: &T) -> bool {
 // Pop a JSON value from the head of a Redis list.
 pub async fn pop_json_list<T: DeserializeOwned>(key: &str) -> Option<T> {
     let mut conn = get_conn().await?;
+    let key = namespaced_key(key);
     let value: Option<String> = redis::cmd("LPOP")
-        .arg(key)
+        .arg(&key)
         .query_async(&mut conn)
         .await
         .ok()?;
@@ -122,15 +162,16 @@ pub async fn pop_json_list<T: DeserializeOwned>(key: &str) -> Option<T> {
 // Increment a Redis counter and attach TTL on first write.
 pub async fn incr_with_ttl(key: &str, ttl_secs: u64) -> Option<i64> {
     let mut conn = get_conn().await?;
+    let key = namespaced_key(key);
     let value: i64 = redis::cmd("INCR")
-        .arg(key)
+        .arg(&key)
         .query_async(&mut conn)
         .await
         .ok()?;
 
     if value == 1 {
         let _: Result<bool, _> = redis::cmd("EXPIRE")
-            .arg(key)
+            .arg(&key)
             .arg(ttl_secs)
             .query_async(&mut conn)
             .await;

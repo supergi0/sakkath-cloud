@@ -4,10 +4,10 @@
 
 - All Swiss games are 65 minutes.
 - Sunday playoff and placement games are 75 minutes.
-- Swiss games may finish as draws.
-- Sunday playoff and placement games must produce a winner.
-- Teams should begin soft cap procedures early to ensure the game ends within the allotted time. (Soft cap: finish the current point, then play one additional point)
-- A hard stop is called on extension of 10 minutes, play must end immediately regardless of the score.
+- If a point ends after alloted time and teams are,
+    - `not tied`: Game is hard stopped.
+    - `tied`: Teams should play an additional point to decide the winner.
+- It is preferred to use the timer in website or self time games for accuracy.
 
 ## Timeouts
 

@@ -22,11 +22,11 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     let staff = login_staff(&mut harness).await?;
 
     let target_match = harness
-        .get_schedule_matches(0, Some(1), None)
+        .get_schedule_matches(0, None, None)
         .await?
         .into_iter()
-        .find(|match_row| match_row.possession.is_none())
-        .expect("expected an unstarted round-one Open match");
+        .find(|match_row| match_row.match_type > 0 && match_row.match_type < 1000 && match_row.possession.is_none())
+        .expect("expected an unstarted Open Swiss match");
 
     let team_one_poc = login_poc(&mut harness, target_match.t1_id).await?;
     let team_two_poc = login_poc(&mut harness, target_match.t2_id).await?;
@@ -55,12 +55,19 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
     assert_eq!(round_settings.len(), 8);
     let round_one_setting = round_settings
         .iter()
-        .find(|setting| setting.round_key == 1)
-        .expect("round 1 setting should exist");
-    assert_eq!(round_one_setting.label, "Round 1");
+        .find(|setting| setting.round_key == target_match.match_type)
+        .expect("selected round setting should exist");
+    assert_eq!(
+        round_one_setting.label,
+        format!("Round {}", target_match.match_type)
+    );
     if round_one_setting.is_enabled {
         let disabled_round = harness
-            .update_reporting_round_setting(staff.super_admin.as_str(), 1, false)
+            .update_reporting_round_setting(
+                staff.super_admin.as_str(),
+                target_match.match_type,
+                false,
+            )
             .await?;
         assert!(!disabled_round.is_enabled);
     }
@@ -76,14 +83,21 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
         .await?;
 
     let enabled_round = harness
-        .update_reporting_round_setting(staff.super_admin.as_str(), 1, true)
+        .update_reporting_round_setting(
+            staff.super_admin.as_str(),
+            target_match.match_type,
+            true,
+        )
         .await?;
     assert!(enabled_round.is_enabled);
-    assert_eq!(enabled_round.label, "Round 1");
+    assert_eq!(
+        enabled_round.label,
+        format!("Round {}", target_match.match_type)
+    );
 
     let detail = harness.get_match_detail(target_match.id).await?;
     assert_eq!(detail.possession, None);
-    assert_eq!(detail.match_type, 1);
+    assert_eq!(detail.match_type, target_match.match_type);
     assert!(detail.reporting_enabled);
 
     let t1_players = players_for_team(&detail, detail.t1_id);
@@ -250,19 +264,30 @@ pub(crate) async fn run(config: &RunConfig, reporter: &mut ReportWriter) -> Test
 
     let standings = harness.get_standings(0).await?;
     let tracked = tracker.match_state(target_match.id);
+    let tracked_rows = tracker
+        .swiss_summary(0)
+        .into_iter()
+        .map(|row| (row.team_id, row))
+        .collect::<std::collections::HashMap<_, _>>();
     for team_id in [tracked.t1_id, tracked.t2_id] {
         let row = standings
             .iter()
             .find(|row| row.id == team_id)
             .expect("tracked tied team should appear in standings");
-        assert_eq!(row.wins, 0);
-        assert_eq!(row.losses, 0);
+        let tracked_row = tracked_rows
+            .get(&team_id)
+            .expect("tracked team should appear in tracker standings");
+        assert_eq!(row.wins, tracked_row.wins);
+        assert_eq!(row.losses, tracked_row.losses);
+        assert_eq!(row.draws, tracked_row.draws);
+        assert_eq!(row.points_for, tracked_row.points_for);
+        assert_eq!(row.points_against, tracked_row.points_against);
     }
 
     reporter.record_match_result(
         "match-flow",
         0,
-        "Swiss round 1",
+        &format!("Swiss round {}", target_match.match_type),
         target_match.id,
         &tracker,
         "1-1 draw with dual confirmations and both opponent/self spirit rows",

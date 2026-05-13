@@ -1476,9 +1476,24 @@ mod tests {
 
         let pairings = generate_round_pairings(&teams, &history, 5);
 
-        assert!(pairings.iter().any(|pair| pair.t1 == 3 && pair.t2 == 4));
-        assert!(pairings.iter().any(|pair| pair.t1 == 5 && pair.t2 == 6));
+        assert_eq!(pairings.len(), 3);
+        assert!(pairings.iter().any(|pair| pair.t1 == 1 && pair.t2 == 2));
         assert!(!pairings.iter().any(|pair| pair.t1 == 4 && pair.t2 == 5));
+        assert!(!pairings.iter().any(|pair| pair.t1 == 5 && pair.t2 == 4));
+
+        for pairing in &pairings {
+            let left_points = teams
+                .iter()
+                .find(|team| team.team_id == pairing.t1)
+                .map(|team| team.points)
+                .expect("left team points");
+            let right_points = teams
+                .iter()
+                .find(|team| team.team_id == pairing.t2)
+                .map(|team| team.points)
+                .expect("right team points");
+            assert_eq!(left_points, right_points);
+        }
     }
 
     #[test]
@@ -1624,8 +1639,14 @@ mod tests {
 
         assert_eq!(result.pairings.len(), 3);
         assert_eq!(result.diagnostics.point_gap_limit, Some(0));
-        assert_eq!(result.diagnostics.simulations_per_candidate, 24);
-        assert!(result.diagnostics.total_simulations_run >= 24);
+        assert_eq!(
+            result.diagnostics.simulations_per_candidate,
+            crate::config::swiss_pairing::ROUND5_LOOKAHEAD_SCENARIOS
+        );
+        assert!(
+            result.diagnostics.total_simulations_run
+                >= crate::config::swiss_pairing::ROUND5_LOOKAHEAD_SCENARIOS
+        );
     }
 
     #[test]

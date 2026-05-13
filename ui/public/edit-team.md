@@ -32,7 +32,14 @@ The following **do not** count toward the limit:
 - Make sure at least a few players have valid email addresses
 - Use the 3 tracked changes carefully, save them for real roster corrections
 - For any queries, post your questions in the Sakkath Q&A
+
 ## Availability
  
 - Team edits will be locked after the given window, make use of it while it's open.
 - Check edits made throughly before saving, there will be a review process after the window.
+
+---
+
+*Please note, the roster submitted after the edit window will be considered final and locked. Any mismatches between roster and players participating during the tournament may lead to implications on a team's standing, including disqualification*
+
+*Last updated: May 2026*

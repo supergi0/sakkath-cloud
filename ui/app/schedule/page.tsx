@@ -153,6 +153,14 @@ function getSeedLabel(cell: ScheduleGridCell) {
   return `${seedA} v ${seedB}`;
 }
 
+function getSeedOccupancyKey(cell: Pick<ScheduleGridCell, 'division' | 'match_type' | 'seed_ranks' | 'slot_code'>) {
+  const seedLabel = getSeedLabel(cell as ScheduleGridCell);
+  if (cell.division === null || cell.match_type === null || !seedLabel) {
+    return null;
+  }
+  return `${cell.division}:${cell.match_type}:${seedLabel}`;
+}
+
 function isStageBreak(previousRow: ScheduleGridRow | undefined, currentRow: ScheduleGridRow) {
   if (!previousRow) {
     return false;
@@ -419,6 +427,22 @@ export default function SchedulePage() {
     return grouped;
   }, [rows]);
 
+  const occupiedSeedKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of rows) {
+      for (const cell of row.cells) {
+        if (cell.match_id === null) {
+          continue;
+        }
+        const key = getSeedOccupancyKey(cell);
+        if (key) {
+          keys.add(key);
+        }
+      }
+    }
+    return keys;
+  }, [rows]);
+
   const updateDraft = (rowKey: string, field: 'start_time' | 'end_time', value: string) => {
     setDrafts((current) => ({
       ...current,
@@ -506,13 +530,15 @@ export default function SchedulePage() {
 
   const renderCell = (row: ScheduleGridRow, cell: ScheduleGridCell, gapBefore: boolean) => {
     const hasMatch = cell.match_id !== null;
-    const interactive = Boolean(cell.slot_code);
+    const seedLabel = getSeedLabel(cell);
+    const seedOccupancyKey = getSeedOccupancyKey(cell);
+    const movedElsewhere = !hasMatch && seedOccupancyKey !== null && occupiedSeedKeys.has(seedOccupancyKey);
+    const interactive = Boolean(cell.slot_code) && !movedElsewhere;
     const draggable = Boolean(
       isSuperAdmin && isEditMode && hasMatch && cell.movable && cell.division !== null && cell.match_type !== null,
     );
     const droppable = isSuperAdmin && isEditMode && canDropIntoCell(cell);
     const stageLabel = getStageLabel(cell);
-    const seedLabel = getSeedLabel(cell);
     const cellKey = `${row.key}-${cell.field_index}`;
     const t1Id = cell.data?.[0] ?? null;
     const t2Id = cell.data?.[1] ?? null;
@@ -529,7 +555,7 @@ export default function SchedulePage() {
           ? 'border-red-200 bg-red-50 text-gray-900 dark:border-red-900/70 dark:bg-red-950/40 dark:text-white'
           : 'border-emerald-200 bg-emerald-50 text-gray-900 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-white'
       : cell.slot_code
-        ? 'border-dashed border-gray-200 bg-white/80 text-gray-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-400'
+        ? 'border-gray-200 bg-gray-100 text-gray-500 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-400'
         : 'border-transparent bg-transparent text-transparent';
 
     return (
@@ -637,13 +663,48 @@ export default function SchedulePage() {
               </div>
             </div>
           ) : cell.slot_code ? (
-            <div className="mt-3 space-y-1">
-              {seedLabel ? (
-                <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400 sm:text-[10px]">
-                  {seedLabel}
-                </p>
-              ) : null}
-              <p className="text-sm font-medium text-gray-400 dark:text-slate-500">TBD</p>
+            <div className="mt-1.5 space-y-1.5">
+              <div className="space-y-1.5">
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <div className="flex shrink items-center gap-1 overflow-hidden">
+                    <InlineTeamLogo name={null} logo={null} />
+                    <span className="truncate text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-slate-500 sm:text-[11px]">
+                      {movedElsewhere ? 'Moved' : 'TBD'}
+                    </span>
+                  </div>
+                  <span aria-hidden className="shrink-0 text-[12px] font-bold leading-none tabular-nums opacity-0 sm:text-[13px]">
+                    0
+                  </span>
+                </div>
+                <div className="flex min-w-0 items-center justify-between gap-1">
+                  <div className="flex shrink items-center gap-1 overflow-hidden">
+                    <InlineTeamLogo name={null} logo={null} />
+                    <span className="truncate text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-slate-500 sm:text-[11px]">
+                      {movedElsewhere ? 'Elsewhere' : 'TBD'}
+                    </span>
+                  </div>
+                  <span aria-hidden className="shrink-0 text-[12px] font-bold leading-none tabular-nums opacity-0 sm:text-[13px]">
+                    0
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-end justify-between gap-1">
+                <div className="min-w-0 text-[9px] uppercase tracking-wider overflow-hidden">
+                  {seedLabel && !movedElsewhere ? (
+                    <p className="truncate font-semibold text-gray-500 dark:text-slate-400 sm:text-[10px]">{seedLabel}</p>
+                  ) : null}
+                </div>
+                <div className="relative flex shrink-0 items-center opacity-0">
+                  <button
+                    type="button"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    className="flex h-4 w-4 items-center justify-center rounded-full"
+                  >
+                    <span className="h-2.5 w-2.5 rounded-full bg-amber-400" />
+                  </button>
+                </div>
+              </div>
             </div>
           ) : null}
         </div>

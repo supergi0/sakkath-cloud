@@ -6,7 +6,7 @@ use axum::{
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::helpers::{cache, rounds, sorting};
 
@@ -48,6 +48,46 @@ async fn stage_progress(db: &sqlx::SqlitePool, division: i64, match_type: i64) -
     .unwrap_or((0,));
 
     (total.0, completed.0)
+}
+
+async fn stage_match_count_on_connection(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    division: i64,
+    match_type: i64,
+) -> Result<i64, sqlx::Error> {
+    let existing: (i64,) = sqlx::query_as(
+        r#"SELECT COUNT(*)
+           FROM matches m
+           JOIN teams t ON m.t1_id = t.id
+           WHERE t.division = ? AND m.type = ? AND m.deleted_at IS NULL"#,
+    )
+    .bind(division)
+    .bind(match_type)
+    .fetch_one(&mut **conn)
+    .await?;
+
+    Ok(existing.0)
+}
+
+async fn begin_immediate_stage_transaction(
+    db: &sqlx::SqlitePool,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, sqlx::Error> {
+    let mut conn = db.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    Ok(conn)
+}
+
+async fn finish_stage_transaction(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    result: &Result<bool, sqlx::Error>,
+) -> Result<(), sqlx::Error> {
+    if result.is_ok() {
+        sqlx::query("COMMIT").execute(&mut **conn).await?;
+    } else {
+        sqlx::query("ROLLBACK").execute(&mut **conn).await?;
+    }
+
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -209,7 +249,6 @@ struct ScheduleGridMatchRecord {
     id: i64,
     t1_id: i64,
     t2_id: i64,
-    division: i64,
     t1_score: i64,
     t2_score: i64,
     field_id: Option<i64>,
@@ -721,7 +760,7 @@ pub async fn get_schedule_grid(State(state): State<crate::AppState>) -> Json<Sch
     if let Some(cached) = cache::get_schedule_grid_cache::<ScheduleGridResponse>().await {
         return Json(cached);
     }
-    let overrides = load_row_overrides().await;
+    let overrides = load_row_overrides(&state.db).await;
     let rows = build_schedule_rows(&overrides);
     let fields = fetch_field_slots(&state.db).await;
     let grid_matches = fetch_grid_matches(&state.db).await;
@@ -766,7 +805,7 @@ pub async fn update_schedule_row(
         return Err(axum::http::StatusCode::CONFLICT);
     }
 
-    let mut overrides = load_row_overrides().await;
+    let mut overrides = load_row_overrides(&state.db).await;
     let rows = build_schedule_rows(&overrides);
     let row = rows
         .iter()
@@ -804,7 +843,9 @@ pub async fn update_schedule_row(
             end_time: payload.end_time.clone(),
         },
     );
-    save_row_overrides(&overrides).await;
+    save_row_overrides(&state.db, &overrides)
+        .await
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let old_time = row.start_at.format("%Y-%m-%d %H:%M:%S").to_string();
     let new_time = new_start_at.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -848,7 +889,7 @@ pub async fn move_schedule_match(
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     verify_super(&state, &headers).await?;
 
-    let rows = build_schedule_rows(&load_row_overrides().await);
+    let rows = build_schedule_rows(&load_row_overrides(&state.db).await);
     let target_row = rows
         .iter()
         .find(|row| row.key == payload.row_key)
@@ -1393,35 +1434,36 @@ async fn create_playoffs_if_needed(
     db: &sqlx::SqlitePool,
     division: i64,
 ) -> Result<bool, sqlx::Error> {
-    let existing_playoffs: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1001 AND m.deleted_at IS NULL",
-    )
-    .bind(division)
-    .fetch_one(db)
-    .await?;
+    let mut conn = begin_immediate_stage_transaction(db).await?;
+    let result = async {
+        if stage_match_count_on_connection(&mut conn, division, 1001).await? > 0 {
+            return Ok(false);
+        }
 
-    if existing_playoffs.0 > 0 {
-        return Ok(false);
+        let sorted = sorting::get_generation_standings_for_stage(db, division, 1001).await;
+        let playoff_team_count = playoff_bracket_team_count(division, sorted.len());
+        if playoff_team_count == 0 {
+            return Ok(false);
+        }
+
+        let bracket_rounds = rounds::build_playoff_brackets(&sorted[..playoff_team_count]);
+        let Some(playoff_round) = bracket_rounds.iter().find(|round| round.name == "playoffs")
+        else {
+            return Ok(false);
+        };
+
+        let slot_insertions =
+            build_slot_insertions(db, division, 1001, &playoff_round.matches, 0).await?;
+        insert_slot_insertions(&mut conn, 1001, &slot_insertions).await?;
+        Ok(true)
     }
+    .await;
 
-    let sorted = sorting::get_generation_standings_for_stage(db, division, 1001).await;
-    let playoff_team_count = playoff_bracket_team_count(division, sorted.len());
-    if playoff_team_count == 0 {
-        return Ok(false);
+    finish_stage_transaction(&mut conn, &result).await?;
+    if matches!(result, Ok(true)) {
+        cache::invalidate_division(division).await;
     }
-
-    let expected_playoff_matches = (playoff_team_count / 2) as i64;
-    if existing_playoffs.0 >= expected_playoff_matches || existing_playoffs.0 > 0 {
-        return Ok(false);
-    }
-
-    let bracket_rounds = rounds::build_playoff_brackets(&sorted[..playoff_team_count]);
-    let Some(playoff_round) = bracket_rounds.iter().find(|round| round.name == "playoffs") else {
-        return Ok(false);
-    };
-
-    insert_pairings_into_slots(db, division, 1001, &playoff_round.matches).await?;
-    Ok(true)
+    result
 }
 
 async fn fetch_completed_playoff_results(
@@ -1460,73 +1502,124 @@ async fn create_finals_if_needed(
     db: &sqlx::SqlitePool,
     division: i64,
 ) -> Result<bool, sqlx::Error> {
-    let finals_existing: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM matches m JOIN teams t ON m.t1_id = t.id WHERE t.division = ? AND m.type = 1002 AND m.deleted_at IS NULL",
-    )
-    .bind(division)
-    .fetch_one(db)
-    .await?;
+    let mut conn = begin_immediate_stage_transaction(db).await?;
+    let result = async {
+        let existing_finals =
+            stage_match_count_on_connection(&mut conn, division, 1002).await? as usize;
 
-    let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
-    if sorted.len() < 2 {
-        return Ok(false);
-    }
-
-    let playoff_pair_count = playoff_bracket_team_count(division, sorted.len()) / 2;
-    let playoff_stats = stage_progress(db, division, 1001).await;
-    let playoffs_complete = playoff_pair_count == 0
-        || (playoff_stats.0 == playoff_pair_count as i64 && playoff_stats.1 == playoff_stats.0);
-
-    let playoff_results = fetch_completed_playoff_results(db, division).await?;
-    let final_pairings =
-        rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
-
-    if final_pairings.is_empty() {
-        return Ok(false);
-    }
-
-    let ready_direct_pairings = &final_pairings[playoff_pair_count.min(final_pairings.len())..];
-    let existing_finals = finals_existing.0 as usize;
-
-    if existing_finals == final_pairings.len() {
-        return Ok(false);
-    }
-
-    if existing_finals == 0 {
-        if playoffs_complete || playoff_pair_count == 0 {
-            insert_pairings_into_slots(db, division, 1002, &final_pairings).await?;
-            return Ok(true);
-        }
-
-        if ready_direct_pairings.is_empty() {
+        let sorted = sorting::get_generation_standings_for_stage(db, division, 1002).await;
+        if sorted.len() < 2 {
             return Ok(false);
         }
 
-        insert_pairings_into_slots_with_offset(
-            db,
-            division,
-            1002,
-            ready_direct_pairings,
-            playoff_pair_count,
+        let playoff_pair_count = playoff_bracket_team_count(division, sorted.len()) / 2;
+        let playoff_stats = stage_progress(db, division, 1001).await;
+        let playoffs_complete = playoff_pair_count == 0
+            || (playoff_stats.0 == playoff_pair_count as i64 && playoff_stats.1 == playoff_stats.0);
+
+        let playoff_results = fetch_completed_playoff_results(db, division).await?;
+        let final_pairings =
+            rounds::build_final_pairings_from_playoff_results(&sorted, &playoff_results);
+
+        if final_pairings.is_empty() || existing_finals == final_pairings.len() {
+            return Ok(false);
+        }
+
+        let ready_direct_pairings = &final_pairings[playoff_pair_count.min(final_pairings.len())..];
+
+        if existing_finals == 0 {
+            if playoffs_complete || playoff_pair_count == 0 {
+                let slot_insertions =
+                    build_slot_insertions(db, division, 1002, &final_pairings, 0).await?;
+                insert_slot_insertions(&mut conn, 1002, &slot_insertions).await?;
+                return Ok(true);
+            }
+
+            if ready_direct_pairings.is_empty() {
+                return Ok(false);
+            }
+
+            let slot_insertions = build_slot_insertions(
+                db,
+                division,
+                1002,
+                ready_direct_pairings,
+                playoff_pair_count,
+            )
+            .await?;
+            insert_slot_insertions(&mut conn, 1002, &slot_insertions).await?;
+            return Ok(true);
+        }
+
+        if playoffs_complete
+            && playoff_pair_count > 0
+            && existing_finals == ready_direct_pairings.len()
+        {
+            let slot_insertions =
+                build_slot_insertions(db, division, 1002, &final_pairings[..playoff_pair_count], 0)
+                    .await?;
+            insert_slot_insertions(&mut conn, 1002, &slot_insertions).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+    .await;
+
+    finish_stage_transaction(&mut conn, &result).await?;
+    if matches!(result, Ok(true)) {
+        cache::invalidate_division(division).await;
+    }
+    result
+}
+
+async fn insert_slot_insertions(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    match_type: i64,
+    slot_insertions: &[(rounds::Pairing, i64, String)],
+) -> Result<(), sqlx::Error> {
+    for (pairing, field_id, start_time) in slot_insertions {
+        sqlx::query(
+            "INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, ?)",
         )
+        .bind(pairing.t1)
+        .bind(pairing.t2)
+        .bind(*field_id)
+        .bind(start_time)
+        .bind(match_type)
+        .execute(&mut **conn)
         .await?;
-        return Ok(true);
     }
 
-    if playoffs_complete && playoff_pair_count > 0 && existing_finals == ready_direct_pairings.len()
-    {
-        insert_pairings_into_slots_with_offset(
-            db,
-            division,
-            1002,
-            &final_pairings[..playoff_pair_count],
-            0,
-        )
-        .await?;
-        return Ok(true);
+    Ok(())
+}
+
+async fn build_slot_insertions(
+    db: &sqlx::SqlitePool,
+    division: i64,
+    match_type: i64,
+    pairings: &[rounds::Pairing],
+    slot_offset: usize,
+) -> Result<Vec<(rounds::Pairing, i64, String)>, sqlx::Error> {
+    let slots = get_slot_assignments(db, division, match_type).await?;
+    if slot_offset > slots.len() || pairings.len() + slot_offset > slots.len() {
+        return Err(sqlx::Error::Protocol(format!(
+            "not enough fixed schedule slots for division {division} type {match_type}: {} pairings for {} slots",
+            pairings.len() + slot_offset,
+            slots.len()
+        )));
     }
 
-    Ok(false)
+    let scheduled_pairings = {
+        let mut rng = rand::rng();
+        arrange_pairings_for_slots(pairings, match_type, &mut rng)
+    };
+
+    Ok(scheduled_pairings
+        .into_iter()
+        .zip(slots.into_iter().skip(slot_offset))
+        .map(|(pairing, (field_id, start_time))| (pairing, field_id, start_time))
+        .collect())
 }
 
 async fn insert_pairings_into_slots(
@@ -1545,24 +1638,10 @@ async fn insert_pairings_into_slots_with_offset(
     pairings: &[rounds::Pairing],
     slot_offset: usize,
 ) -> Result<(), sqlx::Error> {
-    let slots = get_slot_assignments(db, division, match_type).await?;
-    if slot_offset > slots.len() || pairings.len() + slot_offset > slots.len() {
-        return Err(sqlx::Error::Protocol(format!(
-            "not enough fixed schedule slots for division {division} type {match_type}: {} pairings for {} slots",
-            pairings.len() + slot_offset,
-            slots.len()
-        )));
-    }
+    let slot_insertions =
+        build_slot_insertions(db, division, match_type, pairings, slot_offset).await?;
 
-    let scheduled_pairings = {
-        let mut rng = rand::rng();
-        arrange_pairings_for_slots(pairings, match_type, &mut rng)
-    };
-
-    for (pairing, (field_id, start_time)) in scheduled_pairings
-        .iter()
-        .zip(slots.iter().skip(slot_offset))
-    {
+    for (pairing, field_id, start_time) in &slot_insertions {
         sqlx::query(
             "INSERT INTO matches (t1_id, t2_id, field_id, time, type) VALUES (?, ?, ?, ?, ?)",
         )
@@ -1604,7 +1683,7 @@ async fn get_slot_assignments(
     division: i64,
     match_type: i64,
 ) -> Result<Vec<(i64, String)>, sqlx::Error> {
-    let rows = build_schedule_rows(&load_row_overrides().await);
+    let rows = build_schedule_rows(&load_row_overrides(db).await);
     let fields = fetch_field_slots(db).await;
     if fields.len() < FIELD_COUNT {
         return Err(sqlx::Error::Protocol(
@@ -2338,7 +2417,7 @@ async fn fetch_field_slots(db: &sqlx::SqlitePool) -> Vec<FieldSlot> {
 
 async fn fetch_grid_matches(db: &sqlx::SqlitePool) -> Vec<ScheduleGridMatchRecord> {
     sqlx::query_as::<_, ScheduleGridMatchRecord>(
-        r#"SELECT m.id, m.t1_id, m.t2_id, t1.division as division,
+        r#"SELECT m.id, m.t1_id, m.t2_id,
                              m.t1_score, m.t2_score,
                              m.field_id, COALESCE(m.time, '') as time,
                m.possession, m.stream_url, m.type as match_type
@@ -2360,17 +2439,11 @@ fn materialize_grid(
     rank_snapshots: &HashMap<(i64, i64), HashMap<i64, i64>>,
 ) -> Vec<ScheduleGridRow> {
     let mut exact_matches = HashMap::new();
-    let mut fallback_matches: HashMap<(i64, i64), VecDeque<ScheduleGridMatchRecord>> =
-        HashMap::new();
 
     for record in matches {
         if let Some(field_id) = record.field_id {
             exact_matches.insert((record.time.clone(), field_id), record.clone());
         }
-        fallback_matches
-            .entry((record.division, record.match_type))
-            .or_default()
-            .push_back(record);
     }
 
     let mut grid_rows = Vec::new();
@@ -2397,15 +2470,7 @@ fn materialize_grid(
             });
 
             let matched = match (field, slot_template) {
-                (Some(field), Some(slot)) => {
-                    if let Some(record) = exact_matches.remove(&(row_time.clone(), field.id)) {
-                        Some(record)
-                    } else {
-                        fallback_matches
-                            .get_mut(&(slot.division, slot.match_type))
-                            .and_then(|records| pop_unassigned(records, &row_time, field.id))
-                    }
-                }
+                (Some(field), Some(_slot)) => exact_matches.remove(&(row_time.clone(), field.id)),
                 _ => None,
             };
 
@@ -2474,29 +2539,71 @@ fn materialize_grid(
     grid_rows
 }
 
-fn pop_unassigned(
-    records: &mut VecDeque<ScheduleGridMatchRecord>,
-    row_time: &str,
-    field_id: i64,
-) -> Option<ScheduleGridMatchRecord> {
-    if let Some(position) = records
-        .iter()
-        .position(|record| record.time == row_time && record.field_id == Some(field_id))
+#[derive(sqlx::FromRow)]
+struct RowTimeOverrideRecord {
+    row_key: String,
+    start_time: String,
+    end_time: String,
+}
+
+async fn load_row_overrides(db: &sqlx::SqlitePool) -> HashMap<String, RowTimeOverride> {
+    if let Some(cached) =
+        cache::get::<HashMap<String, RowTimeOverride>>(ROW_OVERRIDE_CACHE_KEY).await
     {
-        return records.remove(position);
+        return cached;
     }
 
-    records.pop_front()
+    let rows = sqlx::query_as::<_, RowTimeOverrideRecord>(
+        r#"SELECT row_key, start_time, end_time
+           FROM schedule_row_overrides
+           ORDER BY row_key ASC"#,
+    )
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let overrides: HashMap<String, RowTimeOverride> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.row_key,
+                RowTimeOverride {
+                    start_time: row.start_time,
+                    end_time: row.end_time,
+                },
+            )
+        })
+        .collect();
+
+    cache::set(ROW_OVERRIDE_CACHE_KEY, &overrides, ROW_OVERRIDE_TTL_SECONDS).await;
+    overrides
 }
 
-async fn load_row_overrides() -> HashMap<String, RowTimeOverride> {
-    cache::get::<HashMap<String, RowTimeOverride>>(ROW_OVERRIDE_CACHE_KEY)
-        .await
-        .unwrap_or_default()
-}
+async fn save_row_overrides(
+    db: &sqlx::SqlitePool,
+    overrides: &HashMap<String, RowTimeOverride>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
 
-async fn save_row_overrides(overrides: &HashMap<String, RowTimeOverride>) {
+    sqlx::query("DELETE FROM schedule_row_overrides")
+        .execute(&mut *tx)
+        .await?;
+
+    for (row_key, override_value) in overrides {
+        sqlx::query(
+            r#"INSERT INTO schedule_row_overrides (row_key, start_time, end_time, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)"#,
+        )
+        .bind(row_key)
+        .bind(&override_value.start_time)
+        .bind(&override_value.end_time)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     cache::set(ROW_OVERRIDE_CACHE_KEY, overrides, ROW_OVERRIDE_TTL_SECONDS).await;
+    Ok(())
 }
 
 fn parse_clock(value: &str) -> Option<NaiveTime> {

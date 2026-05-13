@@ -11,8 +11,8 @@ pub mod swiss_pairing {
     pub const LATE_ROUND_BAND_RADIUS: usize = 3;
     pub const LATE_ROUND_BAND_WEIGHT: i64 = 10;
 
-    pub const ROUND5_LOOKAHEAD_SCENARIOS: usize = 36;
-    pub const ROUND6_LOOKAHEAD_SCENARIOS: usize = 36;
+    pub const ROUND5_LOOKAHEAD_SCENARIOS: usize = 72;
+    pub const ROUND6_LOOKAHEAD_SCENARIOS: usize = 72;
 
     pub const LOOKAHEAD_CANDIDATE_LIMIT: usize = 192;
     pub const LOOKAHEAD_EXPLORATION_LIMIT: usize = 384;

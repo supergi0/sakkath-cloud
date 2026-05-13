@@ -154,6 +154,17 @@ async fn create_match_indexes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_matches_field_time ON matches(field_id, time)")
         .execute(pool)
         .await?;
+    sqlx::query(
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_active_stage_pair
+           ON matches(
+               type,
+               CASE WHEN t1_id < t2_id THEN t1_id ELSE t2_id END,
+               CASE WHEN t1_id < t2_id THEN t2_id ELSE t1_id END
+           )
+           WHERE deleted_at IS NULL"#,
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -699,6 +710,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             round_key INTEGER PRIMARY KEY,
             label VARCHAR(64) NOT NULL,
             is_enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS schedule_row_overrides (
+            row_key VARCHAR(64) PRIMARY KEY,
+            start_time VARCHAR(5) NOT NULL,
+            end_time VARCHAR(5) NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,

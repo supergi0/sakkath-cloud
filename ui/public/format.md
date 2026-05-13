@@ -20,12 +20,13 @@ Standings are driven by Swiss points:
 
 When teams are tied on points, the following tie-breaker criteria are applied in order:
 
-- `c1`: Head-to-head result between the two tied teams
-- `c2`: Median Buchholz (Strength of opponents faced)
-- `c3`: Goal difference
-- `c4`: Goals scored
-- `c5`: Momentum score (e.g. WWLL ranks higher than LLWW)
-- `c6`: Random allocation
+- `c1`: Head-to-head (if all tied teams played against each other)
+- `c2`: Median Buchholz (Strength of opponents removing the extreme ends)
+- `c3`: Normal Buchholz (Strength of opponents)
+- `c4`: Goal difference
+- `c5`: Goals scored
+- `c6`: Momentum score (Early wins rank higher than later wins)
+- `c7`: Random allocation
 
 ## Playoffs
 
@@ -49,5 +50,9 @@ When teams are tied on points, the following tie-breaker criteria are applied in
 
 - All Swiss games are 65 mins, with a 15-minute break between scheduled starts.
 - Sunday playoff and placement games are 75 mins.
-- Swiss games may finish as draws.
-- Sunday playoff and placement games must finish with a winner.
+
+--
+
+*Logistics Notes: We will be streamin on G1 and G2. However match assignments(which team plays which ground) is random. Additionally we can't predict or assign which teams will play under floodlight, as this depends on factors beyond our control. Please don't reach out to organizers with requests for these*
+
+*Last updated: May 2026*
