@@ -1841,7 +1841,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday_start,
             friday_end,
             "14:00",
-            "15:00",
+            "15:05",
             vec![
                 open_slot(1, 2, 4),
                 open_slot(2, 2, 5),
@@ -1874,8 +1874,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "16:50",
-            "17:55",
+            "16:40",
+            "17:45",
             vec![
                 women_slot(1, 3, 1),
                 women_slot(2, 3, 2),
@@ -1891,8 +1891,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "18:10",
-            "19:15",
+            "18:00",
+            "19:05",
             vec![
                 open_slot(1, 3, 1),
                 women_slot(2, 3, 5),
@@ -1908,8 +1908,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "19:30",
-            "20:35",
+            "19:20",
+            "20:25",
             vec![
                 open_slot(1, 3, 4),
                 open_slot(2, 3, 5),
@@ -1925,8 +1925,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             friday,
             friday_start,
             friday_end,
-            "20:50",
-            "21:55",
+            "20:40",
+            "21:45",
             vec![
                 open_slot(1, 3, 8),
                 open_slot(2, 3, 9),
@@ -2045,7 +2045,7 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday_start,
             saturday_end,
             "14:00",
-            "15:00",
+            "15:05",
             vec![
                 open_slot(1, 5, 4),
                 open_slot(2, 5, 5),
@@ -2078,8 +2078,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "16:50",
-            "17:55",
+            "16:40",
+            "17:45",
             vec![
                 women_slot(1, 6, 1),
                 women_slot(2, 6, 2),
@@ -2095,8 +2095,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "18:10",
-            "19:15",
+            "18:00",
+            "19:05",
             vec![
                 open_slot(1, 6, 1),
                 open_slot(2, 6, 2),
@@ -2112,8 +2112,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "19:30",
-            "20:35",
+            "19:20",
+            "20:25",
             vec![
                 open_slot(1, 6, 4),
                 open_slot(2, 6, 5),
@@ -2129,8 +2129,8 @@ fn build_schedule_rows(overrides: &HashMap<String, RowTimeOverride>) -> Vec<RowT
             saturday,
             saturday_start,
             saturday_end,
-            "20:50",
-            "21:55",
+            "20:40",
+            "21:45",
             vec![
                 open_slot(1, 6, 8),
                 open_slot(2, 6, 9),
@@ -2774,6 +2774,49 @@ mod tests {
                 5
             );
         }
+    }
+
+    #[test]
+    fn friday_and_saturday_late_round_rows_keep_sixty_five_minute_games_and_fifteen_minute_gaps() {
+        let rows = build_schedule_rows(&HashMap::new());
+
+        let row = |key: &str| {
+            rows.iter()
+                .find(|candidate| candidate.key == key)
+                .unwrap_or_else(|| panic!("missing row {key}"))
+        };
+
+        assert_eq!(row("fri-r2-c").start_at.format("%H:%M").to_string(), "14:00");
+        assert_eq!(row("fri-r2-c").end_at.format("%H:%M").to_string(), "15:05");
+        assert_eq!(row("fri-r2-c").duration_minutes, 65);
+        assert_eq!(row("fri-r3-a").start_at.format("%H:%M").to_string(), "16:40");
+        assert_eq!(row("fri-r3-a").end_at.format("%H:%M").to_string(), "17:45");
+        assert_eq!(row("fri-r3-b").start_at.format("%H:%M").to_string(), "18:00");
+        assert_eq!(row("fri-r3-c").start_at.format("%H:%M").to_string(), "19:20");
+        assert_eq!(row("fri-r3-d").start_at.format("%H:%M").to_string(), "20:40");
+        assert_eq!(
+            row("fri-r3-a")
+                .start_at
+                .signed_duration_since(row("fri-r2-d").end_at)
+                .num_minutes(),
+            15
+        );
+
+        assert_eq!(row("sat-r5-c").start_at.format("%H:%M").to_string(), "14:00");
+        assert_eq!(row("sat-r5-c").end_at.format("%H:%M").to_string(), "15:05");
+        assert_eq!(row("sat-r5-c").duration_minutes, 65);
+        assert_eq!(row("sat-r6-a").start_at.format("%H:%M").to_string(), "16:40");
+        assert_eq!(row("sat-r6-a").end_at.format("%H:%M").to_string(), "17:45");
+        assert_eq!(row("sat-r6-b").start_at.format("%H:%M").to_string(), "18:00");
+        assert_eq!(row("sat-r6-c").start_at.format("%H:%M").to_string(), "19:20");
+        assert_eq!(row("sat-r6-d").start_at.format("%H:%M").to_string(), "20:40");
+        assert_eq!(
+            row("sat-r6-a")
+                .start_at
+                .signed_duration_since(row("sat-r5-d").end_at)
+                .num_minutes(),
+            15
+        );
     }
 
     #[test]
