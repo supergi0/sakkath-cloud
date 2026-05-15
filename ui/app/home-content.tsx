@@ -29,8 +29,9 @@ interface TeamStanding {
   wins: number;
   losses: number;
   draws: number;
-  points_for: number;
-  points_against: number;
+  median_buchholz: number;
+  buchholz: number;
+  diff: number;
   spirit_avg: number;
   small_logo?: string | null;
 }
@@ -79,6 +80,8 @@ const STANDINGS_COLUMN_CLASSES = {
   wins: 'w-[46px] min-w-[46px]',
   losses: 'w-[46px] min-w-[46px]',
   draws: 'w-[46px] min-w-[46px]',
+  mbh: 'w-[56px] min-w-[56px]',
+  nbh: 'w-[56px] min-w-[56px]',
   diff: 'w-[60px] min-w-[60px]',
   spirit: 'w-[72px] min-w-[72px]',
 } as const;
@@ -151,7 +154,7 @@ export function HomeContent() {
           diff = a.losses - b.losses;
           break;
         case 'diff':
-          diff = (a.points_for - a.points_against) - (b.points_for - b.points_against);
+          diff = a.diff - b.diff;
           break;
         case 'spirit':
           diff = a.spirit_avg - b.spirit_avg;
@@ -355,7 +358,7 @@ export function HomeContent() {
               ref={headerScrollRef}
               className="mt-3 -mb-3 -mx-4 px-4 pt-2 overflow-hidden border-t border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-900"
             >
-              <div className="flex w-full min-w-[528px] text-sm font-medium text-gray-500 dark:text-gray-400">
+              <div className="flex w-full min-w-[640px] text-sm font-medium text-gray-500 dark:text-gray-400">
                 <div className={`${STANDINGS_COLUMN_CLASSES.rank} shrink-0 px-1 pb-1 text-left`}>
                   {renderSortButton('rank', '#')}
                 </div>
@@ -374,6 +377,12 @@ export function HomeContent() {
                 <div className={`${STANDINGS_COLUMN_CLASSES.draws} shrink-0 px-1 pb-1 text-center`}>
                   <span className="inline-flex items-center justify-center whitespace-nowrap">D</span>
                 </div>
+                <div className={`${STANDINGS_COLUMN_CLASSES.mbh} shrink-0 px-1 pb-1 text-center`}>
+                  <span className="inline-flex items-center justify-center whitespace-nowrap">MOS</span>
+                </div>
+                <div className={`${STANDINGS_COLUMN_CLASSES.nbh} shrink-0 px-1 pb-1 text-center`}>
+                  <span className="inline-flex items-center justify-center whitespace-nowrap">NOS</span>
+                </div>
                 <div className={`${STANDINGS_COLUMN_CLASSES.diff} shrink-0 px-1 pb-1 text-center`}>
                   {renderSortButton('diff', 'Diff', 'center')}
                 </div>
@@ -385,7 +394,7 @@ export function HomeContent() {
           </div>
 
           <div className="overflow-x-auto" ref={tableScrollRef} onScroll={handleTableScroll}>
-            <table className="w-full min-w-[528px] table-fixed text-sm sm:min-w-[640px]">
+            <table className="w-full min-w-[640px] table-fixed text-sm">
               <colgroup>
                 <col className={STANDINGS_COLUMN_CLASSES.rank} />
                 <col className={STANDINGS_COLUMN_CLASSES.team} />
@@ -393,8 +402,8 @@ export function HomeContent() {
                 <col className={STANDINGS_COLUMN_CLASSES.wins} />
                 <col className={STANDINGS_COLUMN_CLASSES.losses} />
                 <col className={STANDINGS_COLUMN_CLASSES.draws} />
-                <col className="hidden md:table-column w-10" />
-                <col className="hidden md:table-column w-10" />
+                <col className={STANDINGS_COLUMN_CLASSES.mbh} />
+                <col className={STANDINGS_COLUMN_CLASSES.nbh} />
                 <col className={STANDINGS_COLUMN_CLASSES.diff} />
                 <col className={STANDINGS_COLUMN_CLASSES.spirit} />
               </colgroup>
@@ -418,8 +427,12 @@ export function HomeContent() {
                   <th className={`${STANDINGS_COLUMN_CLASSES.draws} px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:px-2`}>
                     <span className="inline-flex items-center justify-center whitespace-nowrap">D</span>
                   </th>
-                  <th className="hidden w-9 px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 md:table-cell md:px-2">PF</th>
-                  <th className="hidden w-9 px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 md:table-cell md:px-2">PA</th>
+                  <th className={`${STANDINGS_COLUMN_CLASSES.mbh} px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:px-2`}>
+                    <span className="inline-flex items-center justify-center whitespace-nowrap">MBH</span>
+                  </th>
+                  <th className={`${STANDINGS_COLUMN_CLASSES.nbh} px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:px-2`}>
+                    <span className="inline-flex items-center justify-center whitespace-nowrap">NBH</span>
+                  </th>
                   <th className={`${STANDINGS_COLUMN_CLASSES.diff} px-1 py-3 text-center font-medium text-gray-500 dark:text-gray-400 sm:px-2`}>
                     {renderSortButton('diff', 'Diff', 'center')}
                   </th>
@@ -430,7 +443,7 @@ export function HomeContent() {
               </thead>
               <tbody>
                 {!loading && currentStandings.map((team) => {
-                  const diff = team.points_for - team.points_against;
+                  const diff = team.diff;
                   const initial = team.name.charAt(0).toUpperCase();
                   const displayName = getDisplayTeamName(team);
 
@@ -466,11 +479,11 @@ export function HomeContent() {
                       <td className={`${STANDINGS_COLUMN_CLASSES.draws} px-1 py-3 text-center sm:px-2`}>
                         <Text variant="primary">{team.draws}</Text>
                       </td>
-                      <td className="hidden px-1 py-3 text-center md:table-cell md:px-2">
-                        <Text variant="primary">{team.points_for}</Text>
+                      <td className={`${STANDINGS_COLUMN_CLASSES.mbh} px-1 py-3 text-center sm:px-2`}>
+                        <Text variant="primary">{team.median_buchholz}</Text>
                       </td>
-                      <td className="hidden px-1 py-3 text-center md:table-cell md:px-2">
-                        <Text variant="primary">{team.points_against}</Text>
+                      <td className={`${STANDINGS_COLUMN_CLASSES.nbh} px-1 py-3 text-center sm:px-2`}>
+                        <Text variant="primary">{team.buchholz}</Text>
                       </td>
                       <td className={`${STANDINGS_COLUMN_CLASSES.diff} px-1 py-3 text-center font-medium sm:px-2 ${diff > 0 ? 'text-green-500' : diff < 0 ? 'text-red-500' : 'text-gray-900 dark:text-white'}`}>
                         {diff > 0 ? '+' : ''}{diff}

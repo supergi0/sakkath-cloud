@@ -17,7 +17,7 @@ After Swiss:
 
 The Swiss generator is trying to do three things at the same time:
 
-- keep teams against nearby records
+- keep teams with same records nearby
 - avoid Swiss rematches
 - make the late-round cut lines more meaningful
 
@@ -95,7 +95,7 @@ The current late-round pipeline is:
 1. find the smallest legal points-gap rule
 2. explore up to 384 full no-rematch candidates
 3. keep the top 192 candidates by Swiss shape and boundary usefulness
-4. simulate 36 deterministic futures for each kept candidate
+4. simulate 72 deterministic futures for each kept candidate
 
 Those futures focus on the reported cut-line pairs:
 

@@ -58,8 +58,9 @@ pub struct TeamStanding {
     pub wins: i64,
     pub losses: i64,
     pub draws: i64,
-    pub points_for: i64,
-    pub points_against: i64,
+    pub median_buchholz: i64,
+    pub buchholz: i64,
+    pub diff: i64,
     pub spirit_avg: f64,
     pub small_logo: Option<String>,
 }
@@ -307,8 +308,9 @@ pub async fn get_standings(
             wins: t.wins,
             losses: t.losses,
             draws: t.draws,
-            points_for: t.points_for,
-            points_against: t.points_against,
+            median_buchholz: sorting::median_buchholz_value(t, &sorted),
+            buchholz: sorting::buchholz_value(t, &sorted),
+            diff: t.points_for - t.points_against,
             spirit_avg: t.spirit_avg,
             small_logo: t.small_logo.clone(),
         })

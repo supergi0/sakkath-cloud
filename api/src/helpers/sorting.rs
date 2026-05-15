@@ -576,10 +576,8 @@ fn collect_point_tie_groups(teams: &[TeamSortData]) -> Vec<Vec<&TeamSortData>> {
 // C3: Median Buchholz score - sum of opponent swiss points after dropping
 // the highest and lowest opponent totals when at least three exist.
 pub fn c3_median_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
-    let points_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.points)).collect();
-
-    let a_buch = median_buchholz_score(a, &points_map);
-    let b_buch = median_buchholz_score(b, &points_map);
+    let a_buch = median_buchholz_value(a, all);
+    let b_buch = median_buchholz_value(b, all);
 
     b_buch.cmp(&a_buch)
 }
@@ -606,12 +604,20 @@ fn median_buchholz_score(team: &TeamSortData, points_map: &HashMap<i64, i64>) ->
     }
 }
 
+pub fn median_buchholz_value(team: &TeamSortData, all: &[TeamSortData]) -> i64 {
+    let points_map: HashMap<i64, i64> = all.iter().map(|entry| (entry.team_id, entry.points)).collect();
+    median_buchholz_score(team, &points_map)
+}
+
+pub fn buchholz_value(team: &TeamSortData, all: &[TeamSortData]) -> i64 {
+    let points_map: HashMap<i64, i64> = all.iter().map(|entry| (entry.team_id, entry.points)).collect();
+    buchholz_score(team, &points_map)
+}
+
 // C4: Full Buchholz score - sum of all opponent swiss points.
 pub fn c4_buchholz(a: &TeamSortData, b: &TeamSortData, all: &[TeamSortData]) -> Ordering {
-    let points_map: HashMap<i64, i64> = all.iter().map(|t| (t.team_id, t.points)).collect();
-
-    let a_buch = buchholz_score(a, &points_map);
-    let b_buch = buchholz_score(b, &points_map);
+    let a_buch = buchholz_value(a, all);
+    let b_buch = buchholz_value(b, all);
 
     b_buch.cmp(&a_buch)
 }
