@@ -203,11 +203,9 @@ async fn run_mock_database(database_url: &str, request: helpers::mock_seed::Mock
 async fn main() {
     dotenv::dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // Holds OTel logger/meter providers alive for the process lifetime.
+    // Dropping this flushes all pending batches to Grafana on shutdown.
+    let _otel = telemetry::init_otel();
 
     let release_mode = std::env::var("release")
         .unwrap_or_else(|_| "false".to_string())
